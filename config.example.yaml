@@ -12,7 +12,8 @@ runtime:
 
 data:
   # ResearchEngine 只读使用外部行情目录；不要把 marketdata 复制进本仓库。
-  dir: /data/marketdata
+  # 从本仓库启动时，对应上级 project 目录中的 marketdata。
+  dir: ../marketdata
   manifest: data_manifest.yaml
   # 必须与 data_manifest.yaml 的 data_version 一致；数据发布切换时人工更新。
   expected_version: ifind-sync-20260917-093723

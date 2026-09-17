@@ -189,7 +189,7 @@ def _from_manager(manager: ConfigManager, config_path: Path) -> RuntimeSettings:
     data_dir = _path(
         data.get("dir", manager.get("data_dir")),
         base=base_dir,
-        default=base_dir / "marketdata",
+        default=base_dir.parent / "marketdata",
     )
     manifest_value = data.get(
         "manifest",

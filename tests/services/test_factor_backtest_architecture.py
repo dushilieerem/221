@@ -149,7 +149,7 @@ def test_default_asset_and_data_paths_survive_package_moves(monkeypatch):
 
     for variable in ("SVQUANT_DATA_DIR", "SVQUANT_FACTOR_DIR", "SVQUANT_STRATEGY_DIR"):
         monkeypatch.delenv(variable, raising=False)
-    assert default_market_data_dir() == ROOT / "marketdata"
+    assert default_market_data_dir() == ROOT.parent / "marketdata"
     assert factor_database_path() == ROOT / "app/assets/factors/factor_library.db"
     assert factor_tool_path() == ROOT / "app/assets/factors/tool.py"
     assert strategy_library_dir() == ROOT / "app/assets/strategies/libraries"

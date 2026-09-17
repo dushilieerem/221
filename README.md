@@ -34,6 +34,7 @@ cp config.example.yaml config.yaml
 然后编辑根目录 `config.yaml`：
 
 - `data.dir` 指向外部只读行情目录；行情目录不属于本仓库，也不要复制到仓库内。
+  当前工作区可直接使用 `../marketdata`，部署到其他机器时改为实际路径。
 - `data_manifest.yaml` 必须位于该目录，并包含 `schema_version`、`data_version`、资产路径和
   SHA-256 声明。
 - `data.expected_version` 必须与清单中的 `data_version` 一致。切换数据发布时，先人工确认
