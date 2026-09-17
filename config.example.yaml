@@ -1,0 +1,58 @@
+# 部署步骤：cp config.example.yaml config.yaml，然后按实际部署环境填写。
+# config.yaml 已加入 .gitignore，不提交真实路径和敏感信息。
+
+server:
+  host: 0.0.0.0
+  port: 9527
+
+runtime:
+  max_workers: 2
+  max_queue_size: 8
+  log_level: INFO
+
+data:
+  # ResearchEngine 只读使用外部行情目录；不要把 marketdata 复制进本仓库。
+  dir: /data/marketdata
+  manifest: data_manifest.yaml
+  # 必须与 data_manifest.yaml 的 data_version 一致；数据发布切换时人工更新。
+  expected_version: ifind-sync-20260917-093723
+  # 如需逐文件校验 SHA-256，改为 true；默认使用 expected_version 快速校验。
+  verify_hashes: false
+  # 可选：对清单文件本身做 SHA-256 校验。
+  # expected_manifest_sha256: null
+
+assets:
+  factor_database: ./app/assets/factors/factor_library.db
+  factor_tool: ./app/assets/factors/tool.py
+  factor_dir: ./app/assets/factors/libraries
+  factor_index: ./app/assets/factors/index.yaml
+  strategy_dir: ./app/assets/strategies/libraries
+  strategy_index: ./app/assets/strategies/index.yaml
+
+cache:
+  enabled: true
+  dir: ./.runtime/backtest-cache
+  ttl_days: 30
+  max_bytes: 10737418240
+
+storage:
+  factor_backtest_database: ./app/assets/factors/factor_backtest.db
+  output_path: ./output
+
+# 以下是回测默认参数，HTTP 请求仍以 API schema 约定为准。
+benchmark: CSI500
+rebalance: daily
+stock_num: 100
+n_groups: 5
+long_short: false
+ic_horizon: 1
+periods_per_year: 252
+commission: 0.0003
+slippage: 0.001
+
+backtest:
+  engine: native
+  initial_capital: 1000000
+
+compute_backend: python
+result_format: parquet

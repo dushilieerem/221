@@ -1,0 +1,21 @@
+# 人工填写的部署配置，不提交真实路径或凭据。
+config.yaml
+
+# 运行时目录和可再生结果。
+logs/
+run/
+.runtime/
+output/
+
+# 外部行情数据不得复制进 ResearchEngine 仓库。
+marketdata/
+
+# Python / 测试 / 构建产物。
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+.ruff_cache/
+*.egg-info/
+dist/
+build/

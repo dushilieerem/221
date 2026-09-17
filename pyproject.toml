@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "researchengine"
+version = "0.1.0"
+description = "ResearchEngine 独立量化投研服务"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+license = { text = "MIT" }
+authors = [{ name = "SVQuant" }]
+dependencies = [
+    "pandas>=2.0",
+    "numpy>=1.24",
+    "PyYAML>=6.0",
+    "matplotlib>=3.7",
+    "pyarrow>=14.0",
+]
+
+[project.optional-dependencies]
+akshare = ["akshare>=1.10"]
+clickhouse = ["clickhouse-driver>=0.2"]
+numba = ["numba>=0.58"]
+api = ["fastapi>=0.110", "uvicorn>=0.29"]
+test = ["pytest>=7.0"]
+all = [
+    "akshare>=1.10",
+    "clickhouse-driver>=0.2",
+    "numba>=0.58",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+]
+dev = [
+    "pytest>=7.0",
+]
+
+[project.scripts]
+researchengine-factor-backtest-batch = "app.cli.factor_backtest_batch:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+[tool.setuptools.package-data]
+app = [
+    "assets/**/*.yaml",
+    "assets/**/*.py",
+    "assets/**/*.md",
+    "assets/**/*.db",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
