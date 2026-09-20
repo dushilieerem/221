@@ -349,14 +349,95 @@ class FieldParquetProvider(IDataProvider):
         """将供应商交易所代码归一为平台既有的六位代码。"""
         return str(symbol).split(".", 1)[0]
 
+    def _select_combined_columns(
+        self,
+        columns: list[tuple[str, str]],
+        symbols: Sequence[str],
+    ) -> list[tuple[str, str, str]]:
+        """按请求顺序选择合并宽表中的物理列。
+
+        iFinD 文件里的标的是交易所代码，而 ResearchEngine 内部通常使用六位
+        代码。这里同时支持精确匹配和去掉交易所后缀后的匹配，并保留请求代码，
+        让上层最终得到稳定的列顺序；未命中的标的由 ``_get_field_view`` 补成
+        全 NaN 列。
+        """
+
+        exact = {str(symbol): (name, symbol) for name, symbol in columns}
+        by_base: dict[str, tuple[str, str]] = {}
+        for name, symbol in columns:
+            by_base.setdefault(self._standard_symbol(symbol), (name, symbol))
+
+        selected: list[tuple[str, str, str]] = []
+        seen_physical: set[str] = set()
+        for requested in symbols:
+            requested = str(requested)
+            match = exact.get(requested) or by_base.get(
+                self._standard_symbol(requested)
+            )
+            if match is None or match[0] in seen_physical:
+                continue
+            physical_name, physical_symbol = match
+            selected.append((physical_name, physical_symbol, requested))
+            seen_physical.add(physical_name)
+        return selected
+
+    @staticmethod
+    def _parquet_index_column(path: Path) -> str:
+        """从 schema 判断普通宽表的索引列，不触发行数据读取。"""
+
+        names = _read_schema_cached(path).names
+        if "datetime" in names:
+            return "datetime"
+        if "__index_level_0__" in names:
+            return "__index_level_0__"
+        return names[0]
+
     # -- 读单个字段（绕过 categorical 元数据）--
-    def _read_field(self, field: str) -> pd.DataFrame:
-        key = ("field", self._cache_namespace, field)
+    def _read_field(
+        self,
+        field: str,
+        symbols: Optional[Sequence[str]] = None,
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+        *,
+        cache: bool = True,
+    ) -> pd.DataFrame:
+        symbol_key = None if symbols is None else tuple(str(symbol) for symbol in symbols)
+        start_key = None if start is None else str(pd.Timestamp(start))
+        end_key = None if end is None else str(pd.Timestamp(end))
+        key = ("field", self._cache_namespace, field, symbol_key, start_key, end_key)
+
+        def date_filters(path: Path, index_column: str):
+            filters = []
+            import pyarrow as pa
+
+            index_type = _read_schema_cached(path).field(index_column).type
+            is_string_date = pa.types.is_string(index_type) or pa.types.is_large_string(index_type)
+
+            def value(value: str):
+                timestamp = pd.Timestamp(value)
+                return (
+                    timestamp.date().isoformat()
+                    if is_string_date
+                    else timestamp.to_pydatetime()
+                )
+
+            if start is not None:
+                filters.append((index_column, ">=", value(start)))
+            if end is not None:
+                filters.append((index_column, "<=", value(end)))
+            return filters or None
 
         def load() -> pd.DataFrame:
             if field in self._derived_fields:
                 source_field = self._derived_fields[field]
-                source = self._read_field(source_field)
+                source = self._read_field(
+                    source_field,
+                    symbols=symbols,
+                    start=start,
+                    end=end,
+                    cache=cache,
+                )
                 return source
 
             import pyarrow.parquet as pq
@@ -364,34 +445,67 @@ class FieldParquetProvider(IDataProvider):
             path = self._field_files[field]
             if field in self._combined_columns:
                 columns = self._combined_columns[field]
-                names = [name for name, _ in columns]
+                if symbols is None:
+                    selected = [
+                        (name, physical_symbol, self._standard_symbol(physical_symbol))
+                        for name, physical_symbol in columns
+                    ]
+                else:
+                    selected = self._select_combined_columns(columns, symbol_key)
                 index_column = self._combined_index_columns.get(path, "date")
                 table = pq.read_table(
                     path,
-                    columns=[*names, index_column],
+                    columns=[item[0] for item in selected] + [index_column],
+                    filters=date_filters(path, index_column),
                 ).replace_schema_metadata({})
                 df = table.to_pandas().set_index(index_column)
-                df.columns = [self._standard_symbol(symbol) for _, symbol in columns]
+                df.columns = [item[2] for item in selected]
                 df.index = pd.to_datetime(df.index)
                 df.index.name = "datetime"
                 return df.sort_index()
 
-            table = pq.read_table(path).replace_schema_metadata({})
+            index_column = self._parquet_index_column(path)
+            schema_names = _read_schema_cached(path).names
+            data_names = [name for name in schema_names if name != index_column]
+            if symbols is None:
+                selected = [(name, name) for name in data_names]
+            else:
+                exact = {str(name): name for name in data_names}
+                by_base: dict[str, str] = {}
+                for name in data_names:
+                    by_base.setdefault(self._standard_symbol(name), name)
+                selected = []
+                seen: set[str] = set()
+                for requested in symbol_key:
+                    physical_name = exact.get(requested) or by_base.get(
+                        self._standard_symbol(requested)
+                    )
+                    if physical_name is None or physical_name in seen:
+                        continue
+                    selected.append((physical_name, requested))
+                    seen.add(physical_name)
+
+            table = pq.read_table(
+                path,
+                columns=[index_column, *[item[0] for item in selected]],
+                filters=date_filters(path, index_column),
+            ).replace_schema_metadata({})
             df = table.to_pandas()
             # 新文件通常将日期显式写为 ``datetime`` 列；历史 Pandas Parquet 在移除
             # metadata 后会把索引保留为 ``__index_level_0__`` 列。
-            if "datetime" in df.columns:
-                idx_col = "datetime"
-            elif "__index_level_0__" in df.columns:
-                idx_col = "__index_level_0__"
-            else:
-                idx_col = df.columns[0]
-            df = df.set_index(idx_col)
+            df = df.set_index(index_column)
+            if symbols is not None:
+                df = df.rename(columns=dict(selected))
             df.index = pd.to_datetime(df.index)
             df.index.name = "datetime"
             return df.sort_index()
 
-        return self._cache.get_or_load(key, load)
+        # 普通共享面板（无列投影）进入应用级缓存；任务级的列投影已经由
+        # ``_LazyPanels`` 持有，并且通常只服务一个回测。把大量不同任务切片
+        # 长期留在全局缓存会重新制造宽表内存峰值。
+        if cache and symbols is None:
+            return self._cache.get_or_load(key, load)
+        return load()
 
     def _get_field_view(
         self,
@@ -407,7 +521,16 @@ class FieldParquetProvider(IDataProvider):
         symbol_key = None if symbols is None else tuple(str(symbol) for symbol in symbols)
         start_key = None if start is None else str(pd.Timestamp(start))
         end_key = None if end is None else str(pd.Timestamp(end))
-        df = self._read_field(field)
+        df = self._read_field(
+            field,
+            symbols=symbols,
+            start=start,
+            end=end,
+            cache=(
+                not copy
+                or (symbols is None and start is None and end is None)
+            ),
+        )
         if start is not None or end is not None:
             df = filter_by_date(df, start, end)
         if symbols is not None:

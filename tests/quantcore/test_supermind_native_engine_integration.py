@@ -36,11 +36,12 @@ def _quantile_targets(factor_values, group_number):
 
 def _metrics(metric_returns, equity):
     values = metric_returns.to_numpy(dtype=float)
+    normalized_equity = equity / equity.iloc[0]
     volatility = np.std(values, ddof=1) * np.sqrt(252)
-    cumulative = equity.iloc[-1] - 1.0
+    cumulative = normalized_equity.iloc[-1] - 1.0
     annual = (np.prod(1.0 + values) ** (252.0 / len(values))) - 1.0
     sharpe = np.mean(values) / np.std(values, ddof=1) * np.sqrt(252)
-    max_drawdown = (1.0 - equity / equity.cummax()).max()
+    max_drawdown = (1.0 - normalized_equity / normalized_equity.cummax()).max()
     return cumulative, annual, volatility, sharpe, max_drawdown
 
 
@@ -57,13 +58,13 @@ def test_native_engine_matches_verified_supermind_market_cap_curves_and_metrics(
 
     assert results[1].equity_curve.index[0] == pd.Timestamp("2026-04-02")
     assert results[1].equity_curve.index[-1] == pd.Timestamp("2026-04-30")
-    assert results[1].equity_curve.iloc[0] == pytest.approx(1.0)
+    assert results[1].equity_curve.iloc[0] == pytest.approx(1_000_000.0)
     assert [results[group].equity_curve.iloc[-1] for group in range(1, 6)] == pytest.approx([
-        1.0658749009676845,
-        1.0551068698710455,
-        1.0496690531790194,
-        1.0218372111258456,
-        1.0336993833166006,
+        1_065_874.9009676845,
+        1_055_106.8698710455,
+        1_049_669.0531790194,
+        1_021_837.2111258456,
+        1_033_699.3833166006,
     ])
 
     expected = {

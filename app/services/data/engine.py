@@ -241,8 +241,8 @@ class DataEngine:
     ) -> Mapping[str, pd.DataFrame]:
         """返回当前 Experiment 的私有行情面板。
 
-        ``symbols`` 是可选的任务级列裁剪；宽表 provider 可以在读盘后再
-        深拷贝指定列，从而避免先复制全市场再由 Panel 重切一次。
+        ``symbols`` 是可选的任务级列裁剪；宽表 provider 可以在读盘时只投影
+        指定列，再为任务深拷贝，从而避免先复制全市场再由 Panel 重切一次。
         """
 
         provider = self._require_provider()

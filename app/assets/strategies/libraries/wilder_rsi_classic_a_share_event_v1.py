@@ -51,6 +51,11 @@ class WilderRsiClassicAShareEventStrategy:
         if len(history) < self.trend_window + 1:
             return
 
+        # 同一调仓日的所有标的共享窗口；沿列计算 Wilder RSI，避免逐标的重复
+        # 创建数百个 pandas EWM 对象。
+        frame_rsi = self._rsi_frame(history, self.rsi_period)
+        trend_mean = history.iloc[-self.trend_window:].mean()
+        latest_close = history.iloc[-1]
         candidates: list[tuple[str, float]] = []
         survivors: set[str] = set()
         for symbol in symbols:
@@ -59,17 +64,21 @@ class WilderRsiClassicAShareEventStrategy:
                 if symbol in holdings:
                     context.orders.close(symbol)
                 continue
-            rsi = self._rsi(close, self.rsi_period)
+            rsi = (
+                frame_rsi[symbol]
+                if len(close) == len(history)
+                else self._rsi(close, self.rsi_period)
+            )
             if len(rsi) < 2:
                 continue
             latest_rsi, previous_rsi = float(rsi.iloc[-1]), float(rsi.iloc[-2])
-            latest_close = float(close.iloc[-1])
+            current_close = float(latest_close[symbol])
             if symbol in holdings:
                 entry_price = context.portfolio.average_cost(symbol)
                 if (
                     latest_rsi > self.overbought
-                    or (entry_price is not None and latest_close <= entry_price * (1 - self.stop_loss))
-                    or (entry_price is not None and latest_close >= entry_price * (1 + self.take_profit))
+                    or (entry_price is not None and current_close <= entry_price * (1 - self.stop_loss))
+                    or (entry_price is not None and current_close >= entry_price * (1 + self.take_profit))
                 ):
                     context.orders.close(symbol)
                 else:
@@ -78,7 +87,7 @@ class WilderRsiClassicAShareEventStrategy:
             if (
                 latest_rsi < self.oversold
                 and latest_rsi > previous_rsi
-                and latest_close > float(close.iloc[-self.trend_window:].mean())
+                and current_close > float(trend_mean[symbol])
             ):
                 candidates.append((symbol, latest_rsi))
 
@@ -97,6 +106,22 @@ class WilderRsiClassicAShareEventStrategy:
         losses = (-delta).clip(lower=0)
         average_gain = gains.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
         average_loss = losses.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+        relative_strength = average_gain / average_loss.replace(0, float("nan"))
+        rsi = 100 - 100 / (1 + relative_strength)
+        return rsi.where(average_loss > 0, 100.0)
+
+    @staticmethod
+    def _rsi_frame(close: pd.DataFrame, period: int) -> pd.DataFrame:
+        """按列批量计算 Wilder RSI；与 ``_rsi`` 保持相同平滑公式。"""
+        delta = close.diff()
+        gains = delta.clip(lower=0)
+        losses = (-delta).clip(lower=0)
+        average_gain = gains.ewm(
+            alpha=1 / period, adjust=False, min_periods=period
+        ).mean()
+        average_loss = losses.ewm(
+            alpha=1 / period, adjust=False, min_periods=period
+        ).mean()
         relative_strength = average_gain / average_loss.replace(0, float("nan"))
         rsi = 100 - 100 / (1 + relative_strength)
         return rsi.where(average_loss > 0, 100.0)

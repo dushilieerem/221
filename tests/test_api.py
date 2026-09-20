@@ -969,10 +969,26 @@ def test_strategy_backtest_returns_equity_and_positions(market_data_dir):
     assert len(body["equity_curve"]) > 0
     assert len(body["benchmark_curve"]) > 0
     assert body["excess_return"] is not None
-    assert body["equity_curve"][0]["value"] == pytest.approx(1.0)
+    assert body["equity_curve"][0]["value"] == pytest.approx(1_000_000.0)
     assert body["benchmark_curve"][0]["value"] == pytest.approx(1.0)
     assert body["positions"]
     assert body["rebalance_logs"] is None
+
+
+def test_strategy_backtest_scales_vectorized_equity_by_initial_capital(market_data_dir):
+    response = client.post(
+        "/api/backtest/strategy",
+        json={
+            "strategy_code": STRATEGY_CODE,
+            "initial_capital": 250_000.0,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["error"] is None
+    assert body["equity_curve"][0]["value"] == pytest.approx(250_000.0)
+    assert body["final_equity"] == pytest.approx(body["equity_curve"][-1]["value"])
 
 
 def test_strategy_backtest_routes_catalog_event_strategy_to_event_engine(market_data_dir):
@@ -1417,6 +1433,18 @@ def test_builtin_strategy_library_entries_run_with_close_panel(market_data_dir, 
     assert body["error"] is None
     assert body["meta"]["strategy_id"] == strategy_id
     assert body["meta"]["strategy_version"] == "v1"
+
+
+def test_builtin_dual_thrust_strategy_injects_required_market_panels(market_data_dir):
+    response = client.post(
+        "/api/backtest/strategy",
+        json={"strategy_id": "dual_thrust_a_share"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["error"] is None
+    assert body["meta"]["strategy_id"] == "dual_thrust_a_share"
 
 
 def test_strategy_backtest_returns_business_error_for_invalid_contract(market_data_dir):

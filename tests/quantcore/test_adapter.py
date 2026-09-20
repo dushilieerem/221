@@ -160,8 +160,8 @@ def test_native_engine_run_shapes():
     assert isinstance(res, BacktestResult)
     assert len(res.equity_curve) == len(res.returns)
     assert res.positions.shape[1] == 20
-    # 第二个交易日曲线归一为 1；收益仍保留首日信号对应的持有期。
-    assert res.equity_curve.iloc[0] == pytest.approx(1.0)
+    # 权益曲线使用真实初始资金；收益仍保留首日信号对应的持有期。
+    assert res.equity_curve.iloc[0] == pytest.approx(1_000_000.0)
     assert res.returns.iloc[0] != pytest.approx(0.0)
 
 
@@ -174,7 +174,7 @@ def test_native_engine_starts_return_after_close_build_date():
 
     assert result.returns.index.tolist() == dates[1:].tolist()
     assert result.returns.tolist() == pytest.approx([0.1, 0.1, 0.1])
-    assert result.equity_curve.tolist() == pytest.approx([1.0, 1.1, 1.21])
+    assert result.equity_curve.tolist() == pytest.approx([1_000_000.0, 1_100_000.0, 1_210_000.0])
     assert result.positions.loc[dates[1], "A"] == pytest.approx(1.0)
 
 
@@ -214,7 +214,10 @@ def test_native_engine_parity_with_build_factor_portfolio():
     eq2, ret2, pos2 = build_factor_portfolio(
         fv, close, rebalance="weekly", stock_num=4, long_short=True
     )
-    pd.testing.assert_series_equal(res.equity_curve, eq2)
+    pd.testing.assert_series_equal(
+        res.equity_curve / res.equity_curve.iloc[0],
+        eq2,
+    )
     pd.testing.assert_series_equal(res.returns, ret2)
     pd.testing.assert_frame_equal(res.positions, pos2)
 

@@ -34,7 +34,7 @@ def market_weighted_returns(
     """市值加权全市场日收益（MKT / 基准）。
 
     每个调仓日按 ``current_mv`` 归一化得权重，``t+1`` 收盘建仓并作为净值起点，
-    ``t+2`` 起持有；口径与 :class:`NativeEngine` 一致（固定本金）。
+    ``t+2`` 起持有；收益时序与 :class:`NativeEngine` 一致。
 
     Parameters
     ----------

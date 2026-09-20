@@ -163,7 +163,7 @@ class StrategyBacktestRequest(BaseModel):
     #: 印花税率（仅卖出时按成交额计提）
     stamp_tax: float = 0.001
     slippage_rate: float = 0.0
-    initial_capital: float = 1_000_000.0
+    initial_capital: float = Field(1_000_000.0, gt=0)
     #: 返回持仓权重（前端画持仓图用）
     include_positions: bool = False
     include_rebalance_logs: bool = False

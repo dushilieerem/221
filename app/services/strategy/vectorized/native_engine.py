@@ -1,7 +1,7 @@
 """``NativeEngine`` - 自研向量化回测后端。
 
 统一实现前一日目标权重对应下一交易日收盘收益的向量化语义：收益序列保留首个信号
-持有期，展示净值在第二个交易日归一为 1 后按复利累计。``cost > 0`` 时按换手率
+持有期，展示权益曲线从 ``initial_capital`` 开始按复利累计。``cost > 0`` 时按换手率
 ``|Δ权重|`` 计入手续费/滑点。
 """
 
@@ -31,8 +31,8 @@ class NativeEngine(IBacktestEngine):
         ret = close.pct_change(fill_method=None)
 
         # t 收盘形成目标权重；该权重承担 t -> t+1 的收盘收益。
-        # returns 保留首个信号日到次日的收益，供因子指标使用；equity 则
-        # 在次日收盘归一为 1，与 Supermind/Alphalens 分层曲线一致。
+        # returns 保留首个信号日到次日的收益，供指标使用；equity 使用真实
+        # 初始资金，接口层与事件驱动回测统一输出资金金额。
         held = target.ffill().shift(1).fillna(0.0)
         port_ret = (held * ret).sum(axis=1)
 
@@ -49,10 +49,13 @@ class NativeEngine(IBacktestEngine):
         port_ret = port_ret.iloc[1:]
         port_ret = port_ret.dropna()
 
-        # 展示曲线不计首个信号日的收益：在次日收盘归一为 1，后续复利。
+        if config.initial_capital <= 0:
+            raise ValueError("initial_capital 必须大于 0")
+
+        # 展示曲线不计首个信号日的收益：在次日收盘保持初始资金，后续复利。
         display_returns = port_ret.copy()
         display_returns.iloc[0] = 0.0
-        equity = (1.0 + display_returns).cumprod()
+        equity = float(config.initial_capital) * (1.0 + display_returns).cumprod()
         positions = held.loc[port_ret.index].copy()
         return BacktestResult(
             equity_curve=equity,

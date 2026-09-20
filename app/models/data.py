@@ -123,6 +123,7 @@ class DataView:
     def __init__(self, panels: dict[str, pd.DataFrame]) -> None:
         self._panels = panels
         self._as_of: pd.Timestamp | None = None
+        self._dates = pd.DatetimeIndex(panels["close"].index)
 
     def set_as_of(self, timestamp: pd.Timestamp | None) -> None:
         self._as_of = timestamp
@@ -138,7 +139,19 @@ class DataView:
     def history(self, symbols: list[str], fields: list[str], count: int) -> dict[str, pd.DataFrame]:
         if self._as_of is None:
             return {field: self._panels[field].iloc[0:0].reindex(columns=symbols) for field in fields}
-        return {
-            field: self._panels[field].loc[:self._as_of, symbols].tail(count).copy()
-            for field in fields
-        }
+
+        # Event strategies在每个交易日都会读取一个滚动窗口。用位置切片避免
+        # 对整张日期索引重复做标签搜索；行情面板由任务私有，返回只读视图即可，
+        # 不再为每个字段/每个交易日额外复制一份窗口。
+        stop = int(self._dates.searchsorted(pd.Timestamp(self._as_of), side="right"))
+        start = max(0, stop - count)
+        requested = pd.Index(symbols)
+        result = {}
+        for field in fields:
+            window = self._panels[field].iloc[start:stop]
+            result[field] = (
+                window
+                if window.columns.equals(requested)
+                else window.reindex(columns=requested)
+            )
+        return result

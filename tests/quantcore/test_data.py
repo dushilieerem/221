@@ -7,11 +7,19 @@ from app.database.data.providers.field_parquet_provider import FieldParquetProvi
 
 from app.database.data.providers.csv_provider import CSVDataProvider
 from app.services.data.engine import DataEngine
+from app.utils.data import first_panel_date
 
 
 def _write_csv(path, symbol, rows):
     df = pd.DataFrame(rows)
     df.to_csv(path / f"{symbol}.csv", index=False)
+
+
+def test_first_panel_date_accepts_index_only_probe():
+    dates = pd.date_range("2024-01-02", periods=2, freq="D")
+    probe = pd.DataFrame(index=dates, columns=[])
+
+    assert first_panel_date({"close": probe}) == dates[0]
 
 
 def test_csv_provider_get_bars(tmp_path):
@@ -211,6 +219,32 @@ def test_field_parquet_provider_reads_ifind_combined_market_data(tmp_path):
     assert panels["turnover"].loc[pd.Timestamp("2024-01-03"), "600000"] == 27
     assert list(provider.get_bars("000001.SZ", fields=["open", "close"]).columns) == ["open", "close"]
     assert provider.get_bars("000001", fields=["close"]).iloc[0, 0] == 3
+
+
+def test_field_parquet_provider_projects_requested_symbols_before_dataframe_materialization(tmp_path):
+    columns = pd.MultiIndex.from_product(
+        [["000001.SZ", "600000.SH", "300001.SZ"], ["close", "amount"]]
+    )
+    frame = pd.DataFrame(
+        [[10.0, 100.0, 20.0, 200.0, 30.0, 300.0]],
+        index=pd.to_datetime(["2024-01-02"]),
+        columns=columns,
+    )
+    frame.index.name = "date"
+    frame.to_parquet(tmp_path / "market_data.parquet")
+    provider = FieldParquetProvider(tmp_path / "market_data.parquet")
+
+    projected = provider.get_task_panels(
+        fields=["close", "amount"], symbols=["600000"]
+    )
+    probe = provider.get_task_panels(fields=["close"], symbols=[])["close"]
+
+    assert list(projected["close"].columns) == ["600000"]
+    assert list(projected["amount"].columns) == ["600000"]
+    assert projected["close"].iloc[0, 0] == 20.0
+    assert projected["amount"].iloc[0, 0] == 200.0
+    assert probe.shape == (1, 0)
+    assert probe.index[0] == pd.Timestamp("2024-01-02")
 
 
 def test_field_parquet_provider_reads_ifind_marketdata_layout(tmp_path):

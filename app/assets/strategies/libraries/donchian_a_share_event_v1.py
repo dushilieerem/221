@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 
@@ -78,23 +79,90 @@ class DonchianAShareEventStrategy:
 
     def _metrics(self, history, symbols):
         result = {}
+        close_frame = history["close"].reindex(columns=symbols)
+        high_frame = history["high"].reindex(columns=symbols)
+        low_frame = history["low"].reindex(columns=symbols)
+        money_frame = history["amount"].reindex(columns=symbols)
+
+        # 大多数股票在窗口内没有缺失值时，整列计算 ATR/通道，避免对每只
+        # 股票重复调用 pandas 的 concat/max。缺失数据的少数股票仍走下面的
+        # 压缩序列路径，保持原有点时数据处理语义。
+        complete = [
+            symbol
+            for symbol in symbols
+            if close_frame[symbol].notna().all()
+            and high_frame[symbol].notna().all()
+            and low_frame[symbol].notna().all()
+            and money_frame[symbol].notna().all()
+        ]
+        if complete:
+            close_values = close_frame[complete].to_numpy(dtype=float)
+            high_values = high_frame[complete].to_numpy(dtype=float)
+            low_values = low_frame[complete].to_numpy(dtype=float)
+            money_values = money_frame[complete].to_numpy(dtype=float)
+            previous_close = np.empty_like(close_values)
+            previous_close[0, :] = np.nan
+            previous_close[1:, :] = close_values[:-1, :]
+            true_range = np.maximum.reduce(
+                [
+                    high_values - low_values,
+                    np.abs(high_values - previous_close),
+                    np.abs(low_values - previous_close),
+                ]
+            )
+            atr = true_range[-20:, :].mean(axis=0)
+            close_now = close_values[-1, :]
+            upper = high_values[-21:-1, :].max(axis=0)
+            lower = low_values[-21:-1, :].min(axis=0)
+            money20 = money_values[-20:, :].mean(axis=0)
+            money60 = money_values[-60:, :].mean(axis=0)
+            for index, symbol in enumerate(complete):
+                if atr[index] <= 0 or close_now[index] <= 0 or money60[index] <= 0:
+                    continue
+                score = (
+                    0.55 * (close_now[index] / close_values[-61, index] - 1)
+                    + 0.30 * ((close_now[index] - upper[index]) / atr[index])
+                    + 0.15 * (money20[index] / money60[index] - 1)
+                )
+                result[symbol] = {
+                    "close": float(close_now[index]), "lower": float(lower[index]),
+                    "atr": float(atr[index]), "atr_pct": float(atr[index] / close_now[index]),
+                    "money20": float(money20[index]), "breakout": bool(close_now[index] > upper[index]),
+                    "score": float(score),
+                }
+
         for symbol in symbols:
+            if symbol in result:
+                continue
             close = history["close"][symbol].dropna()
             high = history["high"][symbol].reindex(close.index)
             low = history["low"][symbol].reindex(close.index)
             money = history["amount"][symbol].reindex(close.index)
             if len(close) < 61 or high.isna().any() or low.isna().any() or money.isna().any():
                 continue
-            true_range = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
-            atr = true_range.iloc[-20:].mean()
-            close_now = close.iloc[-1]
-            upper = high.iloc[-21:-1].max()
-            lower = low.iloc[-21:-1].min()
-            money20 = money.iloc[-20:].mean()
-            money60 = money.iloc[-60:].mean()
+            close_values = close.to_numpy(dtype=float)
+            high_values = high.to_numpy(dtype=float)
+            low_values = low.to_numpy(dtype=float)
+            money_values = money.to_numpy(dtype=float)
+            previous_close = np.empty_like(close_values)
+            previous_close[0] = np.nan
+            previous_close[1:] = close_values[:-1]
+            true_range = np.maximum.reduce(
+                [
+                    high_values - low_values,
+                    np.abs(high_values - previous_close),
+                    np.abs(low_values - previous_close),
+                ]
+            )
+            atr = true_range[-20:].mean()
+            close_now = close_values[-1]
+            upper = high_values[-21:-1].max()
+            lower = low_values[-21:-1].min()
+            money20 = money_values[-20:].mean()
+            money60 = money_values[-60:].mean()
             if atr <= 0 or close_now <= 0 or money60 <= 0:
                 continue
-            score = 0.55 * (close_now / close.iloc[-61] - 1) + 0.30 * ((close_now - upper) / atr) + 0.15 * (money20 / money60 - 1)
+            score = 0.55 * (close_now / close_values[-61] - 1) + 0.30 * ((close_now - upper) / atr) + 0.15 * (money20 / money60 - 1)
             result[symbol] = {
                 "close": float(close_now), "lower": float(lower), "atr": float(atr),
                 "atr_pct": float(atr / close_now), "money20": float(money20),

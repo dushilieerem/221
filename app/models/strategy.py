@@ -52,12 +52,12 @@ class BacktestConfig:
     Notes
     -----
     - ``min_commission``（每笔最低手续费）由 NativeEngine 支持。
-    - 净值口径：固定本金 ``1.0 + cumsum``。
+    - 权益口径：从 ``initial_capital`` 开始，输出真实资金金额；收益率仍为小数。
     """
 
     #: 后端名：仅支持 ``"native"``
     engine: str = "native"
-    #: 初始资金（Native 固定本金口径暂不使用，记录以备扩展）
+    #: 初始资金；NativeEngine 和事件驱动引擎均以此金额生成权益曲线
     initial_capital: float = 1_000_000.0
     #: 手续费率（按成交额）
     commission_rate: float = 0.0

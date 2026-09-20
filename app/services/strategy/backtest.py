@@ -7,6 +7,8 @@ QuantCore 引擎调用以及 API 响应组装。``runner.py`` 仅保留兼容门
 
 from __future__ import annotations
 
+import inspect
+
 import pandas as pd
 
 from app.services.factor.backtest_support import (
@@ -36,6 +38,50 @@ from app.schemas.backtest import (
     StrategyBacktestResponse,
 )
 from app.services.factor.serializers import date_range_from, metrics_to_dict
+
+
+def _instantiate_vectorized_strategy(strategy_class, panels):
+    """按策略构造函数的行情字段参数注入向量化面板。
+
+    旧适配器无论策略实际需要什么都只传 ``close``，导致同时依赖 OHLC、成交额
+    或市值的结构化策略无法启动。字段名与构造函数参数名一致时按需懒加载；有
+    默认值的非行情参数继续由策略自身提供。
+    """
+
+    try:
+        parameters = inspect.signature(strategy_class.__init__).parameters.values()
+    except (TypeError, ValueError):
+        return strategy_class(close=panels.close)
+
+    positional: list[object] = []
+    keyword: dict[str, object] = {}
+    missing: list[str] = []
+    for parameter in parameters:
+        if parameter.name == "self":
+            continue
+        if parameter.kind in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        ):
+            continue
+        if parameter.name in panels:
+            value = panels[parameter.name]
+        elif parameter.default is not inspect.Parameter.empty:
+            continue
+        else:
+            missing.append(parameter.name)
+            continue
+
+        if parameter.kind is inspect.Parameter.POSITIONAL_ONLY:
+            positional.append(value)
+        else:
+            keyword[parameter.name] = value
+
+    if missing:
+        raise TypeError(
+            f"{strategy_class.__name__} 缺少可注入的行情字段参数: {', '.join(missing)}"
+        )
+    return strategy_class(*positional, **keyword)
 
 
 def run_strategy_backtest(
@@ -103,14 +149,24 @@ def run_strategy_backtest(
 
         from app.models.data import Panel
         provider = data_engine.provider
-        raw_panels = data_engine.get_panels(req.start, req.end)
         from app.utils.data import first_panel_date
 
+        date_probe = data_engine.get_task_panels(
+            req.start,
+            req.end,
+            fields=["close"],
+            symbols=[],
+        )
         raw_symbols, symbol_mapping, declared_symbols = _resolve_strategy_symbols(
             provider,
             universe,
             strategy_class,
-            as_of=first_panel_date(raw_panels),
+            as_of=first_panel_date(date_probe),
+        )
+        raw_panels = data_engine.get_task_panels(
+            req.start,
+            req.end,
+            symbols=raw_symbols,
         )
         panels = Panel(
             _StrategyPanels(
@@ -128,7 +184,7 @@ def run_strategy_backtest(
             strategy = strategy_class()
             signals = strategy.generate_signals(panels)
         else:
-            strategy = strategy_class(close=close)
+            strategy = _instantiate_vectorized_strategy(strategy_class, panels)
             signals = strategy.generate_signals()
         if isinstance(signals, BacktestSignals):
             bt_signals = signals
@@ -268,17 +324,28 @@ def _run_event_strategy_backtest(
             | set(getattr(strategy, "required_market_state", ()))
             | {"open", "high", "low", "close"}
         )
-        panels = data_engine.get_panels(req.start, req.end, fields=sorted(required_fields))
         from app.utils.data import first_panel_date
 
+        date_probe = data_engine.get_task_panels(
+            req.start,
+            req.end,
+            fields=["close"],
+            symbols=[],
+        )
         raw_symbols, symbol_mapping, declared_symbols = _resolve_strategy_symbols(
             provider,
             req.universe,
             strategy,
-            as_of=first_panel_date(panels),
+            as_of=first_panel_date(date_probe),
+        )
+        panels = data_engine.get_task_panels(
+            req.start,
+            req.end,
+            fields=sorted(required_fields),
+            symbols=raw_symbols,
         )
         event_panels = {
-            field: panels[field].reindex(columns=raw_symbols).rename(columns=symbol_mapping)
+            field: panels[field].rename(columns=symbol_mapping)
             for field in required_fields
         }
         index = data_engine.get_index(req.benchmark, req.start, req.end)
