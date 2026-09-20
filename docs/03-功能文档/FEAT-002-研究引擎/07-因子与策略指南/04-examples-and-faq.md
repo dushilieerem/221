@@ -18,8 +18,11 @@ def momentum_5d(self):
 
 ```python
 import requests
+import time
+from urllib.parse import urljoin
 
-response = requests.post("http://<research-api>/api/backtest/factor", json={
+base_url = "http://<research-api>"
+response = requests.post(f"{base_url}/api/backtest/factor", json={
     "factor_code": """def momentum_5d(self):
     return self.close.pct_change(5)
 """,
@@ -30,9 +33,23 @@ response = requests.post("http://<research-api>/api/backtest/factor", json={
     "groups": 5,
     "benchmark": "CSI300",
 })
-result = response.json()
-if result["error"]:
-    raise RuntimeError(result["error"])
+if response.status_code != 202:
+    raise RuntimeError(f"提交因子回测失败：{response.status_code} {response.text}")
+
+task = response.json()
+poll_url = urljoin(f"{base_url}/", task["poll_url"])
+while True:
+    poll_response = requests.get(poll_url)
+    poll_response.raise_for_status()
+    task = poll_response.json()
+    if task["status"] in {"succeeded", "failed", "cancelled"}:
+        break
+    time.sleep(1)
+
+if task["status"] != "succeeded":
+    raise RuntimeError(task.get("error") or f"任务结束状态：{task['status']}")
+
+result = task["result"]
 ```
 
 ## 2. 常见问题
@@ -45,9 +62,10 @@ if result["error"]:
 
 可以。每个因子是同一库文件中的一个方法。
 
-### 策略回测返回 HTTP 200 是否代表成功？
+### 因子回测返回 HTTP 202 是否代表成功？
 
-不一定。因子或策略的业务错误会写入响应 `error` 字段；只有 `error: null` 才代表成功。
+不一定。HTTP `202` 只表示任务已提交；必须继续轮询 `poll_url`，直到 `status` 为
+`succeeded` 才表示成功。失败或取消时，原因在任务响应顶层的 `error` 字段中。
 
 ### 如何通过 API 调用事件策略？
 

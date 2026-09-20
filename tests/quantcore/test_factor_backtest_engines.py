@@ -125,6 +125,34 @@ def test_data_engine_filter_is_optional_and_reports_missing_state():
     assert bool(partial["mask"].loc[dates[1], "A"])
 
 
+def test_data_engine_builds_status_masks_from_raw_status_text():
+    dates = pd.date_range("2026-01-02", periods=4, freq="B")
+    panels = {
+        "close": pd.DataFrame(1.0, index=dates, columns=["A", "B"]),
+        "listed_status": pd.DataFrame(
+            [[" ST ", "在市"], ["*ST", "在市"], ["在市", "暂停上市"], [None, "在市"]],
+            index=dates,
+            columns=["A", "B"],
+        ),
+        "up_and_down_status": pd.DataFrame(
+            [["涨停", "非涨跌停"], ["跌停", "涨停"], ["停牌", "跌停"], ["非涨跌停", None]],
+            index=dates,
+            columns=["A", "B"],
+        ),
+    }
+
+    masks = DataEngine().build_status_masks(panels)
+
+    assert bool(masks["is_st"].loc[dates[0], "A"])
+    assert bool(masks["is_st"].loc[dates[1], "A"])
+    assert not bool(masks["is_st"].loc[dates[2], "B"])
+    assert bool(masks["is_limit_up"].loc[dates[0], "A"])
+    assert bool(masks["is_limit_down"].loc[dates[1], "A"])
+    assert bool(masks["is_limit"].loc[dates[1], "A"])
+    assert bool(masks["is_suspended"].loc[dates[2], "A"])
+    assert not bool(masks["is_suspended"].loc[dates[3], "B"])
+
+
 def test_factor_engine_masks_before_cross_sectional_preprocessing():
     dates = pd.date_range("2026-01-02", periods=1)
     values = pd.DataFrame([[1.0, 2.0, 1000.0]], index=dates, columns=list("ABC"))

@@ -37,24 +37,6 @@ _CORE_PROVIDER_METHODS = (
 )
 
 
-def _limit_up_status(values: pd.Series) -> pd.Series:
-    """从 iFinD 涨跌停原始文本提取涨停状态，排除否定状态。"""
-
-    matches = values.str.contains(
-        "涨停|limit.?up|up.?limit",
-        case=False,
-        regex=True,
-        na=False,
-    )
-    negative = values.str.contains(
-        r"(?:非|未|not\s*)(?:涨跌停|涨停|limit.?up|up.?limit)",
-        case=False,
-        regex=True,
-        na=False,
-    )
-    return matches & ~negative
-
-
 def default_market_data_dir() -> Path:
     """返回配置指定的外部行情根目录。"""
 
@@ -364,6 +346,71 @@ class DataEngine:
         except (OSError, ValueError, KeyError):
             return None
 
+    def build_status_masks(
+        self,
+        panels: Mapping[str, pd.DataFrame] | Any,
+    ) -> dict[str, pd.DataFrame]:
+        """从证券状态原始文本构造日期×标的布尔掩码。
+
+        当前数据源的 ``listed_status`` 和 ``up_and_down_status`` 都是原始文本
+        面板，不是布尔字段。返回的掩码包括 ``is_st``、``is_limit_up``、
+        ``is_limit_down``、``is_limit`` 和 ``is_suspended``；缺少字段或缺失值
+        均按 ``False`` 处理，由调用方决定是否需要对覆盖不足发出告警。
+        """
+
+        def has_field(name: str) -> bool:
+            try:
+                return name in panels
+            except TypeError:
+                return name in getattr(panels, "fields", ())
+
+        def get_field(name: str) -> pd.DataFrame:
+            try:
+                return panels[name]
+            except (AttributeError, KeyError, TypeError):
+                return getattr(panels, name)
+
+        reference = None
+        if has_field("close"):
+            reference = get_field("close")
+        else:
+            for name in getattr(panels, "fields", panels):
+                if has_field(str(name)):
+                    reference = get_field(str(name))
+                    break
+        if reference is None:
+            raise ValueError("无法构造状态掩码：面板没有可用字段")
+
+        index = reference.index
+        columns = reference.columns
+        empty = pd.DataFrame(False, index=index, columns=columns)
+
+        def normalized_status(name: str) -> pd.DataFrame | None:
+            if not has_field(name):
+                return None
+            values = get_field(name).reindex(index=index, columns=columns)
+            # 状态面板是 DataFrame；DataFrame 本身没有 .str accessor，需逐列
+            # 使用 Series.str.strip()。
+            return values.astype("string").apply(lambda column: column.str.strip())
+
+        listed = normalized_status("listed_status")
+        market_status = normalized_status("up_and_down_status")
+
+        def status_mask(values: pd.DataFrame | None, predicate) -> pd.DataFrame:
+            if values is None:
+                return empty.copy()
+            return predicate(values).fillna(False).astype(bool)
+
+        return {
+            "is_st": status_mask(listed, lambda values: values.isin({"ST", "*ST"})),
+            "is_limit_up": status_mask(market_status, lambda values: values.eq("涨停")),
+            "is_limit_down": status_mask(market_status, lambda values: values.eq("跌停")),
+            "is_limit": status_mask(
+                market_status, lambda values: values.isin({"涨停", "跌停"})
+            ),
+            "is_suspended": status_mask(market_status, lambda values: values.eq("停牌")),
+        }
+
     def build_filter_mask(
         self,
         panels: Mapping[str, pd.DataFrame] | Any,
@@ -373,7 +420,7 @@ class DataEngine:
     ) -> dict[str, Any]:
         """根据可选行情状态构造因子研究有效池。
 
-        返回普通映射 ``{"mask", "status", "warnings"}``，其中 mask 为
+        返回普通映射 ``{"mask", "status", "warnings", "status_masks"}``，其中 mask 为
         ``True=允许进入研究样本``。该方法只读取状态，不删除行情行，也不
         修改传入面板；缺少可选状态字段时跳过对应过滤并留下可序列化告警。
         ``Panel`` 和 provider 返回的字段映射都可直接传入。
@@ -403,6 +450,7 @@ class DataEngine:
             raise ValueError("无法构造过滤掩码：面板没有可用字段")
 
         mask = pd.DataFrame(True, index=reference.index, columns=reference.columns)
+        status_masks = self.build_status_masks(panels)
         status: dict[str, str] = {}
         warnings: list[str] = []
 
@@ -426,54 +474,52 @@ class DataEngine:
                 status[field] = "enabled"
             mask &= ~values.fillna(False).astype(bool)
 
-        apply_boolean_filter(filter_suspended, "is_suspended")
+        if filter_suspended and has_field("up_and_down_status"):
+            raw_status = get_field("up_and_down_status").reindex(
+                index=mask.index, columns=mask.columns
+            )
+            suspended_values = status_masks["is_suspended"].mask(raw_status.isna())
+            missing = int(raw_status.isna().sum().sum())
+            if missing:
+                warnings.append(
+                    f"up_and_down_status 状态覆盖不足：{missing} 个值缺失，按放行处理"
+                )
+                status["is_suspended"] = "enabled_partial"
+            else:
+                status["is_suspended"] = "enabled"
+            mask &= ~suspended_values.fillna(False).astype(bool)
+        else:
+            apply_boolean_filter(filter_suspended, "is_suspended")
 
         if not filter_limit_up:
             status["limit_up"] = "disabled"
         else:
-            limit_values = None
-            source = None
             if has_field("up_and_down_status"):
                 raw_status = get_field("up_and_down_status").reindex(
                     index=mask.index, columns=mask.columns
                 )
-                # 把整张状态面板压成一个 Series，只执行一次字符串匹配；
-                # ``DataFrame.apply`` 会为数千个标的重复进入 Python 调用层。
-                status_values = raw_status.astype("string")
-                flat_status = pd.Series(
-                    status_values.to_numpy(dtype=object).reshape(-1),
-                    dtype="string",
-                )
-                flat_limit = _limit_up_status(flat_status)
-                limit_values = pd.DataFrame(
-                    flat_limit.to_numpy(dtype=bool).reshape(raw_status.shape),
-                    index=mask.index,
-                    columns=mask.columns,
-                )
-                # 保留原始缺失状态，不能在字符串转换时把它们静默变成
-                # False；缺失值按放行处理，但必须进入覆盖不足告警。
-                limit_values = limit_values.mask(raw_status.isna())
-                source = "up_and_down_status"
-            if limit_values is None:
-                status["limit_up"] = "skipped_missing_field"
-                warnings.append(
-                    "已跳过涨停过滤：当前数据版本缺少 up_and_down_status 状态字段"
-                )
-            else:
-                limit_values = limit_values.reindex(
-                    index=mask.index, columns=mask.columns
-                )
-                missing = int(limit_values.isna().sum().sum())
+                limit_values = status_masks["is_limit_up"].mask(raw_status.isna())
+                missing = int(raw_status.isna().sum().sum())
                 if missing:
                     status["limit_up"] = "enabled_partial"
                     warnings.append(
-                        f"{source} 状态覆盖不足：{missing} 个值缺失，按放行处理"
+                        f"up_and_down_status 状态覆盖不足：{missing} 个值缺失，按放行处理"
                     )
                 else:
                     status["limit_up"] = "enabled"
                 mask &= ~limit_values.fillna(False).astype(bool)
+            else:
+                status["limit_up"] = "skipped_missing_field"
+                warnings.append(
+                    "已跳过涨停过滤：当前数据版本缺少 up_and_down_status 状态字段"
+                )
 
-        return {"mask": mask, "status": status, "warnings": warnings}
+        return {
+            "mask": mask,
+            "status": status,
+            "warnings": warnings,
+            "status_masks": status_masks,
+        }
 
     _instance: "DataEngine | None" = None
     _instance_lock = threading.RLock()

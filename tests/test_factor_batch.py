@@ -150,7 +150,7 @@ def test_predictive_summary_returns_scalar_ic_rank_ic_and_annualized_icir():
     assert "value" not in summary
 
 
-def test_batch_skips_missing_suspension_filter_and_uses_up_and_down_status():
+def test_batch_filters_suspended_and_limit_up_from_up_and_down_status():
     dates = pd.date_range("2026-01-01", periods=2)
     columns = ["A", "B", "C"]
     factor = pd.DataFrame(1.0, index=dates, columns=columns)
@@ -159,7 +159,7 @@ def test_batch_skips_missing_suspension_filter_and_uses_up_and_down_status():
         def __init__(self):
             self.fields = {
                 "up_and_down_status": pd.DataFrame(
-                    [["非涨跌停", "非涨跌停", "涨停"], ["非涨跌停"] * 3],
+                    [["非涨跌停", "非涨跌停", "涨停"], ["非涨跌停", "停牌", "非涨跌停"]],
                     index=dates,
                     columns=columns,
                 ),
@@ -178,10 +178,11 @@ def test_batch_skips_missing_suspension_filter_and_uses_up_and_down_status():
 
     filtered = _apply_factor_batch_filters(factor, PanelStub(), config)
 
-    # 当前 release 没有独立 is_suspended，停牌过滤按缺失字段跳过。
     assert filtered.loc[dates[0], "B"] == 1.0
     assert pd.isna(filtered.loc[dates[0], "C"])
-    assert filtered.loc[dates[1]].notna().all()
+    assert pd.isna(filtered.loc[dates[1], "B"])
+    assert filtered.loc[dates[1], "A"] == 1.0
+    assert filtered.loc[dates[1], "C"] == 1.0
 
 
 def test_store_round_trip_persists_six_quantile_rows_and_predictive_metrics(tmp_path: Path):

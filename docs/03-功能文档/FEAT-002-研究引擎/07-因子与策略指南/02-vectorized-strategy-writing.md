@@ -42,11 +42,14 @@ class SmallCapMomentumStrategy(FactorPortfolioStrategy):
 - 必须且只能定义一个 `@signal` 方法。
 - `@signal` 返回综合分数宽表，不返回订单或权重。
 - `rank`、`zscore`、`winsorize`、`normalize` 都按每日横截面计算。
-- `TopN`、`EqualWeight` 和 `EveryNTradingDays` 分别负责选股、权重与调仓节奏。
+- `TopN` 和 `EveryNTradingDays` 分别负责选股与调仓节奏。`EqualWeight` 是当前等权组合行为的声明标记；当前实现始终将入选标的等权分配，`weighting` 不参与组合计算，替换为其他对象不会改变结果。
 
 ## 3. 自由目标权重策略
 
-策略源码必须且只能包含一个带 `generate_signals()` 的类。当前 API 使用 `close` 关键字参数构造策略：
+策略源码必须且只能包含一个带 `generate_signals()` 的类。当前 API 会根据策略
+`__init__` 的参数名，从行情面板注入同名字段，例如 `open`、`high`、`low`、
+`close`、`amount` 和 `pe_ttm`；因此不再局限于只注入 `close`。必需参数必须对应可用
+行情字段，带默认值的非行情参数则由策略自身提供：
 
 ```python
 import pandas as pd
@@ -62,6 +65,9 @@ class PriceMomentumStrategy:
         weights[ranks <= 30] = 1.0 / 30
         return weights
 ```
+
+例如，构造函数声明 `def __init__(self, close, high, amount, pe_ttm):` 时，运行时会分别
+注入对应的行情宽表；如果必需参数不是可用行情字段，策略实例化会失败。
 
 输出规则：
 

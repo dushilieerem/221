@@ -72,4 +72,6 @@ def relative_strength_vs_csi300(self, window=20):
 
 ## 5. 因子回测
 
-通过 `POST /api/backtest/factor` 提交因子函数体和因子名。成功的必要条件是 HTTP `200` 且响应 `error` 为 `null`；HTTP `200` 但 `error` 非空代表业务执行失败。
+通过 `POST /api/backtest/factor` 提交因子函数体和因子名。接口采用异步任务契约：提交成功返回 HTTP `202 Accepted`，响应包含 `run_id` 和 `poll_url`；客户端应继续通过 `GET poll_url` 轮询任务状态。
+
+只有轮询结果的 `status` 为 `succeeded` 才表示回测成功，此时从顶层 `result` 读取回测结果。`status` 为 `failed` 或 `cancelled` 时，应从顶层 `error` 读取失败原因；不要按同步接口直接读取 `result["error"]`。

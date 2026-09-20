@@ -23,7 +23,11 @@ akshare = ["akshare>=1.10"]
 clickhouse = ["clickhouse-driver>=0.2"]
 numba = ["numba>=0.58"]
 api = ["fastapi>=0.110", "uvicorn>=0.29"]
-test = ["pytest>=7.0"]
+test = [
+    "pytest>=7.0",
+    "httpx2>=2.0.0",
+    "httpx>=0.27,<0.29",
+]
 all = [
     "akshare>=1.10",
     "clickhouse-driver>=0.2",
@@ -33,6 +37,8 @@ all = [
 ]
 dev = [
     "pytest>=7.0",
+    "httpx2>=2.0.0",
+    "httpx>=0.27,<0.29",
 ]
 
 [project.scripts]

@@ -86,13 +86,16 @@ def daily_task(self, context):
 ## 5. Donchian 风格模板
 
 ```python
+import pandas as pd
+
+
 class DonchianStyleStrategy:
     def initialize(self, context):
         context.state.peak_close = {}
         context.schedule.daily(self.rebalance)
 
     def rebalance(self, context):
-        data = context.data.history(context.data.symbols, ["close", "high", "low"], 61)
+        data = context.data.history(context.data.symbols, ["close", "high", "low", "amount"], 61)
         for symbol in context.portfolio.positions:
             close = data["close"][symbol].dropna()
             high = data["high"][symbol].reindex(close.index)
@@ -105,7 +108,7 @@ class DonchianStyleStrategy:
 ```
 
 完整策略见 `ResearchEngine/app/assets/strategies/libraries/donchian_a_share_event_v1.py`。
-要严谨运行该策略，面板还必须提供 `money`、停牌/涨跌停状态和按历史时点构建
+要严谨运行该策略，面板还必须提供 `amount`、停牌/涨跌停状态和按历史时点构建
 的股票池、上市天数与 ST 过滤结果。
 
 通过 HTTP API 调用事件策略时，最小请求如下：
@@ -135,14 +138,16 @@ class DonchianStyleStrategy:
 中的 `.py` 文件，`entrypoint` 必须与源码中唯一的策略类名一致。
 
 ```yaml
-my_event_strategy:
-  name: 我的日频事件策略
-  strategy_type: trend
-  execution_mode: event
-  current_version: v1
-  tags: [trend, long_only, event]
-  versions:
-    v1:
-      file: my_event_strategy_v1.py
-      entrypoint: MyEventStrategy
+version: 2
+strategies:
+  my_event_strategy:
+    name: 我的日频事件策略
+    strategy_type: trend
+    execution_mode: event
+    current_version: v1
+    tags: [trend, long_only, event]
+    versions:
+      v1:
+        file: my_event_strategy_v1.py
+        entrypoint: MyEventStrategy
 ```

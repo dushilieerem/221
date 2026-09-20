@@ -143,8 +143,10 @@ class EventBacktestEngine:
         return float(value) if pd.notna(value) and value > 0 else None
 
     def _reject_reason(self, symbol: str, side: str, quantity: int, price: float, ledger: _Ledger, date: pd.Timestamp) -> str | None:
-        # 当前 iFinD release 只提供 ``up_and_down_status``。停牌字段暂不
-        # 参与成交判断，缺失时按放行处理；涨跌停从原始状态文本解析。
+        # 当前 iFinD release 只提供 ``up_and_down_status``；状态字段缺失时
+        # 按放行处理，原始文本按停牌及涨跌停状态解析。
+        if self._status_matches(date, symbol, r"停牌"):
+            return "SUSPENDED"
         if side == "buy" and self._status_matches(
             date, symbol, r"涨停|limit.?up|up.?limit"
         ):
