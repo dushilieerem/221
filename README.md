@@ -83,8 +83,9 @@ python -m app.cli.factor_backtest_batch run --as-of YYYY-MM-DD
 python -m app.cli.factor_backtest_batch run --as-of YYYY-MM-DD --wait
 ```
 
-AI 适配层需要的访问密钥仍作为敏感凭据由对应环境变量提供；密钥不写入
-`config.yaml`，也不提交到仓库。
+AI 功能共用的 Provider 地址、API Key 和模型名可配置在 `config.yaml` 的 `ai.base_url`、
+`ai.api_key` 与 `ai.model` 中。`config.yaml` 已加入 `.gitignore`，不会提交到仓库；也可继续使用
+`AI_FACTOR_*`、`AI_STRATEGY_*` 或 `AI_BACKTEST_INTERPRETATION_*` 环境变量覆盖对应配置。
 
 ## 开发与测试
 

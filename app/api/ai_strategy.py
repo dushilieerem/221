@@ -16,6 +16,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 from app.api import llm_provider
+from app.config import get_runtime_settings
 from app.schemas.backtest import (
     GeneratedStrategy,
     StrategyGenerationMeta,
@@ -97,22 +98,24 @@ def generate_strategy(req: StrategyGenerationRequest) -> StrategyGenerationRespo
 
 
 def _settings_from_env() -> llm_provider.ProviderSettings:
+    config = get_runtime_settings()
     api_key = (
         os.environ.get("AI_STRATEGY_API_KEY")
         or os.environ.get("AI_FACTOR_API_KEY")
         or os.environ.get("ARK_API_KEY")
+        or config.ai_api_key
     )
     if not api_key:
         raise HTTPException(503, "AI 策略生成服务尚未配置")
     return llm_provider.ProviderSettings(
         base_url=os.environ.get(
             "AI_STRATEGY_BASE_URL",
-            os.environ.get("AI_FACTOR_BASE_URL", "https://ark.cn-beijing.volces.com/api/plan/v3"),
+            os.environ.get("AI_FACTOR_BASE_URL", config.ai_base_url),
         ).rstrip("/"),
         api_key=api_key,
         model=os.environ.get(
             "AI_STRATEGY_MODEL_ALIAS",
-            os.environ.get("AI_FACTOR_MODEL_ALIAS", "ark-code-latest"),
+            os.environ.get("AI_FACTOR_MODEL_ALIAS", config.ai_model),
         ),
     )
 

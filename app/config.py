@@ -4,13 +4,13 @@
 ``config.example.yaml`` 提供，正式文件由部署人员手工复制和填写；本模块不
 读取 ``SVQUANT_*`` 环境变量，也不支持运行时通过命令行替换配置文件。
 
-AI 服务的访问密钥属于敏感凭据，仍由对应的 AI 适配层从环境变量读取，不
-放入配置文件或版本库。
+共享的 AI Base URL、API Key 和模型名可在本地 ``config.yaml`` 中配置；
+按功能区分的 AI 环境变量仍可覆盖对应配置。真实密钥不应放入版本库。
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 from pathlib import Path
 from typing import Any, Mapping
@@ -163,6 +163,9 @@ class RuntimeSettings:
     strategy_index: Path
     factor_backtest_database: Path
     output_path: Path
+    ai_base_url: str
+    ai_api_key: str | None = field(repr=False)
+    ai_model: str
 
     @property
     def base_url(self) -> str:
@@ -183,6 +186,7 @@ def _from_manager(manager: ConfigManager, config_path: Path) -> RuntimeSettings:
     assets = _section(manager, "assets")
     cache = _section(manager, "cache")
     storage = _section(manager, "storage")
+    ai = _section(manager, "ai")
 
     # data.dir 是独立仓库的正式配置；保留旧的 data_dir 键作为一次性迁移兼容，
     # 但不再读取任何环境变量。
@@ -244,6 +248,9 @@ def _from_manager(manager: ConfigManager, config_path: Path) -> RuntimeSettings:
         base=base_dir,
         default=base_dir / "output",
     )
+    ai_base_url = _optional_string(ai.get("base_url"), "ai.base_url")
+    ai_api_key = _optional_string(ai.get("api_key"), "ai.api_key")
+    ai_model = _optional_string(ai.get("model"), "ai.model")
 
     max_workers = _int(
         runtime.get("max_workers", application.get("max_workers")),
@@ -317,6 +324,11 @@ def _from_manager(manager: ConfigManager, config_path: Path) -> RuntimeSettings:
         strategy_index=strategy_index,
         factor_backtest_database=factor_backtest_database,
         output_path=output_path,
+        ai_base_url=(
+            ai_base_url or "https://ark.cn-beijing.volces.com/api/plan/v3"
+        ).rstrip("/"),
+        ai_api_key=ai_api_key,
+        ai_model=ai_model or "ark-code-latest",
     )
 
 

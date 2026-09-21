@@ -18,6 +18,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 from app.api import llm_provider
+from app.config import get_runtime_settings
 from app.schemas.backtest import (
     BacktestEvidenceItem,
     BacktestEvidencePackage,
@@ -117,7 +118,10 @@ def _build_response(req: BacktestInterpretationRequest, started: float) -> Backt
     model_alias = "not_configured"
     # 模型只参与排序；请求中只包含候选 ID 与证据 ID，数值永不发送。
     if _provider_configured():
-        model_alias = os.environ.get("AI_BACKTEST_INTERPRETATION_MODEL_ALIAS", "ark-code-latest")
+        model_alias = os.environ.get(
+            "AI_BACKTEST_INTERPRETATION_MODEL_ALIAS",
+            get_runtime_settings().ai_model,
+        )
         try:
             ordered = _provider_order(req, findings, model_alias)
             interpretation.findings = _order_findings(findings, ordered)
@@ -198,11 +202,29 @@ def _experiments(findings: list[BacktestFinding]) -> list[BacktestExperiment]:
 
 
 def _provider_configured() -> bool:
-    return bool(os.environ.get("AI_BACKTEST_INTERPRETATION_API_KEY") or os.environ.get("AI_FACTOR_API_KEY") or os.environ.get("ARK_API_KEY"))
+    config = get_runtime_settings()
+    return bool(
+        os.environ.get("AI_BACKTEST_INTERPRETATION_API_KEY")
+        or os.environ.get("AI_FACTOR_API_KEY")
+        or os.environ.get("ARK_API_KEY")
+        or config.ai_api_key
+    )
 
 
 def _provider_order(req: BacktestInterpretationRequest, findings: list[BacktestFinding], model: str) -> list[str]:
-    settings = llm_provider.ProviderSettings(os.environ.get("AI_BACKTEST_INTERPRETATION_BASE_URL", os.environ.get("AI_FACTOR_BASE_URL", "https://ark.cn-beijing.volces.com/api/plan/v3")).rstrip("/"), os.environ.get("AI_BACKTEST_INTERPRETATION_API_KEY") or os.environ.get("AI_FACTOR_API_KEY") or os.environ.get("ARK_API_KEY", ""), model)
+    config = get_runtime_settings()
+    base_url = os.environ.get(
+        "AI_BACKTEST_INTERPRETATION_BASE_URL",
+        os.environ.get("AI_FACTOR_BASE_URL", config.ai_base_url),
+    )
+    api_key = (
+        os.environ.get("AI_BACKTEST_INTERPRETATION_API_KEY")
+        or os.environ.get("AI_FACTOR_API_KEY")
+        or os.environ.get("ARK_API_KEY")
+        or config.ai_api_key
+        or ""
+    )
+    settings = llm_provider.ProviderSettings(base_url.rstrip("/"), api_key, model)
     candidates = [{"id": item.candidate_id, "title": item.title} for item in findings]
     messages = [{"role": "system", "content": "只输出 JSON：{\"finding_ids\":[...] }。只能排列提供的 ID，不得生成数值、投资建议或新事实。"}, {"role": "user", "content": json.dumps({"focus": req.focus, "question": req.question, "candidates": candidates}, ensure_ascii=False)}]
     try:

@@ -1,7 +1,7 @@
 """受控的自然语言因子生成服务。
 
 本模块只生成并静态校验 ``FactorLibrary`` 的单个方法；不会执行模型输出。
-真实密钥仅从环境变量读取，供应商调用使用 OpenAI 兼容的 Chat Completions 协议。
+共享供应商地址、密钥和模型可从 config.yaml 或环境变量读取；调用使用 OpenAI 兼容协议。
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 from app.api import llm_provider
+from app.config import get_runtime_settings
 from app.schemas.backtest import (
     FactorGenerationMeta,
     FactorGenerationRequest,
@@ -99,16 +100,19 @@ def generate_factor(req: FactorGenerationRequest) -> FactorGenerationResponse:
 
 
 def _settings_from_env() -> ProviderSettings:
-    # ``ARK_API_KEY`` 与火山方舟官方 SDK 示例保持一致；前者是本服务的专用配置名。
-    api_key = os.environ.get("AI_FACTOR_API_KEY") or os.environ.get("ARK_API_KEY")
+    # 环境变量优先，未设置时使用 config.yaml 中的共享 AI 配置。
+    config = get_runtime_settings()
+    api_key = (
+        os.environ.get("AI_FACTOR_API_KEY")
+        or os.environ.get("ARK_API_KEY")
+        or config.ai_api_key
+    )
     if not api_key:
         raise HTTPException(503, "AI 因子生成服务尚未配置")
     return ProviderSettings(
-        base_url=os.environ.get(
-            "AI_FACTOR_BASE_URL", "https://ark.cn-beijing.volces.com/api/plan/v3"
-        ).rstrip("/"),
+        base_url=os.environ.get("AI_FACTOR_BASE_URL", config.ai_base_url).rstrip("/"),
         api_key=api_key,
-        model=os.environ.get("AI_FACTOR_MODEL_ALIAS", "ark-code-latest"),
+        model=os.environ.get("AI_FACTOR_MODEL_ALIAS", config.ai_model),
     )
 
 
