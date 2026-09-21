@@ -11,8 +11,10 @@ AI 因子草稿端点只生成并静态校验代码，不执行回测，待 SaaS
 ## 运行
 
 ```bash
+# 安装依赖时激活目标环境
 conda activate researchengine
 python -m pip install -e ".[api]"
+# 启动脚本会自行激活环境
 cp config.example.yaml config.yaml
 ./scripts/research-engine.sh start
 ```

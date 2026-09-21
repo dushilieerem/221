@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 # ResearchEngine 的后台进程控制脚本。
-# 运行参数全部来自项目根目录 config.yaml；启动前由人工激活 researchengine 环境。
+# 运行参数全部来自项目根目录 config.yaml；start/restart 会自动激活 researchengine 环境。
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 RESEARCH_ENGINE_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
@@ -11,7 +11,7 @@ RUN_DIR="$RESEARCH_ENGINE_ROOT/run"
 LOG_FILE="$RESEARCH_ENGINE_ROOT/logs/app.log"
 PID_FILE="$RUN_DIR/app.pid"
 CONFIG_FILE="$RESEARCH_ENGINE_ROOT/config.yaml"
-PYTHON_BIN="python"
+PYTHON_BIN=""
 APP_MODULE="app.main"
 CONDA_ENV_NAME="researchengine"
 
@@ -21,14 +21,52 @@ require_runtime() {
             "$CONFIG_FILE" >&2
         return 1
     fi
-    if [[ "${CONDA_DEFAULT_ENV:-}" != "$CONDA_ENV_NAME" ]]; then
-        printf '请先激活 Conda 环境: conda activate %s\n' "$CONDA_ENV_NAME" >&2
+
+    activate_conda_environment
+}
+
+activate_conda_environment() {
+    if [[ "${CONDA_DEFAULT_ENV:-}" == "$CONDA_ENV_NAME" \
+        && -n "${CONDA_PREFIX:-}" \
+        && -x "$CONDA_PREFIX/bin/python" ]]; then
+        PYTHON_BIN="$CONDA_PREFIX/bin/python"
+        return 0
+    fi
+
+    local conda_executable="${CONDA_EXE:-}"
+    if [[ ! -x "$conda_executable" ]]; then
+        conda_executable="$(type -P conda || true)"
+    fi
+    if [[ -z "$conda_executable" ]]; then
+        printf '找不到 Conda 可执行文件；请将 conda 加入 PATH，或设置 CONDA_EXE。\n' >&2
         return 1
     fi
-    if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
-        printf '当前环境中找不到 python: %s\n' "$CONDA_DEFAULT_ENV" >&2
+
+    local conda_base
+    conda_base="$("$conda_executable" info --base 2>/dev/null || true)"
+    if [[ -z "$conda_base" ]]; then
+        conda_base="$(cd -- "$(dirname -- "$conda_executable")/.." && pwd -P)"
+    fi
+    local conda_init="$conda_base/etc/profile.d/conda.sh"
+    if [[ ! -r "$conda_init" ]]; then
+        printf '找不到 Conda 初始化脚本: %s\n' "$conda_init" >&2
         return 1
     fi
+
+    # shellcheck disable=SC1090
+    source "$conda_init"
+    if ! conda activate "$CONDA_ENV_NAME"; then
+        printf '无法激活 Conda 环境: %s\n' "$CONDA_ENV_NAME" >&2
+        return 1
+    fi
+    if [[ "${CONDA_DEFAULT_ENV:-}" != "$CONDA_ENV_NAME" \
+        || -z "${CONDA_PREFIX:-}" \
+        || ! -x "$CONDA_PREFIX/bin/python" ]]; then
+        printf 'Conda 环境 %s 未提供可执行的 Python。\n' "$CONDA_ENV_NAME" >&2
+        return 1
+    fi
+
+    PYTHON_BIN="$CONDA_PREFIX/bin/python"
 }
 
 health_url() {
@@ -185,8 +223,7 @@ usage() {
   ./scripts/research-engine.sh status
   ./scripts/research-engine.sh logs [--no-follow]
 
-启动前:
-  conda activate researchengine
+启动前只需准备配置文件；start/restart 会自动激活 researchengine Conda 环境:
   cp config.example.yaml config.yaml
   # 手工填写 config.yaml
 

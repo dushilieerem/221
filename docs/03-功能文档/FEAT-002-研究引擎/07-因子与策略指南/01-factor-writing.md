@@ -1,6 +1,7 @@
-# 因子编写规范
+# 因子实现速查（ResearchEngine）
 
-> 适用对象：因子研究员
+> 适用对象：需要把因子公式交给 ResearchEngine 计算的研究员与开发同事
+> 研究流程、假设设计和结果判断见[策略部因子与策略编写手册](00-策略部因子与策略编写手册.md)。
 > 关联：[策略编写指南入口](../07-factor-strategy-guide.md)
 
 ## 1. 因子库与因子
@@ -43,17 +44,19 @@ def ep_ratio(self):
 
 ## 3. 当前因子面板字段
 
-| 分类 | 字段 |
+| 分类 | 当前常用字段 |
 |------|------|
 | 价格 | `open`、`high`、`low`、`close` |
 | 成交 | `volume`、`amount`、`turnover` |
-| 市值/股本 | `total_mv`、`float_mv`、`total_shares`、`float_shares` |
-| 估值 | `pe_ttm`、`pb`、`ps_ttm` |
-| 状态 | `is_st`、`limit_up` |
+| 市值 | `current_mv` |
+| 估值 | `dividend_yield_ttm`、`pe_ttm`、`pb_mrq`、`pcf_operating_cash_flow_ttm` |
+| 状态/行业 | `listed_status`、`the_sw_industry_code`、`up_and_down_status` |
+
+实际可用字段取决于当前行情数据版本，可先通过 `self.fields` 检查；其他已装载字段可用 `self["字段名"]` 访问。指数日线可用 `self.csi300.close`、`self.csi500.close`、`self.csi1000.close` 与 `self.sse50.close` 访问。
 
 使用 `self.fields` 判断字段是否存在。缺失字段不能用最新静态值替代：应改用可用字段，或停止该因子的回测。
 
-基准指数可用 `self.csi300.close`、`self.csi500.close`、`self.sse50.close` 与 `self.csi1000.close` 访问；与股票宽表计算时应按日期对齐：
+与指数比较时按日期对齐：
 
 ```python
 def relative_strength_vs_csi300(self, window=20):

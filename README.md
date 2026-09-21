@@ -41,7 +41,7 @@ cp config.example.yaml config.yaml
   清单，再更新这一项；需要逐文件完整性校验时将 `data.verify_hashes` 改为 `true`。
 - `config.yaml`、日志、PID、缓存和回测输出均不会提交到 Git。
 
-启动前必须激活 `researchengine` 环境：
+后台启动脚本会自动激活 `researchengine` 环境，无需预先手动激活：
 
 ```bash
 ./scripts/research-engine.sh start
