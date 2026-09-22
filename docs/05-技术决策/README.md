@@ -13,4 +13,4 @@ ADR 通过后，应同步更新 [`../02-架构文档/`](../02-架构文档/)、�
 | 与项目级决策共同生效 | ADR-023、根目录 ADR-028、ADR-029 | 是；单一 `app.*` 命名空间、BacktestEngine 四引擎和 services/models/database 分层是当前基线。 |
 | 提议/后续演进 | ADR-012、013、015、026 | 否；只能作为后续需求输入，不能覆盖当前架构文档的已实施描述。 |
 
-同步顺序固定为：先更新已接受 ADR 的状态和结论，再更新 [`ResearchEngine 架构文档`](../02-架构文档/researchengine_architecture.md)；若影响系统边界、公共 API、MarketData 或部署方式，再同步根目录 [`架构文档`](../../../docs/02-架构文档/)。
+同步顺序固定为：先更新已接受 ADR 的状态和结论，再更新[`当前系统架构`](../系统文档/架构文档/系统架构.md)及相关模块设计；若影响系统边界、公共 API、MarketData 或部署方式，再同步同级项目的[`架构文档`](../../../docs/02-架构文档/)。旧版展开稿见 [`../02-架构文档/researchengine_architecture.md`](../02-架构文档/researchengine_architecture.md)，不作为当前实现基线。

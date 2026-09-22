@@ -4,6 +4,8 @@ ResearchEngine 是独立的量化投研服务。它通过 HTTP API 为仍位于 
 仓库中的 WebApp 提供因子/策略回测和市场数据查询能力；WebApp 不导入本项目
 的 Python 包，也不读取本项目的本地资产。
 
+系统级需求、架构、模块、数据库、API、测试、部署和使用说明见[标准系统文档](docs/系统文档/README.md)。按 Feature 维护的需求、设计和验证材料见 [`docs/README.md`](docs/README.md)。
+
 本仓库采用从 SVQuant 当前版本抽取的独立历史。两个仓库当前仍按锁步方式发布，
 API 契约和契约测试由 ResearchEngine 开发人员维护。
 

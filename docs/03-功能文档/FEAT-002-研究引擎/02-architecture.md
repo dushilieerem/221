@@ -1,5 +1,7 @@
 # ResearchEngine 架构
 
+> 历史架构设计稿。正文包含已废弃的 QuantCore 包边界、多实例拓扑和旧同步 API 语义；请勿作为当前实现说明。当前系统边界见[标准系统架构](../../系统文档/架构文档/系统架构.md)，实现级架构记录见[模块设计](../../系统文档/模块详细设计/研究引擎/模块设计.md)。
+
 > 2026-08-28 架构修订：用户已确认 ADR-029 的常规 FastAPI 分层。
 > 原 QuantCore 运行时边界取消；五个 Engine 的业务逻辑进入 `app.services`，
 > Panel、MetricContext、回测规格/结果和实验上下文进入 `app.models`，数据访问进入 `app.database`。
@@ -10,8 +12,8 @@
 
 > [FEAT-030 当前实现](../../../../docs/03-功能文档/FEAT-030-因子回测流程重构/README.md)：Experiment → BacktestEngine →
 > DataEngine / FactorEngine / PortfolioEngine / MetricEngine；BacktestEngine 位于 services，
-> 其余四引擎位于 QuantCore，不反向依赖 services 或 HTTP schema。
-> 本文以下保留既有阶段设计；策略仍可使用 Native/Event，因子主链的阶段性验证见 FEAT-030。
+> 四个计算引擎也位于 `app.services`，均由 BacktestEngine 编排。
+> 本文正文保留更早阶段的历史设计，不代表当前目录、调用或 API 行为。
 
 > 文档版本：v2.2
 > 最后更新：2026-08-19

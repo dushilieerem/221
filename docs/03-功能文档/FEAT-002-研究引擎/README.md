@@ -1,5 +1,7 @@
 # FEAT-002：ResearchEngine 研究服务
 
+> 当前系统基线统一见[标准系统文档](../../系统文档/README.md)。本目录保留 FEAT-002 的提案和交付材料；带有“历史设计稿”标识的旧架构/模块/类/流程文档不代表当前代码结构。
+
 > 2026-08-28 架构修订：用户已确认 ADR-029 的常规 FastAPI 分层。
 > 原 QuantCore 运行时边界取消；五个 Engine 的业务逻辑进入 `app.services`，
 > Panel、MetricContext、回测规格/结果和实验上下文进入 `app.models`，数据访问进入 `app.database`。
@@ -19,17 +21,20 @@
 
 ## 文档索引
 
-- `01-feature-proposal.md`：功能背景和范围
-- `02-architecture.md`：业务无状态、进程级 Manager 与并发架构
-- `03-modules.md`：模块职责
-- `04-class-design.md`：类设计
-- `05-runtime-flow.md`：运行流程
-- `06-research-api.md`：HTTP API 索引；回测接口和 Manager 内部任务调度说明位于 `06-研究接口文档/`
+- [当前需求和功能范围](../../系统文档/需求文档/PRD.md)：ResearchEngine 当前系统实现基线
+- [当前系统架构](../../系统文档/架构文档/系统架构.md)：系统边界和依赖关系
+- [当前模块/类/流程设计](../../系统文档/模块详细设计/README.md)：代码模块、核心对象和运行时序
+- `01-feature-proposal.md`：早期 Feature 提案，保留当时背景和方案
+- `02-architecture.md`：历史架构设计稿，当前实现见标准系统架构
+- `03-modules.md`：历史模块划分稿，当前实现见标准模块设计
+- `04-class-design.md`：历史类设计稿，当前实现见标准类设计
+- `05-runtime-flow.md`：历史运行流程稿，当前流程见标准流程设计
+- `06-research-api.md`：HTTP API 使用索引；回测接口和任务说明位于 `06-研究接口文档/`，完整路由索引见[标准 API 设计](../../系统文档/API设计/API设计.md)
 - `07-factor-strategy-guide.md`：因子与策略编写指南入口，含策略部研究手册及 ResearchEngine 因子、向量化策略、事件策略和示例文档
 - `08-factor-analysis-api-extension.md`：因子分析序列与行业曲线 API 增量交付材料
 - `09-factor-analysis-api-verification.md`：因子分析 API 增量验证记录
 - `10-strategy-backtest-api-verification.md`：策略回测 API MVP 验证记录
 
-## 文档缺口
+## Feature 交付材料状态
 
-该 Feature 在新工作流建立前已实现，尚需补充正式 Project Plan 和 Verification。本次因子分析 API 增量按当前 Feature 文档包交付；后续新增 AI、持久化、团队协作等独立业务能力应拆分为新的 Feature。
+该 Feature 在新工作流建立前已实现，Feature 层仍未形成完整的 Project Plan 和统一 Verification 包；因子分析和策略回测增量各有独立验证记录。后续 AI、持久化、团队协作等独立业务能力按各自 Feature 维护。
