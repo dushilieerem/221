@@ -29,6 +29,8 @@ cp config.example.yaml config.yaml
 | 模块 | 方法 | 端点 | 文档 |
 |------|------|------|------|
 | 系统 | GET | `/api/health` | [健康检查](06-研究接口文档/health.md) |
+| 系统 | GET | `/api/data/status` | [行情发布与重载](06-研究接口文档/data-release.md) |
+| 系统 | POST | `/api/data/reload` | [行情发布与重载](06-研究接口文档/data-release.md) |
 | 因子目录 | GET | `/api/factor-libraries` | [因子库目录](06-研究接口文档/factor-libraries.md) |
 | 因子目录 | GET | `/api/factors/{library_name}` | [指定库因子列表](06-研究接口文档/factor-library-factors.md) |
 | AI 因子草稿 | POST | `/api/ai/factor-generations` | [AI 因子草稿生成](06-研究接口文档/ai-factor-generations.md) |
@@ -47,7 +49,8 @@ cp config.example.yaml config.yaml
 ## 共同约束
 
 - 市场数据与回测均只读根目录 `config.yaml` 指定的已发布历史 Parquet；启动时必须通过
-  `data_manifest.yaml` 的版本校验。用户资产的 CRUD、鉴权和资产引用解析均由 WebApp 负责；
+  `data_manifest.yaml` 的版本校验。运行期检测到发布切换时按同一套校验自动重载，不需要重启
+  服务（见 [行情发布与重载](06-研究接口文档/data-release.md)）。用户资产的 CRUD、鉴权和资产引用解析均由 WebApp 负责；
   ResearchEngine 只接收已解析快照。
 - 请求体不符合契约或含未知字段时返回 `422`；队列满时返回 `429`；Manager 已关闭时返回 `503`。
 - `POST /api/backtest/factor` 只提交任务并立即返回 `202`、`run_id` 和轮询地址；因子代码、数据读取或执行错误在任务查询中统一表现为 `status=failed` 和 `error`。

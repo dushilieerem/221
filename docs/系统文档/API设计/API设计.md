@@ -43,6 +43,8 @@ http://<host>:<server.port>/api
 | 方法 | 路径 | 功能 | 详细契约 |
 |---|---|---|---|
 | GET | `/api/health` | 健康状态和版本 | 本页 / OpenAPI |
+| GET | `/api/data/status` | 当前行情 release 的状态 | [行情发布与重载](../../03-功能文档/FEAT-002-研究引擎/06-研究接口文档/data-release.md) |
+| POST | `/api/data/reload` | 手动重载行情 release | [行情发布与重载](../../03-功能文档/FEAT-002-研究引擎/06-研究接口文档/data-release.md) |
 | GET | `/api/factor-libraries` | 因子库列表 | [因子目录 API](../../03-功能文档/FEAT-002-研究引擎/06-研究接口文档/factor-libraries.md) |
 | GET | `/api/factors/{library_name}` | 指定库的因子列表 | [因子目录 API](../../03-功能文档/FEAT-002-研究引擎/06-研究接口文档/factor-library-factors.md) |
 | GET | `/api/strategies` | 策略目录 | [策略目录 API](../../03-功能文档/FEAT-002-研究引擎/06-研究接口文档/strategy-list.md) |
@@ -101,6 +103,6 @@ http://<host>:<server.port>/api
 ## 6. 权限、幂等与限流
 
 - 权限要求：当前没有 API 身份认证或权限中间件；请通过受控网络提供服务。
-- 幂等性：因子请求和批量批次按各自任务键/批次键执行去重或复用；普通 GET 查询天然只读。详细语义见对应接口文档。
+- 幂等性：因子请求和批量批次按各自任务键/批次键执行去重或复用；普通 GET 查询天然只读；`POST /api/data/reload` 只重新装载当前已发布 release，不修改行情文件，重复调用等价。详细语义见对应接口文档。
 - 限流：未实现通用请求速率限制。回测任务由有界 Manager 控制并发/队列，队列满时返回 `429`。
 - 安全边界：允许提交代码的回测端点只面向受信任调用方；当前没有执行沙箱。
