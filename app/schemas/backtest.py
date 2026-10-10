@@ -555,6 +555,14 @@ class HealthResponse(BaseModel):
     engines: list[str] = ["native"]
 
 
+class DataReleaseStatusResponse(BaseModel):
+    """当前已装载行情 release 的状态；``/api/data/status`` 与重载接口共用。"""
+
+    data_version: str | None = None
+    release_id: str | None = None
+    data_dir: str | None = None
+
+
 class DailyBar(BaseModel):
     """单个标的的完整日线 OHLC 数据点。"""
 

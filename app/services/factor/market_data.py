@@ -166,6 +166,18 @@ def _get_stock_names() -> dict[str, str]:
     return names
 
 
+def reset_market_data_caches() -> None:
+    """清除按数据目录复用的展示层引擎与证券主数据。
+
+    行情 release 切换后必须调用；否则行情图表、股票列表和指数成分接口
+    会继续复用旧 release 的引擎。下次访问时按新数据目录重新构建。
+    """
+
+    _DATA_ENGINES.clear()
+    _DISPLAY_DATA_ENGINES.clear()
+    _STOCK_NAMES.clear()
+
+
 def get_daily_bars(
     symbol: str, start: date | None = None, end: date | None = None
 ) -> MarketDailyBars:
@@ -306,4 +318,5 @@ __all__ = [
     "get_index_constituents",
     "get_indices",
     "get_symbols",
+    "reset_market_data_caches",
 ]

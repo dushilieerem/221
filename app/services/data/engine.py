@@ -116,12 +116,15 @@ class DataEngine:
         """从 MarketData Parquet 加载当前 release。
 
         字段缓存是 DataEngine 私有状态，不再由 provider 或 Manager 取得
-        进程全局缓存。
+        进程全局缓存。先构建新 provider，成功后才替换当前 release；构建
+        失败时保持原 release 与缓存不变（供发布监视器安全重试）。
         """
         from app.database.data.providers.field_parquet_provider import FieldParquetProvider
 
-        self._cache = FieldFrameCache()
-        self.load(FieldParquetProvider(data_dir, cache=self._cache))
+        cache = FieldFrameCache()
+        provider = FieldParquetProvider(data_dir, cache=cache)
+        self._cache = cache
+        self.load(provider)
 
     # ``set_provider`` 是已有低层使用方的同义入口；新代码应使用 ``load``，
     # 以强调这是一次 release 装载而非任务期间的任意切换。

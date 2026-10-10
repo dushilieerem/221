@@ -196,10 +196,18 @@ def _request_spec(req: FactorBacktestRequest) -> FactorBacktestSpec:
 def _factor_cache_key(spec: FactorBacktestSpec, cache, *, data_context=None) -> str:
     if isinstance(spec, FactorBacktestRequest):
         spec = _request_spec(spec)
-    data_dir = Path(
-        getattr(data_context, "data_dir", None) or _resolve_data_dir(None)
-    )
     release_id = getattr(data_context, "release_id", None)
+    if release_id is None:
+        # 非文件型 provider 没有 release 身份，回退到磁盘指纹（成本更高）。
+        data_dir = Path(
+            getattr(data_context, "data_dir", None) or _resolve_data_dir(None)
+        )
+        data_fingerprint = cache.data_fingerprint(data_dir)
+    else:
+        # release 签名覆盖 provider 消费的全部行情文件，用它作为数据身份：
+        # 既避免每次请求重扫全量 parquet，也保证结果缓存与本次实际使用的
+        # release 严格对应，发布切换后旧结果不会命中。
+        data_fingerprint = str(release_id)
     return cache.make_key(
         {
             **spec.computation_payload(),
@@ -207,7 +215,7 @@ def _factor_cache_key(spec: FactorBacktestSpec, cache, *, data_context=None) -> 
             "execution_version": spec.execution_version,
             "metric_version": spec.metric_version,
         },
-        cache.data_fingerprint(data_dir),
+        data_fingerprint,
     )
 
 

@@ -585,6 +585,16 @@ class FieldParquetProvider(IDataProvider):
             self._read_field(field)
         return self._cache.stats()
 
+    def current_release_signature(self) -> str:
+        """按当前磁盘状态重算 release 签名。
+
+        与构造时的 ``release_id`` 使用同一组目录和算法，用于检测数据发布
+        切换；只读取文件元数据（大小/修改时间），不读数据内容，可由发布
+        监视器低成本地周期性调用。
+        """
+
+        return _release_signature(self.data_dir, self._panels_dir, self._benchmark_dir)
+
     def get_index(
         self,
         name: str,

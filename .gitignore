@@ -19,3 +19,7 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+
+# SQLite WAL 模式运行时附属文件（如 factor_backtest.db-wal/-shm）。
+*.db-wal
+*.db-shm

@@ -2,11 +2,12 @@
 
 from fastapi import APIRouter
 
-from app.api.routes import ai, batch, catalog, factor, health, strategy
+from app.api.routes import ai, batch, catalog, data, factor, health, strategy
 
 
 router = APIRouter(prefix="/api")
 router.include_router(health.router)
+router.include_router(data.router)
 router.include_router(catalog.router)
 router.include_router(ai.router)
 router.include_router(factor.router)

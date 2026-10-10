@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
+import asyncio
+from contextlib import asynccontextmanager, suppress
 import logging
 
 from fastapi import FastAPI
@@ -19,6 +20,7 @@ from app.services.factor_backtest_batch.task_registry import FactorBacktestBatch
 from app.services.experiment.manager import ExperimentManager
 from app.services.data.engine import DataEngine
 from app.services.data.manifest import validate_data_manifest
+from app.services.data.release_watcher import DataReleaseWatcher
 
 
 logger = logging.getLogger(__name__)
@@ -64,6 +66,7 @@ async def lifespan(application: FastAPI):
     )
     data_engine: DataEngine = application.state.data_engine
 
+    watcher_task: asyncio.Task | None = None
     if not testing:
         manifest = validate_data_manifest(
             settings.data_dir,
@@ -82,10 +85,20 @@ async def lifespan(application: FastAPI):
 
         # 只装载数据来源；字段在因子任务按 spec 日期请求时读取，不做全量预热。
         data_engine.load_parquet(manifest.data_dir)
+
+        # 数据侧原地更新行情目录；后台监视 release 签名变化并自动重载。
+        watcher_task = asyncio.create_task(
+            DataReleaseWatcher(data_engine, settings).run(),
+            name="data-release-watcher",
+        )
     manager.start()
     try:
         yield
     finally:
+        if watcher_task is not None:
+            watcher_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await watcher_task
         # 协调线程可能正在等待 Manager 的因子 worker；必须先等它退出。
         task_registry.shutdown(wait=True)
         manager.shutdown()
