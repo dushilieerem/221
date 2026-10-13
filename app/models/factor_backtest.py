@@ -81,7 +81,7 @@ class FactorBacktestSpec:
     data_dir: str | None = field(default=None, compare=False, repr=False)
     output_path: str | None = field(default=None, compare=False, repr=False)
     storage: str = field(default="csv", compare=False, repr=False)
-    execution_version: str = "factor-execution-v5"
+    execution_version: str = "factor-execution-v6"
     metric_version: str = "factor-scorecard-v3"
 
     def computation_payload(self) -> dict[str, Any]:

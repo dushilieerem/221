@@ -102,6 +102,16 @@ GET /api/backtest/factor/9f1c...
 
 四个 `filter_*` 开关互相独立，默认全部关闭——不传时回测结果与不启用过滤完全一致。开启后不合格标的的因子值被置空，**在去极值和标准化之前**退出研究样本，因此不会参与截面参数估计、分层与选股。
 
+#### 退市剔除（恒开启，无开关）
+
+除上述四项可选开关外，回测**始终**按 `listed_status` 剔除退市（不可投资）标的：只有 `在市`、`ST`、`*ST` 三种取值可进入研究样本，`终止上市`、`退市整理`、`暂停上市`、空值以及未来任何未知取值一律剔除。这一项没有对应的请求参数，无法关闭，`filter_status["is_delisted"]` 恒为 `enabled`。
+
+之所以强制：本 release 的 `market_data_hfq.parquet` 在标的终止上市后**不再置空 OHLC**，而是把价格冻结在最后成交价。不剔除时，只用价格的横截面因子（低波动、低 beta、低换手等）会把这批冻结价标的排到最前——实测 2020-06-30 / 2023-06-30 / 2025-06-30 三个时点的「20 日波动率最低 Top30」中分别有 **29 / 30 / 30 只**是不可投资标的（波动率恒为 0），回测会得到零回撤的假曲线。加上本过滤后这三个时点的 Top30 中不可投资标的数均为 0。
+
+剔除是**点时**的，不是整段的：标的只从「进入退市状态的那一天」起被排除，退市之前的正常交易历史照常参与，避免存活偏差。
+
+空值与四项开关的口径**相反**：`listed_status` 的缺失值是标的上市前的空档，与价格数据完全不重叠，这里按**不可投资**处理而不是放行；单元格级缺失不产生告警（数量以百万计且属预期状态）。只有 `listed_status` 字段整个缺失时才降级跳过，记为 `skipped_missing_field` 并附告警。
+
 过滤作用在样本资格层，不删除行情行。状态字段缺失时的行为按「跳过并放行」处理：
 
 | 数据版本情况 | 结果 |
@@ -110,7 +120,9 @@ GET /api/backtest/factor/9f1c...
 | 字段存在、部分单元格为空 | 空值单元格按放行，记为 `enabled_partial` 并附告警 |
 | 字段整个缺失（如当前 release 无停牌字段） | 跳过该项过滤并放行，记为 `skipped_missing_field` 并附告警 |
 
-对应的状态字段是 `filter_st` → `listed_status`（取值 `ST`、`*ST`），其余三项 → `up_and_down_status`（取值 `停牌`、`涨停`、`跌停`）。`meta.filter_status` 回显四项各自的上述状态，`meta.warnings` 给出「覆盖不足」等告警原文。
+对应的状态字段是 `filter_st` → `listed_status`（取值 `ST`、`*ST`），其余三项 → `up_and_down_status`（取值 `停牌`、`涨停`、`跌停`）。`meta.filter_status` 回显四项各自的上述状态，`meta.warnings` 给出「覆盖不足」等告警原文。上表的「放行」口径只适用于这四项可选开关；退市剔除的缺失口径相反，见上一节。
+
+**已知局限**：掩码在因子值算完之后应用（这样滚动窗口不受过滤影响）。因此因子若在 `compute()` 内部自己做横截面运算（`rank`/`zscore`/`normalize`），横截面里仍会包含冻结的退市股，影响量级为 O(1/N)。打分卡自身的去极值/标准化在掩码之后执行，是干净的。需要严格截面口径的因子应自行按 `listed_status` 白名单过滤。
 
 任务成功时，`result` 包含 `metrics`、`equity_curve`、`drawdowns`、`annual_returns`、`factor_analysis`、`date_range`、`final_equity`、`benchmark_curve`、`excess_return`、`meta` 和 `error`。因子代码、数据或回测执行错误不再要求前端解析 `result.error`，而是以任务 `status=failed` 和顶层 `error` 返回。
 
@@ -149,7 +161,9 @@ GET /api/backtest/factor/9f1c...
 
 因子回测响应的 `meta` 会明确返回因子价格和收益价格的复权口径、字段、逻辑来源及精度策略。当前默认策略为：因子使用后复权 OHLC，收益使用后复权 close，均来自研究行情 `data_engine`，读取源精度且不额外四舍五入。`unadjusted_price/unadjusted_price.parquet` 只用于行情展示接口，不参与因子计算。
 
-`meta` 同时回显本次请求的过滤开关 `filter_suspended`、`filter_st`、`filter_limit_up`、`filter_limit_down`，以及诊断字典 `filter_status`（键为 `is_suspended`、`is_st`、`is_limit_up`、`is_limit_down`，取值为 `disabled`、`skipped_missing_field`、`enabled`、`enabled_partial`）。即使四项开关全关，`filter_status` 也会返回四个 `disabled`，便于前端统一渲染。
+`meta` 同时回显本次请求的过滤开关 `filter_suspended`、`filter_st`、`filter_limit_up`、`filter_limit_down`，以及诊断字典 `filter_status`（键为 `is_suspended`、`is_st`、`is_limit_up`、`is_limit_down`、`is_delisted`，取值为 `disabled`、`skipped_missing_field`、`enabled`、`enabled_partial`）。即使四项开关全关，`filter_status` 也会返回四个 `disabled`；`is_delisted` 恒开启，正常为 `enabled`。
+
+> **缓存**：退市剔除改变了研究样本口径却不在请求参数里，因此执行版本号已从 `factor-execution-v5` 升到 `factor-execution-v6`，旧的磁盘缓存与批次记录不会命中，会按新口径重算一次。
 
 使用自定义资产的请求示例：
 

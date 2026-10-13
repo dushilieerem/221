@@ -27,7 +27,7 @@ METRIC_COLUMNS = (
     "benchmark_win_rate",
 )
 SCHEMA_VERSION = 2
-EXECUTION_VERSION = "factor-execution-v5"
+EXECUTION_VERSION = "factor-execution-v6"
 
 
 def default_factor_backtest_db_path() -> Path:

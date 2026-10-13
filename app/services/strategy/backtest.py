@@ -325,26 +325,10 @@ def _strategy_filter_info(data_engine, panels, req: StrategyBacktestRequest) -> 
     """按请求的过滤开关构造策略侧可交易性掩码。
 
     返回 ``{"mask", "status", "warnings"}``，``mask`` 为 ``True=允许交易``。
-    四个开关全关时掩码为 ``None``（不触发任何剔除），但仍回显四项 ``disabled``，
-    与因子回测的 ``filter_status`` 口径保持一致。
+    与因子回测口径一致：退市剔除恒开启，所以掩码不再有 ``None``（不剔除）
+    这个状态，即使四个可选开关全关也必须构造掩码。
     """
 
-    if not (
-        req.filter_suspended
-        or req.filter_st
-        or req.filter_limit_up
-        or req.filter_limit_down
-    ):
-        return {
-            "mask": None,
-            "status": {
-                "is_suspended": "disabled",
-                "is_st": "disabled",
-                "is_limit_up": "disabled",
-                "is_limit_down": "disabled",
-            },
-            "warnings": [],
-        }
     return data_engine.build_filter_mask(
         panels,
         filter_suspended=req.filter_suspended,
@@ -393,9 +377,9 @@ def _run_event_strategy_backtest(
             strategy,
             as_of=first_panel_date(date_probe),
         )
+        # 无条件加载 listed_status：退市剔除恒开启，不依赖 filter_st 开关。
         listed_status_available = True
-        if req.filter_st:
-            required_fields.add("listed_status")
+        required_fields.add("listed_status")
         try:
             panels = data_engine.get_task_panels(
                 req.start,
@@ -514,6 +498,12 @@ def _run_event_strategy_backtest(
                     ),
                     "is_limit_up": "matcher_always_on",
                     "is_limit_down": "matcher_always_on",
+                    # 退市剔除与停牌/涨跌停一样，在事件引擎里恒开启、无开关。
+                    "is_delisted": (
+                        "matcher_always_on"
+                        if listed_status_available
+                        else "skipped_missing_field"
+                    ),
                 },
                 trading_symbols=list(declared_symbols) or None,
             ),

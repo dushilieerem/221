@@ -40,6 +40,29 @@ class DailyBasicData:
     pe_ttm: DataFrame | None = None
 
 
+#: 可投资的上市状态白名单。``listed_status`` 取其余值时一律视为不可投资：
+#: ``终止上市`` / ``退市整理`` / ``暂停上市`` 是退市生命周期状态，缺失值表示
+#: 该日无上市状态记录（实测与价格数据完全不重叠），未来新增的未知取值也按
+#: 不可投资保守处理。判定口径由本常量唯一定义，因子侧与事件侧共同引用。
+INVESTABLE_LISTED_STATUS = frozenset({"在市", "ST", "*ST"})
+
+
+def is_delisted_status(value: object) -> bool:
+    """判断单个 ``listed_status`` 原始文本是否表示不可投资。
+
+    缺失值按不可投资处理。判定前做去空白，与数据源的原始文本口径一致。
+    """
+
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except (TypeError, ValueError):  # pragma: no cover - 非标量输入的防御
+        return True
+    return str(value).strip() not in INVESTABLE_LISTED_STATUS
+
+
 @dataclass(frozen=True)
 class SecurityStatusData:
     """`date_sequence/date_sequence.parquet` 的日频证券状态字段。"""

@@ -17,16 +17,19 @@ ExperimentManager，Manager 只负责调度。
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 import inspect
 import threading
 from pathlib import Path
 from typing import Any, List, Optional, Sequence, TypeVar
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.compute as pc
 
 from app.database.data.interface import IDataProvider
 from app.database.data.field_cache import FieldFrameCache
+from app.models.market_data import INVESTABLE_LISTED_STATUS
 
 
 _T = TypeVar("_T")
@@ -35,6 +38,18 @@ _CORE_PROVIDER_METHODS = (
     "get_universe",
     "get_symbols",
 )
+
+
+def _align_to(frame: pd.DataFrame, index: pd.Index, columns: pd.Index) -> pd.DataFrame:
+    """把面板对齐到目标 index/columns；形状一致时直接返回，避免空拷贝。
+
+    全市场面板的 ``reindex`` 是纯拷贝（2600×5900 约 0.8 秒），而调用方拿到的
+    字段大多本来就已经是对的形状，先比较再决定是否重排能省掉这笔开销。
+    """
+
+    if frame.index.equals(index) and frame.columns.equals(columns):
+        return frame
+    return frame.reindex(index=index, columns=columns)
 
 
 def default_market_data_dir() -> Path:
@@ -56,6 +71,10 @@ class DataEngine:
         self.provider: Optional[IDataProvider] = None
         self._cache: FieldFrameCache | None = None
         self._closed = False
+        # 上一次构造的退市掩码与其身份。退市剔除恒开启，掩码构造（全市场约
+        # 6 秒）必须能在同一 release 的重复任务间复用 —— 批量回测逐个因子都
+        # 用同一股票池和区间，命中率接近 100%。
+        self._delisted_mask_cache: tuple[str, pd.Index, pd.Index, pd.DataFrame] | None = None
         if provider is not None:
             self.load(provider)
 
@@ -198,6 +217,7 @@ class DataEngine:
         self.provider = None
         if self._cache is not None:
             self._cache.clear()
+        self._delisted_mask_cache = None
         self._closed = True
 
     def get_bars(
@@ -352,13 +372,25 @@ class DataEngine:
     def build_status_masks(
         self,
         panels: Mapping[str, pd.DataFrame] | Any,
+        *,
+        needed: Collection[str] | None = None,
     ) -> dict[str, pd.DataFrame]:
         """从证券状态原始文本构造日期×标的布尔掩码。
 
         当前数据源的 ``listed_status`` 和 ``up_and_down_status`` 都是原始文本
         面板，不是布尔字段。返回的掩码包括 ``is_st``、``is_limit_up``、
-        ``is_limit_down``、``is_limit`` 和 ``is_suspended``；缺少字段或缺失值
-        均按 ``False`` 处理，由调用方决定是否需要对覆盖不足发出告警。
+        ``is_limit_down``、``is_limit``、``is_suspended`` 和 ``is_delisted``。
+        除 ``is_delisted`` 外，字段缺失与单元格缺失一律按 ``False`` 处理，由
+        调用方决定是否需要对覆盖不足发出告警。
+
+        ``needed`` 可限定只构造其中若干键，其余键返回全 False 的占位掩码。
+        退市剔除恒开启，构造掩码不再是可选开销，因此调用方应按需索取，
+        避免为了没开的过滤项白算 ``up_and_down_status``（全市场约 6 秒）。
+
+        ``is_delisted`` 的口径与其他掩码相反：``listed_status`` 不在
+        :data:`app.models.market_data.INVESTABLE_LISTED_STATUS` 白名单内即为
+        ``True``，**缺失值也按退市处理**。``up_and_down_status`` 无法用于
+        识别退市（退市后该字段绝大多数为缺失），不要用它做退市判定。
         """
 
         def has_field(name: str) -> bool:
@@ -386,32 +418,139 @@ class DataEngine:
 
         index = reference.index
         columns = reference.columns
+        # 未启用的过滤项与缺失字段都用这一个全 False 占位掩码，不再逐项复制：
+        # 全市场尺寸下每次复制约 0.3 秒，而占位掩码恒为全 False、语义相同，
+        # 返回同一个实例是安全的（消费方只读取，不会原地改写）。
         empty = pd.DataFrame(False, index=index, columns=columns)
 
-        def normalized_status(name: str) -> pd.DataFrame | None:
+        def status_coverage(name: str) -> pd.Series | None:
+            """该状态字段在原始面板里的列覆盖情况（整列为空 = 未覆盖该标的）。"""
+
             if not has_field(name):
                 return None
-            values = get_field(name).reindex(index=index, columns=columns)
-            # 状态面板是 DataFrame；DataFrame 本身没有 .str accessor，需逐列
-            # 使用 Series.str.strip()。
-            return values.astype("string").apply(lambda column: column.str.strip())
+            return get_field(name).notna().any()
 
-        listed = normalized_status("listed_status")
-        market_status = normalized_status("up_and_down_status")
+        def aligned(frame: pd.DataFrame) -> pd.DataFrame:
+            return _align_to(frame, index, columns)
 
-        def status_mask(values: pd.DataFrame | None, predicate) -> pd.DataFrame:
-            if values is None:
-                return empty.copy()
-            return predicate(values).fillna(False).astype(bool)
+        def trimmed_flat(frame: pd.DataFrame) -> object | None:
+            """把状态面板压成一维、按 Arrow 向量化去空白。
+
+            pandas 会**逐列**执行 ``DataFrame.isin`` 与 ``Series.str.strip``，
+            全市场 5946 列时每次约 1.6 / 5.4 秒。压成一维后 trim 与集合判定
+            各自只需一次调用，整表不到 1 秒。非字符串后端返回 ``None``，由
+            调用方回退到逐列实现。
+            """
+
+            try:
+                table = pa.Table.from_pandas(frame, preserve_index=False)
+                flat = pa.concat_arrays(
+                    [chunk for column in table.columns for chunk in column.chunks]
+                )
+                return pc.utf8_trim_whitespace(flat)
+            except (pa.ArrowException, ValueError, TypeError):
+                return None
+
+        # 同一状态字段会被多个谓词复用（up_and_down_status 最多三次），
+        # 对齐后的面板与去空白结果各算一次即可。
+        field_state: dict[str, tuple[pd.DataFrame, object | None]] = {}
+
+        def aligned_status(name: str) -> tuple[pd.DataFrame, object | None]:
+            if name not in field_state:
+                frame = aligned(get_field(name))
+                field_state[name] = (frame, trimmed_flat(frame))
+            return field_state[name]
+
+        def status_mask(name: str, matching: frozenset[str], *, negate: bool = False) -> pd.DataFrame:
+            """构造「规范文本属于 ``matching``」的布尔掩码。
+
+            缺失值与无效值一律为 ``False``（``negate`` 时取反前仍是 ``False``）。
+            """
+
+            if not has_field(name):
+                return empty
+            frame, trimmed = aligned_status(name)
+            if trimmed is None:
+                # 回退：小面板或非 Arrow 后端，逐列 strip 后比较。
+                plain = frame.astype("string").apply(lambda column: column.str.strip())
+                result = plain.isin(matching).fillna(False).astype(bool)
+            else:
+                membership = pc.is_in(trimmed, value_set=pa.array(sorted(matching)))
+                array = membership.fill_null(False).to_numpy(zero_copy_only=False)
+                array = array.reshape(frame.shape[1], frame.shape[0]).T
+                if negate:
+                    array = ~array
+                return pd.DataFrame(array, index=frame.index, columns=frame.columns)
+            return ~result if negate else result
+
+        def wanted(key: str) -> bool:
+            return needed is None or key in needed
+
+        def cached_delisted_mask() -> pd.DataFrame:
+            """构造 ``is_delisted`` 掩码，按 release + 面板身份复用上一次结果。
+
+            只有当 DataEngine 绑定到真实 release 时才缓存：此时同一 release
+            的同一 (index, columns) 切片恒有相同内容，缓存键是完备的。测试与
+            轻量 provider 直接传 dict 时没有 release 身份，不做缓存，避免
+            相同形状但内容不同的面板之间串味。
+            """
+
+            release = self.release_id
+            if release is not None and self._delisted_mask_cache is not None:
+                cached_release, cached_index, cached_columns, cached = (
+                    self._delisted_mask_cache
+                )
+                if (
+                    cached_release == release
+                    and cached_index.equals(index)
+                    and cached_columns.equals(columns)
+                ):
+                    return cached
+            delisted_mask = status_mask(
+                "listed_status", INVESTABLE_LISTED_STATUS, negate=True
+            )
+            # 按任务股票池做列投影时，池内但状态面板未覆盖的标的会得到一整列
+            # 空值。这类「整列无覆盖」不等于退市（生产 release 每个标的都有
+            # 状态记录，这里防的是投影产物与外部数据源），按可投资处理；只有
+            # 确实被覆盖、但该日状态缺失的单元格才按不可投资处理。
+            listed_coverage = status_coverage("listed_status")
+            if listed_coverage is not None:
+                covered = listed_coverage.reindex(columns).fillna(False).astype(bool)
+                if not covered.all():
+                    delisted_mask.loc[:, covered[~covered].index] = False
+            if release is not None:
+                self._delisted_mask_cache = (release, index, columns, delisted_mask)
+            return delisted_mask
+
+        delisted = cached_delisted_mask() if wanted("is_delisted") else empty
 
         return {
-            "is_st": status_mask(listed, lambda values: values.isin({"ST", "*ST"})),
-            "is_limit_up": status_mask(market_status, lambda values: values.eq("涨停")),
-            "is_limit_down": status_mask(market_status, lambda values: values.eq("跌停")),
-            "is_limit": status_mask(
-                market_status, lambda values: values.isin({"涨停", "跌停"})
+            "is_st": (
+                status_mask("listed_status", frozenset({"ST", "*ST"}))
+                if wanted("is_st")
+                else empty
             ),
-            "is_suspended": status_mask(market_status, lambda values: values.eq("停牌")),
+            "is_delisted": delisted,
+            "is_limit_up": (
+                status_mask("up_and_down_status", frozenset({"涨停"}))
+                if wanted("is_limit_up")
+                else empty
+            ),
+            "is_limit_down": (
+                status_mask("up_and_down_status", frozenset({"跌停"}))
+                if wanted("is_limit_down")
+                else empty
+            ),
+            "is_limit": (
+                status_mask("up_and_down_status", frozenset({"涨停", "跌停"}))
+                if wanted("is_limit")
+                else empty
+            ),
+            "is_suspended": (
+                status_mask("up_and_down_status", frozenset({"停牌"}))
+                if wanted("is_suspended")
+                else empty
+            ),
         }
 
     def build_filter_mask(
@@ -429,6 +568,10 @@ class DataEngine:
         ``True=允许进入研究样本``。该方法只读取状态，不删除行情行，也不
         修改传入面板；缺少可选状态字段时跳过对应过滤并留下可序列化告警。
         ``Panel`` 和 provider 返回的字段映射都可直接传入。
+
+        与四个可选开关不同，**退市剔除恒开启且没有开关**：``listed_status`` 不在
+        白名单内的标的（含缺失值）一律排除出研究样本，避免退市后被前值填充
+        冻结的行情污染因子。调用方无法关闭它。
         """
 
         def has_field(name: str) -> bool:
@@ -454,8 +597,21 @@ class DataEngine:
         if reference is None:
             raise ValueError("无法构造过滤掩码：面板没有可用字段")
 
-        mask = pd.DataFrame(True, index=reference.index, columns=reference.columns)
-        status_masks = self.build_status_masks(panels)
+        # ``mask`` 懒创建：退市剔除恒开启，四项可选开关全关时最终掩码就等于
+        # ``~is_delisted``，没必要先铺一个全 True 的同尺寸面板再与一次。
+        mask: pd.DataFrame | None = None
+        # 退市剔除恒开启，所以至少要构造 is_delisted；其余掩码只在对应开关
+        # 打开时才构造，避免为没开的过滤项白算整个状态面板。
+        needed = {"is_delisted"}
+        if filter_suspended:
+            needed.add("is_suspended")
+        if filter_st:
+            needed.add("is_st")
+        if filter_limit_up:
+            needed.add("is_limit_up")
+        if filter_limit_down:
+            needed.add("is_limit_down")
+        status_masks = self.build_status_masks(panels, needed=needed)
         status: dict[str, str] = {}
         warnings: list[str] = []
 
@@ -478,17 +634,28 @@ class DataEngine:
             if not option:
                 status[status_key] = "disabled"
                 return
+
+            def ensure_mask() -> pd.DataFrame:
+                nonlocal mask
+                if mask is None:
+                    mask = pd.DataFrame(
+                        True, index=reference.index, columns=reference.columns
+                    )
+                return mask
+
             if not has_field(source_field):
                 status[status_key] = "skipped_missing_field"
                 warnings.append(
                     f"已跳过{status_key}过滤：当前数据版本缺少 {source_field} 状态字段"
                 )
                 return
-            raw_status = get_field(source_field).reindex(
-                index=mask.index, columns=mask.columns
+            # 用 reference 的轴而不是 mask：mask 是懒创建的，首次过滤时可能
+            # 尚未分配，而两者的 index/columns 本就同源。
+            raw_status = _align_to(
+                get_field(source_field), reference.index, reference.columns
             )
-            excluded = status_masks[mask_key].reindex(
-                index=mask.index, columns=mask.columns
+            excluded = _align_to(
+                status_masks[mask_key], reference.index, reference.columns
             ).mask(raw_status.isna())
             missing = int(raw_status.isna().sum().sum())
             if missing:
@@ -499,7 +666,37 @@ class DataEngine:
                 )
             else:
                 status[status_key] = "enabled"
-            mask &= ~excluded.fillna(False).astype(bool)
+            target = ensure_mask()
+            target &= ~excluded.fillna(False).astype(bool)
+
+        def apply_delisted_exclusion() -> None:
+            """无条件把退市（不可投资）标的排除出研究样本。
+
+            与 ``apply_status_filter`` 的关键区别：原始状态**缺失时按剔除处理**，
+            不做 ``raw_status.isna()`` 放行，也不记为 ``enabled_partial``。退市后
+            被前值填充冻结的行情会污染因子，缺失不能等同于放行。
+
+            字段整体缺失时按既有降级口径跳过（生产 release 恒提供该字段，见
+            ``data_manifest.yaml``），状态记为 ``skipped_missing_field`` 并留告警。
+            单元格级缺失不告警：那都是标的上市前的空档，数量以百万计且是
+            预期状态，逐次告警只会淹没真正的信号。
+            """
+
+            nonlocal mask
+            if not has_field("listed_status"):
+                status["is_delisted"] = "skipped_missing_field"
+                warnings.append(
+                    "已跳过退市剔除：当前数据版本缺少 listed_status 状态字段"
+                )
+                return
+            status["is_delisted"] = "enabled"
+            # 掩码与 mask 同源于 reference 的 index/columns，无需再对齐一次。
+            # 首个生效的过滤直接取反结果当掩码，省掉一次全尺寸面板分配。
+            excluded_delisted = ~status_masks["is_delisted"]
+            if mask is None:
+                mask = excluded_delisted
+            else:
+                mask &= excluded_delisted
 
         apply_status_filter(
             filter_suspended,
@@ -525,6 +722,11 @@ class DataEngine:
             source_field="up_and_down_status",
             mask_key="is_limit_down",
         )
+        # 退市剔除恒开启，没有开关，放在最后保证不可被任何选项覆盖。
+        apply_delisted_exclusion()
+        if mask is None:
+            # 只可能在没有 listed_status 字段降级、且四项可选开关全关时走到。
+            mask = pd.DataFrame(True, index=reference.index, columns=reference.columns)
 
         return {
             "mask": mask,

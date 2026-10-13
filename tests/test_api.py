@@ -95,6 +95,12 @@ def market_data_dir(tmp_path, monkeypatch):
     status.index.name = "datetime"
     status.reset_index().to_parquet(tmp_path / "up_and_down_status.parquet", index=False)
 
+    # 退市剔除恒开启，行情 fixture 必须提供 listed_status，否则退市过滤会
+    # 退化成 skipped_missing_field，主路径得不到覆盖。默认全部「在市」。
+    listed = pd.DataFrame("在市", index=dates, columns=symbols)
+    listed.index.name = "datetime"
+    listed.reset_index().to_parquet(tmp_path / "listed_status.parquet", index=False)
+
     display_dir = tmp_path / "display"
     display_dir.mkdir()
     display_columns = pd.MultiIndex.from_product(
@@ -973,6 +979,8 @@ def test_strategy_backtest_returns_equity_and_positions(market_data_dir):
             "is_st": "disabled",
             "is_limit_up": "disabled",
             "is_limit_down": "disabled",
+            # 退市剔除恒开启且没有开关，四个可选开关全关时它仍然生效。
+            "is_delisted": "enabled",
         },
     }
     assert body["metrics"]["total_return"] is not None
@@ -1517,7 +1525,9 @@ def test_structured_factor_portfolio_strategy_backtest(market_data_dir):
     assert body["positions"]
 
 
-def _write_structured_extra_fields(market_data_dir, *, listed_st=None, market_status=None):
+def _write_structured_extra_fields(
+    market_data_dir, *, listed_st=None, listed_delisted=None, market_status=None
+):
     """为结构化策略补写 pe_ttm 与状态字段，供过滤相关用例共享。"""
 
     dates = pd.bdate_range("2022-01-03", periods=90)
@@ -1528,9 +1538,13 @@ def _write_structured_extra_fields(market_data_dir, *, listed_st=None, market_st
     pe_ttm.index.name = "datetime"
     pe_ttm.reset_index().to_parquet(market_data_dir / "pe_ttm.parquet", index=False)
 
-    if listed_st is not None:
+    if listed_st is not None or listed_delisted is not None:
         listed = pd.DataFrame("在市", index=dates, columns=symbols)
-        listed[listed_st] = "ST"
+        if listed_st is not None:
+            listed[listed_st] = "ST"
+        if listed_delisted is not None:
+            # 后半段转为终止上市，用于验证「点时剔除」而不是整段剔除。
+            listed.loc[dates[len(dates) // 2]:, listed_delisted] = "终止上市"
         listed.index.name = "datetime"
         listed.reset_index().to_parquet(
             market_data_dir / "listed_status.parquet", index=False
@@ -1618,6 +1632,107 @@ def test_vectorized_structured_filter_st_drops_st_from_topn(market_data_dir):
     assert filtered["meta"]["filter_status"]["is_st"] == "enabled"
     assert "S000" in _held_symbols(baseline)
     assert "S000" not in _held_symbols(filtered)
+
+
+def _run_structured_strategy() -> dict:
+    response = client.post(
+        "/api/backtest/strategy",
+        json={
+            "strategy_code": STRUCTURED_STRATEGY_CODE,
+            "include_positions": True,
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["error"] is None
+    return body
+
+
+def test_vectorized_structured_excludes_delisted_point_in_time(market_data_dir):
+    """退市剔除恒开启，且是「点时」而非「整段」剔除。
+
+    用两次回测的权益曲线逐点对比来验证：退市之前必须与「无退市」基线逐点
+    一致（历史未被整段丢弃，避免存活偏差），退市之后必须发生变化（剔除真的
+    生效了）。这比断言某个标的在不在 TopN 里稳健得多。
+    """
+
+    _write_structured_extra_fields(market_data_dir)
+    baseline = _run_structured_strategy()
+
+    _write_structured_extra_fields(market_data_dir, listed_delisted="S000")
+    filtered = _run_structured_strategy()
+
+    # 不传任何 filter_* 参数，退市剔除仍然生效。
+    assert filtered["meta"]["filter_status"]["is_delisted"] == "enabled"
+    assert filtered["meta"]["filter_suspended"] is False
+    assert filtered["meta"]["filter_st"] is False
+
+    base_curve = {p["date"]: p["value"] for p in baseline["equity_curve"]}
+    filt_curve = {p["date"]: p["value"] for p in filtered["equity_curve"]}
+    dates = pd.bdate_range("2022-01-03", periods=90)
+    transition = dates[len(dates) // 2]
+
+    common = sorted(set(base_curve) & set(filt_curve))
+    before = [d for d in common if pd.Timestamp(d) < transition]
+    after = [d for d in common if pd.Timestamp(d) > transition]
+    assert before and after
+
+    # 退市之前逐点一致 -> 不是整段剔除。
+    assert all(
+        base_curve[d] == pytest.approx(filt_curve[d]) for d in before
+    ), "退市前的历史被整段剔除了，会引入存活偏差"
+    # 退市之后确实不同 -> 剔除生效。
+    assert any(
+        abs(base_curve[d] - filt_curve[d]) > 1e-6 for d in after
+    ), "退市后权益应与基线不同，剔除没有生效"
+
+    # 转退市之后不再持有该标的（基线里它仍在候选池内）。
+    later = {
+        holding["symbol"]
+        for snapshot in filtered["positions"]
+        if pd.Timestamp(snapshot["date"]) > transition
+        for holding in snapshot["holdings"]
+        if holding["weight"] > 0.0
+    }
+    assert "S000" not in later
+
+
+def test_factor_backtest_excludes_delisted_point_in_time(market_data_dir):
+    """因子回测同样强制剔除退市股，且是「点时」而非「整段」剔除。
+
+    与策略侧用同一套权益曲线逐点对比的判据：退市之前必须与「无退市」基线
+    逐点一致，退市之后必须发生变化。
+    """
+
+    _write_structured_extra_fields(market_data_dir)
+    baseline = _wait_factor_task(_request_payload()).json()["result"]
+    assert baseline["error"] is None
+
+    _write_structured_extra_fields(market_data_dir, listed_delisted="S000")
+    filtered = _wait_factor_task(_request_payload()).json()["result"]
+    assert filtered["error"] is None
+
+    assert filtered["meta"]["filter_status"]["is_delisted"] == "enabled"
+    # 没有传任何 filter_* 参数，退市剔除仍然生效。
+    assert filtered["meta"]["filter_suspended"] is False
+    assert filtered["meta"]["filter_st"] is False
+
+    base_curve = {p["date"]: p["value"] for p in baseline["equity_curve"]}
+    filt_curve = {p["date"]: p["value"] for p in filtered["equity_curve"]}
+    dates = pd.bdate_range("2022-01-03", periods=90)
+    transition = dates[len(dates) // 2]
+
+    common = sorted(set(base_curve) & set(filt_curve))
+    before = [d for d in common if pd.Timestamp(d) < transition]
+    after = [d for d in common if pd.Timestamp(d) > transition]
+    assert before and after
+
+    assert all(
+        base_curve[d] == pytest.approx(filt_curve[d]) for d in before
+    ), "退市前的历史被整段剔除了，会引入存活偏差"
+    assert any(
+        abs(base_curve[d] - filt_curve[d]) > 1e-9 for d in after
+    ), "退市后因子样本应发生变化，剔除没有生效"
 
 
 def test_vectorized_free_strategy_filter_zeroes_weight_instead_of_nan(market_data_dir):

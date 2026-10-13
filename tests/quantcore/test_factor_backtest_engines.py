@@ -108,9 +108,11 @@ def test_data_engine_filter_is_optional_and_reports_missing_state():
         "is_st": "disabled",
         "is_limit_up": "skipped_missing_field",
         "is_limit_down": "disabled",
+        # 退市剔除恒开启且没有开关；该面板没有 listed_status，按数据降级跳过。
+        "is_delisted": "skipped_missing_field",
     }
     assert result["mask"].all().all()
-    assert len(result["warnings"]) == 2
+    assert len(result["warnings"]) == 3
 
     partial = DataEngine().build_filter_mask(
         {
@@ -154,6 +156,77 @@ def test_data_engine_builds_status_masks_from_raw_status_text():
     assert bool(masks["is_suspended"].loc[dates[2], "A"])
     assert not bool(masks["is_suspended"].loc[dates[3], "B"])
 
+    # is_delisted 只在白名单 {在市, ST, *ST} 上为 False（" ST " 需先去空格），
+    # 暂停上市与缺失值都按不可投资处理。
+    assert not bool(masks["is_delisted"].loc[dates[0], "A"])
+    assert not bool(masks["is_delisted"].loc[dates[1], "A"])
+    assert bool(masks["is_delisted"].loc[dates[2], "B"])  # 暂停上市
+    assert bool(masks["is_delisted"].loc[dates[3], "A"])  # 缺失值
+    assert not masks["is_delisted"].loc[:, "B"].iloc[:2].any()
+
+
+def test_status_masks_treat_unknown_and_missing_status_as_delisted():
+    dates = pd.date_range("2026-01-02", periods=2, freq="B")
+    panels = {
+        "close": pd.DataFrame(1.0, index=dates, columns=["A", "B", "C", "D"]),
+        "listed_status": pd.DataFrame(
+            [
+                ["在市", "终止上市", "退市整理", None],
+                ["*ST", "暂停上市", "ST", "某个未来新增状态"],
+            ],
+            index=dates,
+            columns=["A", "B", "C", "D"],
+        ),
+    }
+
+    delisted = DataEngine().build_status_masks(panels)["is_delisted"]
+
+    assert not delisted["A"].any()  # 在市 / *ST 属于白名单
+    assert bool(delisted["B"].all())  # 终止上市 / 暂停上市
+    assert bool(delisted["C"].iloc[0])  # 退市整理
+    assert not bool(delisted["C"].iloc[1])  # ST 仍在白名单内，可投资
+    assert bool(delisted["D"].all())  # 缺失值与未知取值一律不可投资
+
+
+def test_delisted_exclusion_is_always_on_without_any_switch():
+    dates = pd.date_range("2026-01-02", periods=3, freq="B")
+    panels = {
+        "close": pd.DataFrame(1.0, index=dates, columns=["A", "B"]),
+        "listed_status": pd.DataFrame(
+            {"A": ["在市"] * 3, "B": ["在市", "退市整理", "终止上市"]}, index=dates
+        ),
+    }
+
+    # 四个可选开关全部关闭，退市剔除仍然生效 —— 这是本改动的核心契约。
+    info = DataEngine().build_filter_mask(panels)
+
+    assert info["status"]["is_delisted"] == "enabled"
+    assert info["status"]["is_suspended"] == "disabled"
+    assert bool(info["mask"].loc[dates[0], "B"])  # 点时：退市当日之前仍可用
+    assert not bool(info["mask"].loc[dates[1], "B"])
+    assert not bool(info["mask"].loc[dates[2], "B"])
+    assert bool(info["mask"].loc[:, "A"].all())
+
+
+def test_delisted_exclusion_never_passes_missing_cells_through():
+    dates = pd.date_range("2026-01-02", periods=2, freq="B")
+    panels = {
+        "close": pd.DataFrame(1.0, index=dates, columns=["A", "B"]),
+        "listed_status": pd.DataFrame(
+            {"A": ["在市", "在市"], "B": ["在市", None]}, index=dates
+        ),
+    }
+
+    info = DataEngine().build_filter_mask(panels)
+
+    # 缺失值必须按不可投资剔除，而不是走 apply_status_filter 的「按放行处理」。
+    assert not bool(info["mask"].loc[dates[1], "B"])
+    assert not any("按放行处理" in warning for warning in info["warnings"])
+    # 单元格级缺失不告警：生产数据里那是标的上市前的空档，有数百万个，
+    # 逐次告警只会淹没真正的信号。字段整体缺失才告警。
+    assert not info["warnings"]
+    assert info["status"]["is_delisted"] == "enabled"
+
 
 def test_build_filter_mask_st_and_limit_down_use_their_own_source_fields():
     dates = pd.date_range("2026-01-02", periods=3, freq="B")
@@ -191,6 +264,27 @@ def test_build_filter_mask_st_and_limit_down_use_their_own_source_fields():
     assert bool(partial["mask"].loc[dates[0], "A"])
     assert not bool(partial["mask"].loc[dates[1], "A"])
     assert bool(partial["mask"].loc[dates[2], "A"])
+
+
+def test_delisted_mask_is_not_cached_without_release_identity():
+    """没有 release 身份时不做缓存：同形状但内容不同的面板不能互相串味。"""
+
+    dates = pd.date_range("2026-01-02", periods=2, freq="B")
+    close = pd.DataFrame({"A": [1.0, 1.0]}, index=dates)
+
+    def mask_for(statuses):
+        return DataEngine().build_filter_mask(
+            {
+                "close": close,
+                "listed_status": pd.DataFrame({"A": statuses}, index=dates),
+            }
+        )["mask"]
+
+    allowed = mask_for(["在市", "在市"])
+    blocked = mask_for(["终止上市", "终止上市"])
+
+    assert allowed.all().all()
+    assert not blocked.any().any()
 
 
 def test_factor_engine_reads_each_filter_flag_without_filters_enabled(monkeypatch):
