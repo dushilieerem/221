@@ -105,7 +105,9 @@ def test_data_engine_filter_is_optional_and_reports_missing_state():
 
     assert result["status"] == {
         "is_suspended": "skipped_missing_field",
-        "limit_up": "skipped_missing_field",
+        "is_st": "disabled",
+        "is_limit_up": "skipped_missing_field",
+        "is_limit_down": "disabled",
     }
     assert result["mask"].all().all()
     assert len(result["warnings"]) == 2
@@ -119,7 +121,7 @@ def test_data_engine_filter_is_optional_and_reports_missing_state():
         },
         filter_limit_up=True,
     )
-    assert partial["status"]["limit_up"] == "enabled_partial"
+    assert partial["status"]["is_limit_up"] == "enabled_partial"
     assert any("覆盖不足" in warning for warning in partial["warnings"])
     assert not bool(partial["mask"].loc[dates[0], "A"])
     assert bool(partial["mask"].loc[dates[1], "A"])
@@ -151,6 +153,87 @@ def test_data_engine_builds_status_masks_from_raw_status_text():
     assert bool(masks["is_limit"].loc[dates[1], "A"])
     assert bool(masks["is_suspended"].loc[dates[2], "A"])
     assert not bool(masks["is_suspended"].loc[dates[3], "B"])
+
+
+def test_build_filter_mask_st_and_limit_down_use_their_own_source_fields():
+    dates = pd.date_range("2026-01-02", periods=3, freq="B")
+    close = pd.DataFrame({"A": [1.0] * 3, "B": [1.0] * 3}, index=dates)
+
+    # 只有 listed_status：ST 过滤生效，跌停过滤因缺 up_and_down_status 被跳过。
+    only_listed = DataEngine().build_filter_mask(
+        {
+            "close": close,
+            "listed_status": pd.DataFrame(
+                {"A": ["ST", "在市", "在市"], "B": ["在市"] * 3}, index=dates
+            ),
+        },
+        filter_st=True,
+        filter_limit_down=True,
+    )
+    assert only_listed["status"]["is_st"] == "enabled"
+    assert only_listed["status"]["is_limit_down"] == "skipped_missing_field"
+    assert not bool(only_listed["mask"].loc[dates[0], "A"])
+    assert bool(only_listed["mask"].loc[dates[1], "A"])
+    assert bool(only_listed["mask"].loc[dates[0], "B"])
+
+    # 跌停状态缺失的单元格按放行处理，整体记为 enabled_partial。
+    partial = DataEngine().build_filter_mask(
+        {
+            "close": close,
+            "up_and_down_status": pd.DataFrame(
+                {"A": [None, "跌停", "非涨跌停"], "B": ["非涨跌停"] * 3},
+                index=dates,
+            ),
+        },
+        filter_limit_down=True,
+    )
+    assert partial["status"]["is_limit_down"] == "enabled_partial"
+    assert bool(partial["mask"].loc[dates[0], "A"])
+    assert not bool(partial["mask"].loc[dates[1], "A"])
+    assert bool(partial["mask"].loc[dates[2], "A"])
+
+
+def test_factor_engine_reads_each_filter_flag_without_filters_enabled(monkeypatch):
+    dates = pd.date_range("2026-01-02", periods=2, freq="B")
+    data_engine = Mock()
+    data_engine.get_task_panels.return_value = {
+        "close": pd.DataFrame({"A": [100.0, 101.0]}, index=dates)
+    }
+    data_engine.get_universe_at.return_value = ["A"]
+    data_engine.build_filter_mask.return_value = {
+        "mask": pd.DataFrame(True, index=dates, columns=["A"]),
+        "status": {"is_st": "enabled"},
+        "warnings": [],
+    }
+    monkeypatch.setattr(FactorEngine, "_resolve_factor", lambda *_args: None)
+    monkeypatch.setattr(DataEngine, "_instance", data_engine)
+    # 只开 ST 过滤、不设派生总开关 filters_enabled，掩码构造仍必须触发。
+    spec = FactorBacktestSpec(
+        factor_name="factor",
+        start="2026-01-02",
+        end=None,
+        filter_st=True,
+    )
+
+    factor_engine = FactorEngine(spec)
+
+    assert spec.filters_enabled is False
+    assert data_engine.build_filter_mask.call_args.kwargs["filter_st"] is True
+    assert factor_engine.eligibility_mask is not None
+
+
+def test_factor_spec_identity_covers_all_filter_flags():
+    base = {"factor_name": "factor", "start": "2026-01-02", "end": "2026-01-31"}
+    variants = [
+        FactorBacktestSpec(**base),
+        FactorBacktestSpec(**base, filter_suspended=True),
+        FactorBacktestSpec(**base, filter_st=True),
+        FactorBacktestSpec(**base, filter_limit_up=True),
+        FactorBacktestSpec(**base, filter_limit_down=True),
+    ]
+
+    # 每个开关都必须改变计算身份，否则会命中彼此的回测缓存。
+    assert len({spec.identity() for spec in variants}) == len(variants)
 
 
 def test_factor_engine_masks_before_cross_sectional_preprocessing():

@@ -140,11 +140,20 @@ class FactorEngine:
             symbols=symbols,
             index_loader=lambda name: data_engine.get_index(name, spec.start, spec.end),
         )
-        if spec.filter_suspended or spec.filter_limit_up:
+        # 逐项判断显式开关，不读 ``filters_enabled``：测试与内部调用会直接
+        # 构造只设某个 filter_* 的 Spec，依赖派生总开关会漏掉过滤。
+        if (
+            spec.filter_suspended
+            or spec.filter_st
+            or spec.filter_limit_up
+            or spec.filter_limit_down
+        ):
             self._filter_info = data_engine.build_filter_mask(
                 self._panel,
                 filter_suspended=spec.filter_suspended,
+                filter_st=spec.filter_st,
                 filter_limit_up=spec.filter_limit_up,
+                filter_limit_down=spec.filter_limit_down,
             )
         else:
             # 无过滤时不要创建与行情同样大小的全 True 掩码，也不要为了
@@ -153,7 +162,9 @@ class FactorEngine:
                 "mask": None,
                 "status": {
                     "is_suspended": "disabled",
-                    "limit_up": "disabled",
+                    "is_st": "disabled",
+                    "is_limit_up": "disabled",
+                    "is_limit_down": "disabled",
                 },
                 "warnings": [],
             }

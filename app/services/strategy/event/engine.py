@@ -147,6 +147,13 @@ class EventBacktestEngine:
         # 按放行处理，原始文本按停牌及涨跌停状态解析。
         if self._status_matches(date, symbol, r"停牌"):
             return "SUSPENDED"
+        if (
+            side == "buy"
+            and self.config.filter_st
+            and self._listed_status_matches(date, symbol)
+        ):
+            # 只拦买入：已持仓标的转 ST 后仍要允许卖出，否则会被套死。
+            return "ST"
         if side == "buy" and self._status_matches(
             date, symbol, r"涨停|limit.?up|up.?limit"
         ):
@@ -162,6 +169,21 @@ class EventBacktestEngine:
             cost = value + max(value * self.config.commission_rate, self.config.min_commission)
             return "INSUFFICIENT_CASH" if cost > ledger.cash + 1e-9 else None
         return "T_PLUS_ONE" if quantity > ledger.sellable.get(symbol, 0) else None
+
+    def _listed_status_matches(self, date: pd.Timestamp, symbol: str) -> bool:
+        """判断标的在该日的上市状态是否为 ST；字段缺失按放行处理。
+
+        取值与 ``DataEngine.build_status_masks`` 的 ``is_st`` 掩码保持一致，
+        使事件与向量化/因子回测的 ST 口径统一。
+        """
+
+        frame = self.panels.get("listed_status")
+        if frame is None or symbol not in frame.columns or date not in frame.index:
+            return False
+        value = frame.at[date, symbol]
+        if pd.isna(value):
+            return False
+        return str(value).strip() in {"ST", "*ST"}
 
     def _status_matches(self, date: pd.Timestamp, symbol: str, pattern: str) -> bool:
         frame = self.panels.get("up_and_down_status")

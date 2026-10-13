@@ -76,6 +76,10 @@ class FactorPortfolioStrategy(FactorLibrary, IStrategy):
     weighting = EqualWeight()
     rebalance = EveryNTradingDays(20)
 
+    #: 由回测服务按请求的 filter_* 开关注入的可交易性掩码（True=允许入选）。
+    #: 为 None 时不做任何剔除，行为与未引入该开关时逐位一致。
+    _eligibility_mask: Optional[pd.DataFrame] = None
+
     def __init__(self, calendar: Optional[ICalendar] = None) -> None:
         self._calendar = calendar or PandasCalendar()
 
@@ -119,6 +123,14 @@ class FactorPortfolioStrategy(FactorLibrary, IStrategy):
 
         close = self.close.reindex(index=score.index, columns=score.columns)
         score = score.reindex(index=close.index, columns=close.columns)
+        if self._eligibility_mask is not None:
+            # 在排名前把不合格标的的分数置空，使其退出 TopN 并由次优标的补足；
+            # 只影响调仓日的选股结果，非调仓日仍由下方 rebalance 掩码置 NaN。
+            score = score.where(
+                self._eligibility_mask.reindex(
+                    index=score.index, columns=score.columns
+                ).fillna(False)
+            )
         ranks = score.rank(axis=1, ascending=False, method="first")
         selected = (ranks <= self.selector.n) & score.notna()
         count = selected.sum(axis=1).replace(0, pd.NA)

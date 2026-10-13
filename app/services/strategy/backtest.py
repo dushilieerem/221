@@ -175,13 +175,20 @@ def run_strategy_backtest(
             index_loader=lambda name: data_engine.get_index(name, req.start, req.end),
         )
         close = panels.close
+        filter_info = _strategy_filter_info(data_engine, panels, req)
+        allow = filter_info["mask"]
+        structured = issubclass(strategy_class, FactorPortfolioStrategy)
         from app.services.factor.market_data import _get_stock_names
         stock_names = _get_stock_names()
         factor_values = None
 
         # 结构化策略在策略源码内定义因子；自由策略接收收盘价面板自行生成信号。
-        if issubclass(strategy_class, FactorPortfolioStrategy):
+        if structured:
             strategy = strategy_class()
+            if allow is not None:
+                # 在排名前剔除：不合格标的的分数置空后退出 TopN，由次优标的
+                # 补足；非调仓日仍由 rebalance 掩码保持 NaN。
+                strategy._eligibility_mask = allow
             signals = strategy.generate_signals(panels)
         else:
             strategy = _instantiate_vectorized_strategy(strategy_class, panels)
@@ -193,6 +200,16 @@ def run_strategy_backtest(
         else:
             raise TypeError(
                 "generate_signals 必须返回 pandas.DataFrame 或 BacktestSignals"
+            )
+        if allow is not None and not structured:
+            # 自由策略逐日给出目标权重、没有调仓日 NaN 语义；被剔除的标的必须
+            # 写 0 才真正退出，写 NaN 会被 NativeEngine 的前值填充继续持有。
+            aligned = allow.reindex(
+                index=bt_signals.target_weights.index,
+                columns=bt_signals.target_weights.columns,
+            ).fillna(False)
+            bt_signals.target_weights = bt_signals.target_weights.mask(
+                ~aligned, other=0.0
             )
 
         # 跑回测
@@ -290,12 +307,50 @@ def run_strategy_backtest(
             strategy_id=strategy_id,
             strategy_version=strategy_version,
             code_hash=code_hash,
+            filter_suspended=req.filter_suspended,
+            filter_st=req.filter_st,
+            filter_limit_up=req.filter_limit_up,
+            filter_limit_down=req.filter_limit_down,
+            filter_status=filter_info["status"],
             trading_symbols=list(declared_symbols) or None,
         ),
         positions=positions,
         rebalance_logs=rebalance_logs,
         execution_timeline=execution_timeline,
         error=None,
+    )
+
+
+def _strategy_filter_info(data_engine, panels, req: StrategyBacktestRequest) -> dict:
+    """按请求的过滤开关构造策略侧可交易性掩码。
+
+    返回 ``{"mask", "status", "warnings"}``，``mask`` 为 ``True=允许交易``。
+    四个开关全关时掩码为 ``None``（不触发任何剔除），但仍回显四项 ``disabled``，
+    与因子回测的 ``filter_status`` 口径保持一致。
+    """
+
+    if not (
+        req.filter_suspended
+        or req.filter_st
+        or req.filter_limit_up
+        or req.filter_limit_down
+    ):
+        return {
+            "mask": None,
+            "status": {
+                "is_suspended": "disabled",
+                "is_st": "disabled",
+                "is_limit_up": "disabled",
+                "is_limit_down": "disabled",
+            },
+            "warnings": [],
+        }
+    return data_engine.build_filter_mask(
+        panels,
+        filter_suspended=req.filter_suspended,
+        filter_st=req.filter_st,
+        filter_limit_up=req.filter_limit_up,
+        filter_limit_down=req.filter_limit_down,
     )
 
 
@@ -338,12 +393,29 @@ def _run_event_strategy_backtest(
             strategy,
             as_of=first_panel_date(date_probe),
         )
-        panels = data_engine.get_task_panels(
-            req.start,
-            req.end,
-            fields=sorted(required_fields),
-            symbols=raw_symbols,
-        )
+        listed_status_available = True
+        if req.filter_st:
+            required_fields.add("listed_status")
+        try:
+            panels = data_engine.get_task_panels(
+                req.start,
+                req.end,
+                fields=sorted(required_fields),
+                symbols=raw_symbols,
+            )
+        except KeyError:
+            # 当前数据版本没有 listed_status 时按因子回测的口径跳过该过滤，
+            # 其余字段照常加载；其余缺失字段仍然照常报错。
+            if "listed_status" not in required_fields:
+                raise
+            listed_status_available = False
+            required_fields.discard("listed_status")
+            panels = data_engine.get_task_panels(
+                req.start,
+                req.end,
+                fields=sorted(required_fields),
+                symbols=raw_symbols,
+            )
         event_panels = {
             field: panels[field].rename(columns=symbol_mapping)
             for field in required_fields
@@ -369,6 +441,7 @@ def _run_event_strategy_backtest(
                 initial_capital=req.initial_capital,
                 commission_rate=req.commission_rate,
                 stamp_tax_rate=req.stamp_tax,
+                filter_st=req.filter_st and listed_status_available,
             ),
         ).run(strategy)
         equity = result.equity_curve
@@ -426,6 +499,22 @@ def _run_event_strategy_backtest(
                 strategy=strategy_class.__name__, universe=req.universe,
                 benchmark=req.benchmark, engine_mode="event", strategy_id=strategy_id,
                 strategy_version=strategy_version, code_hash=code_hash,
+                filter_suspended=req.filter_suspended,
+                filter_st=req.filter_st,
+                filter_limit_up=req.filter_limit_up,
+                filter_limit_down=req.filter_limit_down,
+                # 撮合层对停牌与涨跌停的拦截始终开启、不受请求开关影响，
+                # 如实标注以免使用方误以为关掉开关就能在停牌日成交。
+                filter_status={
+                    "is_suspended": "matcher_always_on",
+                    "is_st": (
+                        "disabled"
+                        if not req.filter_st
+                        else ("enabled" if listed_status_available else "skipped_missing_field")
+                    ),
+                    "is_limit_up": "matcher_always_on",
+                    "is_limit_down": "matcher_always_on",
+                },
                 trading_symbols=list(declared_symbols) or None,
             ),
             orders=orders,

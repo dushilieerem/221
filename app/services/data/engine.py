@@ -419,7 +419,9 @@ class DataEngine:
         panels: Mapping[str, pd.DataFrame] | Any,
         *,
         filter_suspended: bool = False,
+        filter_st: bool = False,
         filter_limit_up: bool = False,
+        filter_limit_down: bool = False,
     ) -> dict[str, Any]:
         """根据可选行情状态构造因子研究有效池。
 
@@ -457,65 +459,72 @@ class DataEngine:
         status: dict[str, str] = {}
         warnings: list[str] = []
 
-        def apply_boolean_filter(option: str, field: str) -> None:
+        def apply_status_filter(
+            option: bool,
+            *,
+            status_key: str,
+            source_field: str,
+            mask_key: str,
+        ) -> None:
+            """按原始状态字段把不合格标的排除出研究样本。
+
+            ``source_field`` 是真实面板字段，用来判断该数据版本是否提供状态；
+            ``mask_key`` 是 ``build_status_masks`` 产出的内存掩码键。两者必须分开
+            ——内存掩码不是面板字段，直接拿它做存在性判断会被误判成字段缺失。
+            原始状态缺失的单元格按放行处理。
+            """
+
             nonlocal mask
             if not option:
-                status[field] = "disabled"
+                status[status_key] = "disabled"
                 return
-            if not has_field(field):
-                status[field] = "skipped_missing_field"
-                warnings.append(f"已跳过{field}过滤：当前数据版本缺少 {field} 状态字段")
-                return
-            values = get_field(field).reindex(index=mask.index, columns=mask.columns)
-            missing = int(values.isna().sum().sum())
-            if missing:
+            if not has_field(source_field):
+                status[status_key] = "skipped_missing_field"
                 warnings.append(
-                    f"{field} 状态覆盖不足：{missing} 个值缺失，按放行处理"
+                    f"已跳过{status_key}过滤：当前数据版本缺少 {source_field} 状态字段"
                 )
-                status[field] = "enabled_partial"
-            else:
-                status[field] = "enabled"
-            mask &= ~values.fillna(False).astype(bool)
-
-        if filter_suspended and has_field("up_and_down_status"):
-            raw_status = get_field("up_and_down_status").reindex(
+                return
+            raw_status = get_field(source_field).reindex(
                 index=mask.index, columns=mask.columns
             )
-            suspended_values = status_masks["is_suspended"].mask(raw_status.isna())
+            excluded = status_masks[mask_key].reindex(
+                index=mask.index, columns=mask.columns
+            ).mask(raw_status.isna())
             missing = int(raw_status.isna().sum().sum())
             if missing:
+                status[status_key] = "enabled_partial"
                 warnings.append(
-                    f"up_and_down_status 状态覆盖不足：{missing} 个值缺失，按放行处理"
+                    f"{source_field} 状态覆盖不足（{status_key}）："
+                    f"{missing} 个值缺失，按放行处理"
                 )
-                status["is_suspended"] = "enabled_partial"
             else:
-                status["is_suspended"] = "enabled"
-            mask &= ~suspended_values.fillna(False).astype(bool)
-        else:
-            apply_boolean_filter(filter_suspended, "is_suspended")
+                status[status_key] = "enabled"
+            mask &= ~excluded.fillna(False).astype(bool)
 
-        if not filter_limit_up:
-            status["limit_up"] = "disabled"
-        else:
-            if has_field("up_and_down_status"):
-                raw_status = get_field("up_and_down_status").reindex(
-                    index=mask.index, columns=mask.columns
-                )
-                limit_values = status_masks["is_limit_up"].mask(raw_status.isna())
-                missing = int(raw_status.isna().sum().sum())
-                if missing:
-                    status["limit_up"] = "enabled_partial"
-                    warnings.append(
-                        f"up_and_down_status 状态覆盖不足：{missing} 个值缺失，按放行处理"
-                    )
-                else:
-                    status["limit_up"] = "enabled"
-                mask &= ~limit_values.fillna(False).astype(bool)
-            else:
-                status["limit_up"] = "skipped_missing_field"
-                warnings.append(
-                    "已跳过涨停过滤：当前数据版本缺少 up_and_down_status 状态字段"
-                )
+        apply_status_filter(
+            filter_suspended,
+            status_key="is_suspended",
+            source_field="up_and_down_status",
+            mask_key="is_suspended",
+        )
+        apply_status_filter(
+            filter_st,
+            status_key="is_st",
+            source_field="listed_status",
+            mask_key="is_st",
+        )
+        apply_status_filter(
+            filter_limit_up,
+            status_key="is_limit_up",
+            source_field="up_and_down_status",
+            mask_key="is_limit_up",
+        )
+        apply_status_filter(
+            filter_limit_down,
+            status_key="is_limit_down",
+            source_field="up_and_down_status",
+            mask_key="is_limit_down",
+        )
 
         return {
             "mask": mask,

@@ -67,6 +67,8 @@ class EventBacktestConfig:
     min_commission: float = 5.0
     stamp_tax_rate: float = 0.0005
     lot_size: int = 100
+    #: 是否拒绝买入 ST/*ST 标的。停牌与涨跌停由撮合层无条件拦截，不受配置影响。
+    filter_st: bool = False
 
 
 @dataclass

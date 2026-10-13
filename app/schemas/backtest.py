@@ -82,10 +82,14 @@ class FactorBacktestRequest(BaseModel):
     #: 自定义回测区间
     start: Optional[str] = None
     end: Optional[str] = None
-    #: 是否过滤涨停股
-    filter_limit_up: bool = False
     #: 是否过滤停牌股
     filter_suspended: bool = False
+    #: 是否过滤 ST 股（含 *ST）
+    filter_st: bool = False
+    #: 是否过滤涨停股
+    filter_limit_up: bool = False
+    #: 是否过滤跌停股
+    filter_limit_down: bool = False
     #: 调仓间隔（交易日）
     rebalance_days: int = Field(1, ge=1, description="调仓间隔，单位为交易日")
     #: 因子分层数
@@ -156,6 +160,14 @@ class StrategyBacktestRequest(BaseModel):
     universe_snapshot: Optional[UniverseSnapshotInput] = None
     start: Optional[str] = None
     end: Optional[str] = None
+    #: 是否过滤停牌股；事件模式由撮合层常开拒单覆盖，参数本身不额外生效
+    filter_suspended: bool = False
+    #: 是否过滤 ST 股（含 *ST）；事件模式只拒绝买入
+    filter_st: bool = False
+    #: 是否过滤涨停股；事件模式由撮合层常开拒单覆盖，参数本身不额外生效
+    filter_limit_up: bool = False
+    #: 是否过滤跌停股；事件模式由撮合层常开拒单覆盖，参数本身不额外生效
+    filter_limit_down: bool = False
     #: 对比基准
     benchmark: Literal["CSI300", "CSI500"] = "CSI300"
     benchmark_snapshot: Optional[BenchmarkSnapshotInput] = None
@@ -334,8 +346,10 @@ class FactorBacktestMeta(BaseModel):
     rebalance_days: int
     groups: int
     benchmark: str
-    filter_limit_up: bool
-    filter_suspended: bool
+    filter_limit_up: bool = False
+    filter_limit_down: bool = False
+    filter_suspended: bool = False
+    filter_st: bool = False
     filter_status: dict[str, str] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
     execution_version: str = "factor-execution-v5"
@@ -365,6 +379,12 @@ class StrategyBacktestMeta(BaseModel):
     strategy_id: Optional[str] = None
     strategy_version: Optional[str] = None
     code_hash: Optional[str] = None
+    #: 本次请求的过滤开关回显；事件模式下前三个由撮合层常开拒单覆盖
+    filter_suspended: bool = False
+    filter_st: bool = False
+    filter_limit_up: bool = False
+    filter_limit_down: bool = False
+    filter_status: dict[str, str] = Field(default_factory=dict)
     trading_symbols: Optional[list[str]] = Field(None, exclude_if=lambda value: value is None)
     universe_asset: Optional[ResolvedAssetMeta] = Field(None, exclude_if=lambda value: value is None)
     benchmark_asset: Optional[ResolvedAssetMeta] = Field(None, exclude_if=lambda value: value is None)

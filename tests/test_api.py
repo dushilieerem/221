@@ -964,6 +964,16 @@ def test_strategy_backtest_returns_equity_and_positions(market_data_dir):
         "strategy_id": None,
         "strategy_version": None,
         "code_hash": None,
+        "filter_suspended": False,
+        "filter_st": False,
+        "filter_limit_up": False,
+        "filter_limit_down": False,
+        "filter_status": {
+            "is_suspended": "disabled",
+            "is_st": "disabled",
+            "is_limit_up": "disabled",
+            "is_limit_down": "disabled",
+        },
     }
     assert body["metrics"]["total_return"] is not None
     assert len(body["equity_curve"]) > 0
@@ -1505,6 +1515,139 @@ def test_structured_factor_portfolio_strategy_backtest(market_data_dir):
     assert body["error"] is None
     assert body["meta"]["strategy"] == "CompositeFactorStrategy"
     assert body["positions"]
+
+
+def _write_structured_extra_fields(market_data_dir, *, listed_st=None, market_status=None):
+    """为结构化策略补写 pe_ttm 与状态字段，供过滤相关用例共享。"""
+
+    dates = pd.bdate_range("2022-01-03", periods=90)
+    symbols = [f"S{i:03d}" for i in range(12)]
+    pe_ttm = pd.DataFrame(
+        np.linspace(5.0, 30.0, 90 * 12).reshape(90, 12), index=dates, columns=symbols
+    )
+    pe_ttm.index.name = "datetime"
+    pe_ttm.reset_index().to_parquet(market_data_dir / "pe_ttm.parquet", index=False)
+
+    if listed_st is not None:
+        listed = pd.DataFrame("在市", index=dates, columns=symbols)
+        listed[listed_st] = "ST"
+        listed.index.name = "datetime"
+        listed.reset_index().to_parquet(
+            market_data_dir / "listed_status.parquet", index=False
+        )
+    if market_status is not None:
+        status = pd.DataFrame("非涨跌停", index=dates, columns=symbols)
+        for symbol, value in market_status.items():
+            status[symbol] = value
+        status.index.name = "datetime"
+        status.reset_index().to_parquet(
+            market_data_dir / "up_and_down_status.parquet", index=False
+        )
+    DataEngine.get_instance().load_parquet(market_data_dir)
+
+
+def _held_symbols(body) -> set[str]:
+    """实际持仓标的（权重 > 0）；未选中的标的会以 0 权重出现在快照里。"""
+
+    return {
+        holding["symbol"]
+        for snapshot in body["positions"] or []
+        for holding in snapshot["holdings"]
+        if holding["weight"] > 0.0
+    }
+
+
+def test_vectorized_structured_filter_excludes_without_changing_rebalance_cadence(
+    market_data_dir,
+):
+    """结构化策略在排名前剔除：不合格标的退出 TopN，且不改变调仓节奏。
+
+    这是本改动最易出错处——若把非调仓日的 NaN 一并写成 0，``ffill`` 语义被破坏，
+    调仓日集合会从每 15 个交易日一次退化成每个交易日一次。
+    """
+
+    _write_structured_extra_fields(market_data_dir, market_status={"S000": "停牌"})
+
+    def run(filter_suspended: bool) -> dict:
+        response = client.post(
+            "/api/backtest/strategy",
+            json={
+                "strategy_code": STRUCTURED_STRATEGY_CODE,
+                "include_positions": True,
+                "include_rebalance_logs": True,
+                "filter_suspended": filter_suspended,
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["error"] is None
+        return body
+
+    baseline = run(False)
+    filtered = run(True)
+
+    baseline_dates = [log["date"] for log in baseline["rebalance_logs"]]
+    assert len(baseline_dates) > 1
+    assert [log["date"] for log in filtered["rebalance_logs"]] == baseline_dates
+    assert filtered["meta"]["filter_suspended"] is True
+    assert filtered["meta"]["filter_status"]["is_suspended"] == "enabled"
+    assert "S000" not in _held_symbols(filtered)
+
+
+def test_vectorized_structured_filter_st_drops_st_from_topn(market_data_dir):
+    _write_structured_extra_fields(market_data_dir, listed_st="S000")
+
+    def run(filter_st: bool) -> dict:
+        response = client.post(
+            "/api/backtest/strategy",
+            json={
+                "strategy_code": STRUCTURED_STRATEGY_CODE,
+                "include_positions": True,
+                "filter_st": filter_st,
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["error"] is None
+        return body
+
+    baseline = run(False)
+    filtered = run(True)
+
+    assert filtered["meta"]["filter_st"] is True
+    assert filtered["meta"]["filter_status"]["is_st"] == "enabled"
+    assert "S000" in _held_symbols(baseline)
+    assert "S000" not in _held_symbols(filtered)
+
+
+def test_vectorized_free_strategy_filter_zeroes_weight_instead_of_nan(market_data_dir):
+    """自由策略逐日输出权重，被剔除的标的必须写 0；写 NaN 会被前值填充继续持有。"""
+
+    dates = pd.bdate_range("2022-01-03", periods=90)
+    symbols = [f"S{i:03d}" for i in range(12)]
+    status = pd.DataFrame("跌停", index=dates, columns=symbols)
+    status.index.name = "datetime"
+    status.reset_index().to_parquet(
+        market_data_dir / "up_and_down_status.parquet", index=False
+    )
+    DataEngine.get_instance().load_parquet(market_data_dir)
+
+    response = client.post(
+        "/api/backtest/strategy",
+        json={
+            "strategy_code": STRATEGY_CODE,
+            "filter_limit_down": True,
+            "initial_capital": 1_000_000,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["error"] is None
+    assert body["meta"]["filter_status"]["is_limit_down"] == "enabled"
+    # 全线跌停被整体剔除 -> 组合空仓，资金保持不变。
+    assert body["final_equity"] == pytest.approx(1_000_000.0)
+    assert body["metrics"]["total_return"] == pytest.approx(0.0)
 
 
 def test_factor_api_reads_current_market_data_layout(market_data_dir):
