@@ -140,34 +140,17 @@ class FactorEngine:
             symbols=symbols,
             index_loader=lambda name: data_engine.get_index(name, spec.start, spec.end),
         )
-        # 逐项判断显式开关，不读 ``filters_enabled``：测试与内部调用会直接
-        # 构造只设某个 filter_* 的 Spec，依赖派生总开关会漏掉过滤。
-        if (
-            spec.filter_suspended
-            or spec.filter_st
-            or spec.filter_limit_up
-            or spec.filter_limit_down
-        ):
-            self._filter_info = data_engine.build_filter_mask(
-                self._panel,
-                filter_suspended=spec.filter_suspended,
-                filter_st=spec.filter_st,
-                filter_limit_up=spec.filter_limit_up,
-                filter_limit_down=spec.filter_limit_down,
-            )
-        else:
-            # 无过滤时不要创建与行情同样大小的全 True 掩码，也不要为了
-            # 构造该掩码再触发一次 close 字段的任务副本。
-            self._filter_info = {
-                "mask": None,
-                "status": {
-                    "is_suspended": "disabled",
-                    "is_st": "disabled",
-                    "is_limit_up": "disabled",
-                    "is_limit_down": "disabled",
-                },
-                "warnings": [],
-            }
+        # 无条件构造掩码：退市剔除恒开启，掩码不再有 ``None`` 这个「不过滤」
+        # 状态，因此这里不能因为四个可选开关全关就短路。逐项判断显式开关、
+        # 不读 ``filters_enabled``：测试与内部调用会直接构造只设某个
+        # filter_* 的 Spec，依赖派生总开关会漏掉过滤。
+        self._filter_info = data_engine.build_filter_mask(
+            self._panel,
+            filter_suspended=spec.filter_suspended,
+            filter_st=spec.filter_st,
+            filter_limit_up=spec.filter_limit_up,
+            filter_limit_down=spec.filter_limit_down,
+        )
         self.eligibility_mask = self._filter_info["mask"]
         self._log_filter_diagnostics()
         self._resolve_factor(spec)

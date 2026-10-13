@@ -185,6 +185,41 @@ def test_batch_filters_suspended_and_limit_up_from_up_and_down_status():
     assert filtered.loc[dates[1], "C"] == 1.0
 
 
+def test_batch_excludes_delisted_even_without_filters_enabled():
+    """退市剔除恒开启：批量路径的派生总开关关着也照样剔除。"""
+
+    dates = pd.date_range("2026-01-01", periods=3)
+    columns = ["A", "B"]
+    factor = pd.DataFrame(1.0, index=dates, columns=columns)
+
+    class PanelStub:
+        def __init__(self):
+            self.fields = {
+                "listed_status": pd.DataFrame(
+                    [["在市", "在市"], ["在市", "退市整理"], ["在市", "终止上市"]],
+                    index=dates,
+                    columns=columns,
+                ),
+            }
+
+        def __contains__(self, name):
+            return name in self.fields
+
+        def __getattr__(self, name):
+            return self.fields[name]
+
+    config = ConfigManager()
+    # 显式关掉旧的派生总开关，退市剔除不应受它影响。
+    config.set("factor_batch.filters_enabled", False)
+
+    filtered = _apply_factor_batch_filters(factor, PanelStub(), config)
+
+    assert filtered.loc[dates[0], "B"] == 1.0  # 点时：退市之前仍参与
+    assert pd.isna(filtered.loc[dates[1], "B"])
+    assert pd.isna(filtered.loc[dates[2], "B"])
+    assert filtered["A"].notna().all()
+
+
 def test_store_round_trip_persists_six_quantile_rows_and_predictive_metrics(tmp_path: Path):
     store = FactorBacktestStore(tmp_path / "factor_backtest.db")
     batch_id, factor_id = _make_batch(store)

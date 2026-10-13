@@ -10,6 +10,7 @@ from datetime import datetime
 import pandas as pd
 
 from app.models.event import EventBacktestResult, EventFill, EventOrder, PositionSnapshot
+from app.models.market_data import is_delisted_status
 from app.models.data import DataView
 from app.services.strategy.event.strategy import OrderService, StrategyContext
 from app.models.event import PortfolioView
@@ -34,6 +35,13 @@ class EventBacktestEngine:
         self.symbols = list(self.panels["close"].columns)
         if self.dates.empty:
             raise ValueError("事件回测没有可用交易日")
+        # 状态面板真正覆盖到的标的；整列为空说明只是股票池列投影的产物。
+        _listed = self.panels.get("listed_status")
+        self._status_covered = (
+            frozenset(_listed.columns[_listed.notna().any()])
+            if _listed is not None
+            else frozenset()
+        )
 
     def run(self, strategy) -> EventBacktestResult:
         ledger = _Ledger(cash=self.config.initial_capital)
@@ -71,6 +79,21 @@ class EventBacktestEngine:
                     fills.append(fill)
                     events.append({"type": "FILL", "timestamp": context.current_dt, "order_id": order.order_id})
 
+            # 日终强平：放在策略回调与撮合之后，策略当日开盘的卖单先成交，
+            # 这里只处置残余持仓；放在权益计算之前，使当日净值即反映退出。
+            for order, fill in self._liquidate_delisted(ledger, timestamp):
+                all_orders.append(order)
+                fills.append(fill)
+                events.append({
+                    "type": "FORCED_LIQUIDATION",
+                    "timestamp": context.current_dt,
+                    "order_id": order.order_id,
+                    "symbol": order.symbol,
+                    "quantity": fill.quantity,
+                    "price": fill.price,
+                    "reason_code": "DELISTED",
+                })
+
             close_prices = self.panels["close"].loc[date]
             total_value = ledger.cash + sum(ledger.positions.get(symbol, 0) * float(close_prices[symbol]) for symbol in self.symbols if pd.notna(close_prices[symbol]))
             equity.append(total_value)
@@ -83,7 +106,12 @@ class EventBacktestEngine:
             fills=fills,
             position_snapshots=snapshots,
             events=events,
-            assumptions={"frequency": "1d", "execution": "same_session_open_after_before_open", "data_visibility": "previous_close"},
+            assumptions={
+                "frequency": "1d",
+                "execution": "same_session_open_after_before_open",
+                "data_visibility": "previous_close",
+                "delisted_handling": "point_in_time_exclude;force_liquidate_at_transition_close",
+            },
         )
 
     def _sort_orders(self, orders: list[EventOrder], ledger: _Ledger, date: pd.Timestamp) -> list[EventOrder]:
@@ -104,6 +132,31 @@ class EventBacktestEngine:
         if reason is not None:
             order.status, order.reason_code = "rejected", reason
             return None
+        order.status, order.side = "filled", side
+        return self._settle(
+            order, side=side, quantity=quantity, price=price, ledger=ledger, date=date
+        )
+
+    def _settle(
+        self,
+        order: EventOrder,
+        *,
+        side: str,
+        quantity: int,
+        price: float,
+        ledger: _Ledger,
+        date: pd.Timestamp,
+        force: bool = False,
+    ) -> EventFill:
+        """按买卖方向记账并返回成交回报。
+
+        与策略订单共用同一条记账路径，保证退市强平的手续费、印花税与持仓
+        口径和普通成交逐位一致。``force=True`` 用于引擎主动强平：强平绕过
+        撮合层的 T+1 检查，卖出量可能超过当日已解禁数量，因此把 ``sellable``
+        夹到 0 而不是让它变成负数，并清掉 ``bought_today``，避免次日
+        ``begin_session`` 为已清仓的标的复活出幽灵可卖数量。
+        """
+
         value = quantity * price
         commission = max(value * self.config.commission_rate, self.config.min_commission)
         stamp_tax = value * self.config.stamp_tax_rate if side == "sell" else 0.0
@@ -119,11 +172,16 @@ class EventBacktestEngine:
             ledger.bought_today[order.symbol] = ledger.bought_today.get(order.symbol, 0) + quantity
         else:
             ledger.cash += value - commission - stamp_tax
-            ledger.positions[order.symbol] -= quantity
-            ledger.sellable[order.symbol] -= quantity
-            if ledger.positions[order.symbol] == 0:
+            ledger.positions[order.symbol] = ledger.positions.get(order.symbol, 0) - quantity
+            ledger.sellable[order.symbol] = max(
+                0, ledger.sellable.get(order.symbol, 0) - quantity
+            )
+            if force:
+                ledger.bought_today.pop(order.symbol, None)
+            if ledger.positions[order.symbol] <= 0:
+                ledger.positions[order.symbol] = 0
+                ledger.sellable[order.symbol] = 0
                 ledger.average_cost.pop(order.symbol, None)
-        order.status, order.side = "filled", side
         return EventFill(order.order_id, order.symbol, side, quantity, price, date.to_pydatetime(), commission, stamp_tax)
 
     def _resolved_quantity(self, order: EventOrder, ledger: _Ledger, date: pd.Timestamp) -> int:
@@ -154,6 +212,10 @@ class EventBacktestEngine:
         ):
             # 只拦买入：已持仓标的转 ST 后仍要允许卖出，否则会被套死。
             return "ST"
+        if side == "buy" and not self._investable(date, symbol):
+            # 退市剔除恒开启。只拦买入：残余持仓由日终 ``_liquidate_delisted``
+            # 按转换日收盘价强平，不需要在撮合层再拦一次卖出。
+            return "DELISTED"
         if side == "buy" and self._status_matches(
             date, symbol, r"涨停|limit.?up|up.?limit"
         ):
@@ -169,6 +231,92 @@ class EventBacktestEngine:
             cost = value + max(value * self.config.commission_rate, self.config.min_commission)
             return "INSUFFICIENT_CASH" if cost > ledger.cash + 1e-9 else None
         return "T_PLUS_ONE" if quantity > ledger.sellable.get(symbol, 0) else None
+
+    def _investable(self, date: pd.Timestamp, symbol: str) -> bool:
+        """标的在该日是否处于可投资的上市状态。
+
+        口径由 :func:`app.models.market_data.is_delisted_status` 唯一定义，
+        与因子/向量化回测的 ``is_delisted`` 掩码共用同一份白名单。两种情况按
+        可投资处理（数据降级，与四个可选过滤一致）：
+
+        * 数据版本缺少 ``listed_status`` 字段；
+        * 该标的未被状态面板覆盖（整列为空）—— 股票池按列投影时会为池内但
+          无状态记录的标的造出一整列空值，这不等于退市。
+        """
+
+        frame = self.panels.get("listed_status")
+        if frame is None or symbol not in frame.columns or date not in frame.index:
+            return True
+        if symbol not in self._status_covered:
+            return True
+        return not is_delisted_status(frame.at[date, symbol])
+
+    def _liquidation_price(self, symbol: str, date: pd.Timestamp) -> float | None:
+        """退市强平的成交价：转换日收盘价。
+
+        实测依据：``close`` 在退市后被前值填充，因此转换日 ``close`` 在当日
+        无成交时恒等于此前的最后成交价，当日有成交时就是真实成交价 —— 一条
+        规则覆盖两种情形，无需再回溯查找「最后一个有成交量的交易日」。
+
+        不能改用 ``_price``（读 ``open``）：转换日 ``open`` 在一半以上的退市
+        样本里是缺失值，会直接触发 ``NO_PRICE`` 拒单导致强平失败。
+        """
+
+        if symbol not in self.symbols:
+            return None
+        close = self.panels["close"]
+        value = close.at[date, symbol]
+        if pd.notna(value) and value > 0:
+            return float(value)
+        # 防御性回退：转换日无收盘价时沿用此前最后一个有效收盘价。
+        series = close[symbol].loc[:date].dropna()
+        if series.empty:
+            return None
+        last = float(series.iloc[-1])
+        return last if last > 0 else None
+
+    def _liquidate_delisted(
+        self, ledger: _Ledger, date: pd.Timestamp
+    ) -> list[tuple[EventOrder, EventFill]]:
+        """日终按转换日收盘价出清已不可投资的持仓。
+
+        这是引擎的主动行为，不受策略订单的撮合限制（T+1、涨跌停、停牌、
+        整手）约束 —— 退市标的本来就不该让仓位被冻结价格一直吊着。持仓在
+        转换日收盘后变为 0，当日权益曲线即反映这笔损失。
+        """
+
+        results: list[tuple[EventOrder, EventFill]] = []
+        for symbol in list(ledger.positions):
+            quantity = ledger.positions.get(symbol, 0)
+            if quantity <= 0 or self._investable(date, symbol):
+                continue
+            price = self._liquidation_price(symbol, date)
+            if price is None:
+                continue
+            order = EventOrder(
+                symbol=symbol,
+                quantity=-quantity,
+                order_id=f"engine-delist-{pd.Timestamp(date):%Y%m%d}-{symbol}",
+                submitted_at=pd.Timestamp(date).to_pydatetime(),
+                side="sell",
+                status="filled",
+                reason_code="DELISTED",
+            )
+            results.append(
+                (
+                    order,
+                    self._settle(
+                        order,
+                        side="sell",
+                        quantity=quantity,
+                        price=price,
+                        ledger=ledger,
+                        date=date,
+                        force=True,
+                    ),
+                )
+            )
+        return results
 
     def _listed_status_matches(self, date: pd.Timestamp, symbol: str) -> bool:
         """判断标的在该日的上市状态是否为 ST；字段缺失按放行处理。

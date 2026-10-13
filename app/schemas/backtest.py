@@ -352,7 +352,7 @@ class FactorBacktestMeta(BaseModel):
     filter_st: bool = False
     filter_status: dict[str, str] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
-    execution_version: str = "factor-execution-v5"
+    execution_version: str = "factor-execution-v6"
     metric_version: str = "factor-scorecard-v3"
     data_release_id: Optional[str] = None
     spec_hash: Optional[str] = None
@@ -895,7 +895,7 @@ class FactorBacktestBatchResponse(BaseModel):
     profile_hash: str
     catalog_version: str
     metric_version: str
-    execution_version: str = "factor-execution-v5"
+    execution_version: str = "factor-execution-v6"
     data_release_id: Optional[str] = None
     spec_hash: str = ""
     status: str

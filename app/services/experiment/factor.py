@@ -86,10 +86,12 @@ def _apply_factor_batch_filters(
     panel: Panel,
     config: ConfigManager,
 ) -> pd.DataFrame:
-    """旧内部调用兼容；有效池构造统一交给 QuantCore DataEngine。"""
+    """旧内部调用兼容；有效池构造统一交给 QuantCore DataEngine。
 
-    if not config.get("factor_batch.filters_enabled", False):
-        return factor_values.copy()
+    不再按 ``factor_batch.filters_enabled`` 短路：退市剔除恒开启，即使四个
+    可选开关都没开也必须构造掩码。
+    """
+
     info = DataEngine().build_filter_mask(
         panel,
         filter_suspended=bool(config.get("filter_suspended", False)),
