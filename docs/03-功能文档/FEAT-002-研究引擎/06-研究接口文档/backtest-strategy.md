@@ -14,7 +14,9 @@ Web 端需要展示调仓或成交过程时，使用 `include_execution_timeline
   "commission_rate": 0.0, "stamp_tax": 0.001,
   "slippage_rate": 0.0, "initial_capital": 1000000,
   "include_positions": false, "include_rebalance_logs": true,
-  "include_execution_timeline": true
+  "include_execution_timeline": true,
+  "filter_suspended": false, "filter_st": false,
+  "filter_limit_up": false, "filter_limit_down": false
 }
 ```
 
@@ -35,6 +37,32 @@ Web 端需要展示调仓或成交过程时，使用 `include_execution_timeline
 | `include_positions` | boolean | `false` | 返回持仓权重快照。 |
 | `include_rebalance_logs` | boolean | `false` | 仅向量化模式返回目标权重变化日志；事件模式请使用 `include_execution_timeline`。 |
 | `include_execution_timeline` | boolean | `false` | 返回统一执行时间线；向量化策略包含目标权重变更，事件策略包含订单、成交、账户快照和审计事件。 |
+| `filter_suspended` | boolean | `false` | 是否过滤停牌标的。向量化模式按信号剔除；事件模式由撮合层常开拒单覆盖，该参数不额外生效。 |
+| `filter_st` | boolean | `false` | 是否过滤 ST、\*ST 标的。向量化模式按信号剔除；事件模式**只拒绝买入**（见下）。 |
+| `filter_limit_up` | boolean | `false` | 是否过滤涨停标的。向量化模式按信号剔除；事件模式由撮合层常开拒单覆盖，该参数不额外生效。 |
+| `filter_limit_down` | boolean | `false` | 是否过滤跌停标的。向量化模式按信号剔除；事件模式由撮合层常开拒单覆盖，该参数不额外生效。 |
+
+## 过滤语义
+
+四个 `filter_*` 开关互相独立，默认全部关闭——不传时回测结果与不启用过滤完全一致。两种 `engine_mode` 的落地方式不同：
+
+### 向量化模式
+
+不合格标的的**得分被置空**，在 TopN 选股之前退出候选池，因此由次优标的补足目标持仓数，而不是留下现金缺口。过滤只在调仓日改变选股结果，不改变调仓节奏（非调仓日依旧保持「不调仓」语义）。
+
+对不继承 `FactorPortfolioStrategy`、自行实现 `generate_signals()` 的自由策略，服务层改为把被剔除标的的目标权重写为 `0`，使当期真正退出。
+
+### 事件模式
+
+事件模式的撮合层**始终**执行 A 股真实交易约束，与请求参数无关：停牌单被拒（`SUSPENDED`）、买入涨停单被拒（`LIMIT_UP`）、卖出跌停单被拒（`LIMIT_DOWN`）。
+
+因此：
+
+- `filter_suspended`、`filter_limit_up`、`filter_limit_down` 在事件模式下**不额外生效**（撮合层已覆盖，`filter_status` 回显为 `matcher_always_on`）。
+- `filter_st` 是事件模式下唯一生效的开关：开启后按 `listed_status` 判定，**只拒绝买入** ST、\*ST 标的，`reason_code` 为 `ST`；已持仓标的转为 ST 后仍允许卖出，避免持仓被套死。
+- 当前数据版本缺少 `listed_status` 字段时，该过滤按「跳过并放行」处理，`filter_status` 记为 `skipped_missing_field`，请求本身不报错。
+
+状态字段的取值口径与因子回测一致：`filter_st` → `listed_status`（`ST`、`*ST`），其余三项 → `up_and_down_status`（`停牌`、`涨停`、`跌停`）。
 
 ## 成功响应示例
 
@@ -279,6 +307,8 @@ Web 端需要展示调仓或成交过程时，使用 `include_execution_timeline
 | 年度收益（`annual_returns`） | `year`、`return_value` | 自然年份及该年首末有效净值点计算的收益率。 |
 | 元信息（`meta`） | `strategy`、`universe`、`benchmark`、`engine_mode` | 实际执行的策略类名、股票池、基准和回测引擎模式。 |
 | 已保存策略元信息（`meta`） | `strategy_id`、`strategy_version`、`code_hash` | 仅通过 `strategy_id` 运行时有值：策略 ID、实际使用版本和源码 SHA-256 哈希；直接提交源码时均为 `null`。 |
+| 过滤开关回显（`meta`） | `filter_suspended`、`filter_st`、`filter_limit_up`、`filter_limit_down` | 本次请求的四个过滤开关原样回显。 |
+| 过滤诊断（`meta.filter_status`） | `is_suspended`、`is_st`、`is_limit_up`、`is_limit_down` | 四项过滤各自的执行状态：`disabled`（开关关闭或字段缺失且被跳过）、`skipped_missing_field`（字段缺失，放行）、`enabled` / `enabled_partial`（生效，后者表示部分状态值缺失并按放行处理）；事件模式下前三个常为 `matcher_always_on`，表示由撮合层无条件拦截、不受开关影响。 |
 | 持仓快照（`positions`） | `date`、`holdings` | `holdings` 是 `{symbol, name, weight}` 数组。`symbol` 为带交易所后缀的代码（如 `000001.SZ`），`name` 为证券名称，`weight` 为目标持仓权重。 |
 | 调仓日志（`rebalance_logs`） | `date`、`trades` | `trades` 为 `{symbol, name, side, previous_weight, target_weight, weight_change}` 数组；`symbol` 与 `name` 的口径同持仓快照，`side` 取 `buy` 或 `sell`。 |
 | 执行时间线（`execution_timeline`） | `timestamp`、`type`、`payload` | 向量化策略的 `type` 为 `rebalance`，`payload.trades` 与调仓日志字段一致；事件策略的 `type` 为 `order`、`fill`、`position` 或 `audit`，完整明细位于 `payload`。 |

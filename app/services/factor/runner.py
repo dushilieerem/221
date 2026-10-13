@@ -181,10 +181,17 @@ def _request_spec(req: FactorBacktestRequest) -> FactorBacktestSpec:
         commission_rate=req.commission_rate,
         stamp_tax=req.stamp_tax,
         slippage_rate=req.slippage_rate,
-        filter_limit_up=req.filter_limit_up,
         filter_suspended=req.filter_suspended,
+        filter_st=req.filter_st,
+        filter_limit_up=req.filter_limit_up,
+        filter_limit_down=req.filter_limit_down,
         # 兼容旧的总开关语义：核心流程只接收已经归一化的有效开关。
-        filters_enabled=bool(req.filter_limit_up or req.filter_suspended),
+        filters_enabled=bool(
+            req.filter_suspended
+            or req.filter_st
+            or req.filter_limit_up
+            or req.filter_limit_down
+        ),
         winsorize=req.winsorize,
         standardize=req.standardize,
         analysis_level=req.analysis_level,
@@ -770,8 +777,10 @@ def _serialize_factor_execution(
             rebalance_days=req.rebalance_days,
             groups=req.groups,
             benchmark=req.benchmark,
-            filter_limit_up=req.filter_limit_up,
             filter_suspended=req.filter_suspended,
+            filter_st=req.filter_st,
+            filter_limit_up=req.filter_limit_up,
+            filter_limit_down=req.filter_limit_down,
             filter_status=result.meta.get("filter_status", {}),
             warnings=result.meta.get("warnings", []),
             execution_version=result.meta.get("execution_version", execution.spec.execution_version),

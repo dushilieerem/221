@@ -66,8 +66,10 @@ class FactorBacktestSpec:
     commission_rate: float = 0.0
     stamp_tax: float = 0.0
     slippage_rate: float = 0.0
-    filter_limit_up: bool = False
     filter_suspended: bool = False
+    filter_st: bool = False
+    filter_limit_up: bool = False
+    filter_limit_down: bool = False
     filters_enabled: bool = False
     winsorize: int = 0
     standardize: int = 0
@@ -106,8 +108,10 @@ class FactorBacktestSpec:
             "commission_rate": 0.0,
             "stamp_tax": 0.0,
             "slippage_rate": 0.0,
-            "filter_limit_up": self.filter_limit_up,
             "filter_suspended": self.filter_suspended,
+            "filter_st": self.filter_st,
+            "filter_limit_up": self.filter_limit_up,
+            "filter_limit_down": self.filter_limit_down,
             "filters_enabled": self.filters_enabled,
             "winsorize": self.winsorize,
             "standardize": self.standardize,

@@ -94,6 +94,73 @@ def test_suspended_rejects_buy():
     assert result.orders[0].reason_code == "SUSPENDED"
 
 
+def test_st_buy_rejected_when_filter_st_enabled():
+    panels = _panels()
+    panels["listed_status"] = pd.DataFrame(
+        {"A": ["在市", "ST", "在市"]}, index=panels["close"].index
+    )
+
+    class Strategy:
+        def initialize(self, context):
+            def trade(ctx):
+                if ctx.current_dt.date().isoformat() == "2024-01-03":
+                    ctx.orders.target_value("A", 1_100)
+
+            context.schedule.daily(trade)
+
+    result = EventBacktestEngine(
+        panels, EventBacktestConfig(initial_capital=10_000, filter_st=True)
+    ).run(Strategy())
+
+    assert result.orders[0].reason_code == "ST"
+
+
+def test_st_filter_is_off_by_default():
+    panels = _panels()
+    panels["listed_status"] = pd.DataFrame(
+        {"A": ["在市", "ST", "在市"]}, index=panels["close"].index
+    )
+
+    class Strategy:
+        def initialize(self, context):
+            def trade(ctx):
+                if ctx.current_dt.date().isoformat() == "2024-01-03":
+                    ctx.orders.target_value("A", 1_100)
+
+            context.schedule.daily(trade)
+
+    result = EventBacktestEngine(
+        panels, EventBacktestConfig(initial_capital=10_000)
+    ).run(Strategy())
+
+    assert result.orders[0].reason_code is None
+
+
+def test_st_filter_still_allows_selling_existing_holding():
+    panels = _panels()
+    panels["listed_status"] = pd.DataFrame(
+        {"A": ["在市", "在市", "ST"]}, index=panels["close"].index
+    )
+
+    class Strategy:
+        def initialize(self, context):
+            def trade(ctx):
+                day = ctx.current_dt.date().isoformat()
+                if day == "2024-01-02":
+                    ctx.orders.target_value("A", 1_000)
+                if day == "2024-01-04":
+                    ctx.orders.close("A")
+
+            context.schedule.daily(trade)
+
+    result = EventBacktestEngine(
+        panels, EventBacktestConfig(initial_capital=10_000, filter_st=True)
+    ).run(Strategy())
+
+    # 转 ST 只拦买入；已持仓仍须可以卖出，否则会被套死。
+    assert "ST" not in {order.reason_code for order in result.orders}
+
+
 def test_normal_status_does_not_reject_sell_as_limit_down():
     panels = _panels()
     panels["up_and_down_status"] = pd.DataFrame(

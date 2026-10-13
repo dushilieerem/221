@@ -62,7 +62,9 @@ GET /api/backtest/factor/9f1c...
   "universe": "CSI300",
   "start": "2024-01-01", "end": "2024-12-31",
   "rebalance_days": 1, "groups": 5,
-  "benchmark": "CSI300", "analysis_level": "core"
+  "benchmark": "CSI300", "analysis_level": "core",
+  "filter_suspended": false, "filter_st": false,
+  "filter_limit_up": false, "filter_limit_down": false
 }
 ```
 
@@ -77,9 +79,15 @@ GET /api/backtest/factor/9f1c...
 | `start` / `end` | string/null | `null` | 回测区间，格式 `YYYY-MM-DD`。 |
 | `rebalance_days` | integer | `1` | 正整数交易日。 |
 | `groups` | integer | `5` | 2–10 组。 |
+| `winsorize` | integer | `0` | 因子去极值方式：`0` 不处理、`1` MAD、`2` 标准差、`3` 四分位。 |
+| `standardize` | integer | `0` | 因子标准化方式：`0` 不处理、`1` 原始值、`2` rank、`3` 极差。 |
 | `benchmark` | enum | `CSI300` | `CSI300`、`CSI500`、`CSI1000` 或 `SSE50`。 |
 | `benchmark_snapshot` | object/null | `null` | WebApp 已鉴权并解析的固定权重组合基准快照；与 `benchmark` 至多传一个。 |
 | `analysis_level` | enum | `core` | `core` 或 `full`；后者增加 IC/IR、FF3、行业曲线。 |
+| `filter_suspended` | boolean | `false` | 是否把停牌标的排除出研究样本。 |
+| `filter_st` | boolean | `false` | 是否把 ST、\*ST 标的排除出研究样本。 |
+| `filter_limit_up` | boolean | `false` | 是否把涨停标的排除出研究样本。 |
+| `filter_limit_down` | boolean | `false` | 是否把跌停标的排除出研究样本。 |
 | `commission_rate` | number | `0.0` | 兼容旧请求；因子回测统一按毛收益计算并忽略该参数。 |
 | `stamp_tax` | number | `0.0` | 兼容旧请求；因子回测统一按毛收益计算并忽略该参数。 |
 | `slippage_rate` | number | `0.0` | 兼容旧请求；因子回测统一按毛收益计算并忽略该参数。 |
@@ -88,7 +96,21 @@ GET /api/backtest/factor/9f1c...
 
 `start/end` 是收益确认区间，不是因子计算区间。服务端会先用当前数据版本的完整可用历史计算因子（包括区间起点之前的预热数据），再将因子值、收盘价、远期收益、分层结果、指标和净值裁剪到请求区间。因子不需要额外声明 `warmup_days`；因子实现仍需自行避免使用未来数据。
 
-还支持 `filter_limit_up`、`filter_suspended`、`commission_rate`、`stamp_tax`、`slippage_rate`；完整示例和因子写法见 [因子与策略指南](../07-factor-strategy-guide.md)。
+完整示例和因子写法见 [因子与策略指南](../07-factor-strategy-guide.md)。
+
+### 样本过滤
+
+四个 `filter_*` 开关互相独立，默认全部关闭——不传时回测结果与不启用过滤完全一致。开启后不合格标的的因子值被置空，**在去极值和标准化之前**退出研究样本，因此不会参与截面参数估计、分层与选股。
+
+过滤作用在样本资格层，不删除行情行。状态字段缺失时的行为按「跳过并放行」处理：
+
+| 数据版本情况 | 结果 |
+|---|---|
+| 字段存在、取值完整 | 正常剔除，`filter_status` 记为 `enabled` |
+| 字段存在、部分单元格为空 | 空值单元格按放行，记为 `enabled_partial` 并附告警 |
+| 字段整个缺失（如当前 release 无停牌字段） | 跳过该项过滤并放行，记为 `skipped_missing_field` 并附告警 |
+
+对应的状态字段是 `filter_st` → `listed_status`（取值 `ST`、`*ST`），其余三项 → `up_and_down_status`（取值 `停牌`、`涨停`、`跌停`）。`meta.filter_status` 回显四项各自的上述状态，`meta.warnings` 给出「覆盖不足」等告警原文。
 
 任务成功时，`result` 包含 `metrics`、`equity_curve`、`drawdowns`、`annual_returns`、`factor_analysis`、`date_range`、`final_equity`、`benchmark_curve`、`excess_return`、`meta` 和 `error`。因子代码、数据或回测执行错误不再要求前端解析 `result.error`，而是以任务 `status=failed` 和顶层 `error` 返回。
 
@@ -126,6 +148,8 @@ GET /api/backtest/factor/9f1c...
 相对基准指标只使用分组与基准都有数据的共同交易日：`annual_excess_return` 为共同区间分组几何年化收益减去基准几何年化收益，`excess_volatility` 为日超额收益样本标准差（`ddof=1`）年化，`information_ratio` 为年化超额收益除以超额年化波动；`benchmark_win_rate` 为共同日期上分组当日收益大于基准累计收益的占比，等于时不计为胜。基准累计收益从共同区间首日归一化净值计算。`core` 与 `full` 均返回该字段；若分组或基准没有足够有效数据，对应指标为 `null`。
 
 因子回测响应的 `meta` 会明确返回因子价格和收益价格的复权口径、字段、逻辑来源及精度策略。当前默认策略为：因子使用后复权 OHLC，收益使用后复权 close，均来自研究行情 `data_engine`，读取源精度且不额外四舍五入。`unadjusted_price/unadjusted_price.parquet` 只用于行情展示接口，不参与因子计算。
+
+`meta` 同时回显本次请求的过滤开关 `filter_suspended`、`filter_st`、`filter_limit_up`、`filter_limit_down`，以及诊断字典 `filter_status`（键为 `is_suspended`、`is_st`、`is_limit_up`、`is_limit_down`，取值为 `disabled`、`skipped_missing_field`、`enabled`、`enabled_partial`）。即使四项开关全关，`filter_status` 也会返回四个 `disabled`，便于前端统一渲染。
 
 使用自定义资产的请求示例：
 
