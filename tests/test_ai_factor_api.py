@@ -12,6 +12,7 @@ import numpy as np
 from fastapi.testclient import TestClient
 
 from app.api import ai_factor, ai_strategy
+from app.config import default_runtime_settings
 from app.main import app
 from app.schemas.backtest import GeneratedFactor, GeneratedStrategy
 
@@ -137,6 +138,13 @@ def test_volcengine_provider_requests_strict_json_schema(monkeypatch):
 def test_volcengine_settings_accept_official_ark_api_key_name(monkeypatch):
     monkeypatch.delenv("AI_FACTOR_API_KEY", raising=False)
     monkeypatch.setenv("ARK_API_KEY", "test-key")
+    # 同上：config.yaml 未受 git 跟踪，这里的期望值是「没有 config.yaml 时」
+    # 的代码默认值，必须显式隔离，否则本机配置一变用例就翻脸。
+    monkeypatch.setattr(
+        ai_factor,
+        "get_runtime_settings",
+        lambda *args, **kwargs: default_runtime_settings(),
+    )
 
     settings = ai_factor._settings_from_env()
 
