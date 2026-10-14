@@ -125,6 +125,32 @@ GET /api/backtest/factor/9f1c...
 
 > **缓存**：`execution_timing` 已进入计算身份，`execution_version` 升至 `factor-execution-v8`，旧缓存与库中已存批次结果按新口径重算。
 
+### IC 不可用时的原因
+
+因子的 IC 可能无法计算，此时 `ic_series` 为空、`ic_mean` / `rank_ic_mean` / `ic_std` 为 `null`、`valid_days` 为 0，但**回测本身是成功的**——净值、分层曲线与 `quantile_metrics` 都照常产出，所以**不会**标记为 `status: failed`。
+
+为了让调用方能区分「因子没有区分度」与「计算失败」，`factor_analysis.definition` 增加了 `ic_unavailable_reason`：
+
+| 取值 | 含义 |
+|---|---|
+| `null` | IC 正常可用 |
+| `missing_inputs` | 因子值或远期收益缺失 |
+| `no_common_axis` | 因子值与远期收益没有共同日期或标的 |
+| `insufficient_cross_section` | 没有任何交易日满足 ≥ 2 个有效样本（因子基本无值） |
+| `zero_cross_sectional_variance` | 有样本，但逐日相关系数全不可计算（横截面无方差，例如因子恒为常数） |
+
+前两者多与取数或配置有关，后两者是因子或数据的性质，可据此决定是否排查。
+
+### 逐分位换手
+
+`quantile_metrics[]` 每个分组行新增 `turnover`（`annual_return` 等同级字段）：
+
+- 口径与主组合 `metrics.turnover` **完全一致**：`Σ|Δw| / 2`，逐日计算后对区间取均值，**不分位年化**；建仓当日同样计入。
+- 基准行 `quantile == "benchmark"` 的 `turnover` 为 `null`——基准不是按本口径换仓的组合。
+- 与分层曲线共用同一份「持有分组」映射（含 `execution_timing` 的 lag），因此生效日与曲线一致。
+
+**口径提醒**：各分组是**等权诊断桶**，不是可交易策略。成员不变时换手为 0，换手全部来自排名的进出，量级通常显著高于主组合，**不应直接当作可实现的交易成本**。
+
 ### 交易成本
 
 三个成本参数只作用于**主组合**（`equity_curve`、`returns`、`metrics`、`annual_returns`、`excess_return` 均为净口径）：

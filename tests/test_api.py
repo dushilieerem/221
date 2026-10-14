@@ -418,7 +418,12 @@ def test_factor_backtest_groups_and_benchmark(market_data_dir):
         "excess_volatility",
         "information_ratio",
         "benchmark_win_rate",
+        # 日均单边换手；分组是等权诊断桶，口径与主组合 metrics.turnover 一致
+        "turnover",
     }
+    # 分组行有换手，基准行没有（基准不是按本口径换仓的组合）。
+    assert all(item["turnover"] is not None for item in quantile_metrics[:-1])
+    assert quantile_metrics[-1]["turnover"] is None
     assert all(
         item["annual_return"] is not None
         and item["annual_excess_return"] is not None

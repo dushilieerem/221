@@ -292,6 +292,10 @@ class QuantileMetric(BaseModel):
     annual_return: Optional[float] = None
     volatility: Optional[float] = None
     sharpe: Optional[float] = None
+    #: 该分组的**日均单边换手**（``Σ|Δw| / 2``，逐日计算后取均值、不年化），
+    #: 与主组合 ``metrics.turnover`` 同口径。注意分组是等权诊断桶而非可交易
+    #: 策略，其换手全部来自排名进出，量级通常显著高于主组合。
+    turnover: Optional[float] = None
     max_drawdown: Optional[float] = None
     annual_excess_return: Optional[float] = None
     excess_volatility: Optional[float] = None

@@ -15,6 +15,7 @@ from app.services.factor.layered import (
     long_short_returns,
     quantile_groups,
 )
+from app.services.portfolio.returns import calculate_group_turnover
 
 
 # ---------------- 分组 ----------------
@@ -194,3 +195,72 @@ def test_long_short_missing_column():
     lr = layered_returns(fv, close, n_groups=2, rebalance="monthly")
     with pytest.raises(KeyError):
         long_short_returns(lr, q_high=99)
+
+
+# ---------------- 逐分位换手 ----------------
+
+def _turnover_fixture(assignments, periods=5):
+    idx = pd.bdate_range("2026-01-02", periods=periods)
+    columns = pd.Index(["A", "B", "C", "D"])
+    ga = pd.DataFrame(assignments, index=idx, columns=columns, dtype=float)
+    mask = pd.Series(True, index=idx)
+    return idx, columns, ga, mask
+
+
+def test_group_turnover_is_zero_when_membership_never_changes():
+    idx, columns, ga, mask = _turnover_fixture([[1, 1, 2, 2]] * 5)
+
+    turnover = calculate_group_turnover(idx, columns, ga, mask, 2)
+
+    # 首个持有日是建仓（与主组合 metrics.turnover 同口径，计入），其余为 0。
+    assert turnover.iloc[0].tolist() == pytest.approx([0.5, 0.5])
+    assert (turnover.iloc[1:].to_numpy() == 0.0).all()
+
+
+def test_group_turnover_full_swap_equals_one():
+    """整组对调：卖光买光，单边换手 1.0。"""
+
+    idx, columns, ga, mask = _turnover_fixture(
+        [[1, 1, 2, 2], [1, 1, 2, 2], [2, 2, 1, 1], [2, 2, 1, 1], [2, 2, 1, 1]]
+    )
+
+    turnover = calculate_group_turnover(idx, columns, ga, mask, 2)
+
+    # lag=1：分组在下一交易日生效，所以变化落在 idx[3]。
+    assert turnover.loc[idx[3]].tolist() == pytest.approx([1.0, 1.0])
+
+
+def test_group_turnover_single_name_move_counts_leaver_and_entrant():
+    """只换一只进出的组：离场者贡献全部旧权重、进场者贡献全部新权重。"""
+
+    idx, columns, ga, mask = _turnover_fixture(
+        [[1, 1, 2, 2], [1, 1, 2, 2], [1, 2, 1, 2], [1, 2, 1, 2], [1, 2, 1, 2]]
+    )
+
+    turnover = calculate_group_turnover(idx, columns, ga, mask, 2)
+
+    # B 离开 Q1(1/2) 且 C 进入 Q1(1/2)，A 留在 Q1 但权重不变 => (0.5+0.5)/2
+    assert turnover.loc[idx[3], "Q1"] == pytest.approx(0.5)
+    assert turnover.loc[idx[3], "Q2"] == pytest.approx(0.5)
+
+
+def test_group_turnover_respects_lag_like_group_returns():
+    """换手与分层收益共用同一份持有分组映射，生效日必须一致。"""
+
+    assignments = [[1, 1, 2, 2], [1, 1, 2, 2], [2, 2, 1, 1], [2, 2, 1, 1], [2, 2, 1, 1]]
+    idx, columns, ga, mask = _turnover_fixture(assignments)
+
+    lag1 = calculate_group_turnover(idx, columns, ga, mask, 2, lag=1)
+    lag2 = calculate_group_turnover(idx, columns, ga, mask, 2, lag=2)
+
+    # lag=2 再晚一天生效：idx[3] 的变化推迟到 idx[4]。
+    assert lag1.loc[idx[3], "Q1"] == pytest.approx(1.0)
+    assert lag2.loc[idx[3], "Q1"] == pytest.approx(0.0)
+    assert lag2.loc[idx[4], "Q1"] == pytest.approx(1.0)
+
+
+def test_group_turnover_rejects_invalid_group_count():
+    idx, columns, ga, mask = _turnover_fixture([[1, 1, 2, 2]] * 5)
+
+    with pytest.raises(ValueError, match="n_groups"):
+        calculate_group_turnover(idx, columns, ga, mask, 1)

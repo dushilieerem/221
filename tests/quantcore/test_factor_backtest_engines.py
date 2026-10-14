@@ -734,3 +734,42 @@ def test_ic_statistics_all_follow_execution_timing():
     # 总体 IC 与行业 IC 用同一份矩阵，因此同样随成交时点变化。
     assert not closed_series.equals(default_series)
     assert not closed_series.equals(opened_series)
+
+
+def test_ic_unavailable_reason_distinguishes_the_four_empty_branches():
+    """IC 为空时要能区分是「因子/数据的性质」还是「取数/配置问题」。
+
+    这四种情况此前都只返回同一个空统计，调用方只能靠 ic_series 为空去猜。
+    """
+
+    dates = pd.date_range("2026-01-02", periods=5, freq="B")
+    symbols = ["A", "B", "C"]
+    rng = np.random.default_rng(11)
+    close = pd.DataFrame(
+        100.0 * np.cumprod(1.0 + rng.normal(0, 0.01, (5, 3)), axis=0),
+        index=dates,
+        columns=symbols,
+    )
+    future = close.shift(-1) / close - 1.0
+    varied = pd.DataFrame(
+        rng.normal(0, 1, (5, 3)), index=dates, columns=symbols
+    )
+
+    def reason(factor, fwd, ) -> str | None:
+        stats = MetricEngine._factor_statistics(factor, fwd, 252)
+        return stats["unavailable_reason"]
+
+    assert reason(None, None) == "missing_inputs"
+    assert reason(varied, future.reindex(columns=["X"])) == "no_common_axis"
+
+    thin = pd.DataFrame(np.nan, index=dates, columns=symbols)
+    thin["A"] = 1.0  # 每日只有 1 个有效样本，达不到 >= 2
+    assert reason(thin, future) == "insufficient_cross_section"
+
+    constant = pd.DataFrame(1.0, index=dates, columns=symbols)
+    assert reason(constant, future) == "zero_cross_sectional_variance"
+
+    # 正常路径必须显式给 None，而不是缺键。
+    stats = MetricEngine._factor_statistics(varied, future, 252)
+    assert stats["unavailable_reason"] is None
+    assert not stats["ic_series"].empty

@@ -133,6 +133,7 @@ def _compute_quantile_metrics(
     *,
     layered_returns: pd.DataFrame | None = None,
     relative_benchmark_returns: pd.Series | None = None,
+    group_turnover: pd.DataFrame | None = None,
 ) -> list[QuantileMetric]:
     """按当前对齐口径计算分组及基准指标。"""
 
@@ -284,8 +285,17 @@ def _compute_quantile_metrics(
             quantile = column_name.upper()
         else:
             quantile = f"Q{number}"
+        # 日均单边换手；缺数据时为 None，不要用 0 冒充「没换手」。
+        turnover = None
+        if group_turnover is not None and not group_turnover.empty:
+            key = f"Q{number}"
+            if key in group_turnover.columns:
+                series = _finite_series(group_turnover[key])
+                if not series.empty:
+                    turnover = _safe_metric(series.mean())
         result.append(QuantileMetric(
             quantile=quantile,
+            turnover=turnover,
             **absolute,
             annual_excess_return=annual_excess_return,
             excess_volatility=excess_volatility,
