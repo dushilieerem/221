@@ -41,6 +41,7 @@ from app.services.metric.metrics.standard import default_metrics
 from app.services.portfolio.returns import (
     GrossReturnBundle,
     calculate_group_returns,
+    calculate_group_turnover,
     calculate_gross_returns,
 )
 
@@ -350,7 +351,16 @@ class MetricEngine:
         return (1.0 + displayed).cumprod()
 
     @staticmethod
-    def _empty_factor_statistics() -> dict[str, Any]:
+    def _empty_factor_statistics(reason: str) -> dict[str, Any]:
+        """IC 不可用时的空统计。
+
+        ``unavailable_reason`` 区分「因子/数据的性质」与「取数或配置问题」，
+        让调用方不必靠 ``ic_series`` 为空去猜是哪一种。取值：
+          missing_inputs                因子值或远期收益缺失
+          no_common_axis                两者没有共同日期或标的
+          insufficient_cross_section    没有任何交易日满足 >= 2 个有效样本
+          zero_cross_sectional_variance 有样本但逐日相关系数全不可计算
+        """
         return {
             "ic_series": pd.DataFrame(columns=["value", "sample_size"]),
             "rank_ic_series": pd.Series(dtype=float),
@@ -363,6 +373,7 @@ class MetricEngine:
                 "actual_start": None,
                 "actual_end": None,
             },
+            "unavailable_reason": reason,
         }
 
     @staticmethod
@@ -401,13 +412,12 @@ class MetricEngine:
     ) -> dict[str, Any]:
         """一次对齐并计算因子 IC、RankIC 及其汇总。"""
 
-        empty = MetricEngine._empty_factor_statistics()
         if factor_values is None or forward_returns is None:
-            return empty
+            return MetricEngine._empty_factor_statistics("missing_inputs")
         dates = factor_values.index.intersection(forward_returns.index)
         symbols = factor_values.columns.intersection(forward_returns.columns)
         if dates.empty or symbols.empty:
-            return empty
+            return MetricEngine._empty_factor_statistics("no_common_axis")
 
         factor = factor_values.loc[dates, symbols]
         future = forward_returns.loc[dates, symbols]
@@ -418,7 +428,9 @@ class MetricEngine:
         future = future.loc[enough]
         sample_size = sample_size.loc[enough]
         if factor.empty:
-            return empty
+            return MetricEngine._empty_factor_statistics(
+                "insufficient_cross_section"
+            )
 
         ic = MetricEngine._rowwise_corr(factor, future)
         rank_ic = MetricEngine._rowwise_corr(
@@ -431,7 +443,9 @@ class MetricEngine:
         }).dropna(subset=["value"])
         ic_series = ic_series[ic_series["sample_size"] >= 2]
         if ic_series.empty:
-            return empty
+            return MetricEngine._empty_factor_statistics(
+                "zero_cross_sectional_variance"
+            )
 
         values = ic_series["value"]
         mean = float(values.mean())
@@ -453,6 +467,7 @@ class MetricEngine:
                 "actual_start": pd.Timestamp(values.index.min()).date().isoformat(),
                 "actual_end": pd.Timestamp(values.index.max()).date().isoformat(),
             },
+            "unavailable_reason": None,
         }
 
     @staticmethod
@@ -562,6 +577,7 @@ class MetricEngine:
                 else None
             ),
             relative_benchmark_returns=relative,
+            group_turnover=analysis.get("group_turnover"),
         ))
 
     @staticmethod
@@ -616,6 +632,9 @@ class MetricEngine:
             "layered_returns": evaluation["layered_returns"],
             "layered_equity": evaluation["layered_equity"],
             "predictive_summary": evaluation["predictive_summary"],
+            # IC 不可用的原因（可用时为 None）；core 与 full 都带回。
+            "ic_unavailable_reason": evaluation.get("ic_unavailable_reason"),
+            "group_turnover": evaluation.get("group_turnover", pd.DataFrame()),
         }
         if analysis_level == "full":
             # evaluate_factor_portfolio 已经完成一次因子/远期收益对齐和 IC
@@ -799,6 +818,7 @@ class MetricEngine:
         metrics["trade_count"] = float(transaction_summary["trade_count"])
 
         group_count = portfolio.get("group_count")
+        group_turnover = pd.DataFrame()
         if group_count is None:
             layered_returns = pd.DataFrame()
         else:
@@ -811,6 +831,16 @@ class MetricEngine:
                 close=close,
                 open_prices=open_prices,
             ).reindex(returns.index)
+            # 逐分位单边换手，与分层曲线共用同一份「持有分组」映射（含 lag），
+            # 口径对齐主组合 metrics.turnover：逐日 Σ|Δw|/2 后取均值。
+            group_turnover = calculate_group_turnover(
+                returns.index,
+                layered_returns.columns,
+                portfolio["group_assignments"],
+                portfolio["rebalance_mask"],
+                int(group_count),
+                lag=2 if execution_timing == "next_close" else 1,
+            )
         layered_equity = layered_returns.copy()
         if not layered_equity.empty:
             layered_equity.iloc[0] = 0.0
@@ -828,6 +858,8 @@ class MetricEngine:
             "transaction_summary": transaction_summary,
             "context": ctx,
             "ic_series": factor_statistics["ic_series"],
+            "ic_unavailable_reason": factor_statistics.get("unavailable_reason"),
+            "group_turnover": group_turnover,
         }
         if analysis_level is not None:
             if equity.empty:

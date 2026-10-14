@@ -714,6 +714,10 @@ def _serialize_factor_execution(
             cumulative_series=_layered_equity_to_points(layered_equity),
             definition={
                 "ic_type": "pearson",
+                # IC 不可用时的原因；可用为 None。取值为
+                # missing_inputs / no_common_axis /
+                # insufficient_cross_section / zero_cross_sectional_variance。
+                "ic_unavailable_reason": analysis.get("ic_unavailable_reason"),
                 "forward_return_days": 1,
                 "signal_lag_days": 0,
                 "rolling_ir_window": 60,
