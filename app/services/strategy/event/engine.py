@@ -58,7 +58,9 @@ class EventBacktestEngine:
         for index, date in enumerate(self.dates):
             timestamp = pd.Timestamp(date)
             ledger.begin_session()
-            as_of = self.dates[index - 1] if index else None
+            offset = self._visibility_offset()
+            visible = index - offset
+            as_of = self.dates[visible] if visible >= 0 else None
             data.set_as_of(as_of)
             context.current_dt = timestamp.to_pydatetime()
             orders.set_current_dt(context.current_dt)
@@ -108,8 +110,12 @@ class EventBacktestEngine:
             events=events,
             assumptions={
                 "frequency": "1d",
-                "execution": "same_session_open_after_before_open",
-                "data_visibility": "previous_close",
+                "execution": self.config.execution_timing,
+                "data_visibility": (
+                    "same_close"
+                    if self.config.execution_timing == "same_close"
+                    else "previous_close"
+                ),
                 "delisted_handling": "point_in_time_exclude;force_liquidate_at_transition_close",
             },
         )
@@ -209,10 +215,34 @@ class EventBacktestEngine:
         desired = int(order.target_value / price / self.config.lot_size) * self.config.lot_size
         return desired - current
 
+    def _fill_field(self) -> str:
+        """按成交时点返回成交价字段：开盘价或收盘价。
+
+        same_close / next_close 按收盘价撮合，next_open 按开盘价撮合。
+        """
+
+        return "open" if self.config.execution_timing == "next_open" else "close"
+
+    def _visibility_offset(self) -> int:
+        """策略回调可见数据的截止偏移。
+
+        next_close / next_open 下信号在前一交易日收盘产生，回调只看得到
+        ``index-1``；same_close 是「当日收盘出信号、当日收盘成交」的乐观
+        口径（与因子/向量化路径的旧口径一致），回调因此能看到当日收盘。
+        """
+
+        return 0 if self.config.execution_timing == "same_close" else 1
+
     def _price(self, symbol: str, date: pd.Timestamp) -> float | None:
+        """当日成交参考价。
+
+        同时用于定量（``_resolved_quantity``）与成交价，两者取同一价格以保持
+        自洽；退市强平不走这里，恒按转换日收盘价处置。
+        """
+
         if symbol not in self.symbols:
             return None
-        value = self.panels["open"].at[date, symbol]
+        value = self.panels[self._fill_field()].at[date, symbol]
         return float(value) if pd.notna(value) and value > 0 else None
 
     def _reject_reason(self, symbol: str, side: str, quantity: int, price: float, ledger: _Ledger, date: pd.Timestamp) -> str | None:

@@ -123,6 +123,7 @@ class BacktestEngine:
                 # 完整调仓明细会逐日逐标的展开，核心回测不需要它；只有
                 # 显式请求 full 分析时保留旧行为。
                 include_rebalance_logs=spec.analysis_level == "full",
+                execution_timing=spec.execution_timing,
             )
         except (FactorBacktestDataError, FactorBacktestEmptyResult, FactorBacktestParameterError):
             raise
@@ -131,6 +132,17 @@ class BacktestEngine:
         except Exception as exc:  # noqa: BLE001
             raise FactorBacktestRuntimeError(f"组合构建失败: {type(exc).__name__}: {exc}") from exc
         timings["portfolio_build"] = round(time.perf_counter() - stage_started, 6)
+
+        # next_open 口径需要开盘价参与主组合收益；其余口径不读，避免无谓取数。
+        open_prices = None
+        if spec.execution_timing == "next_open":
+            try:
+                open_prices = factor_engine.market_field("open").loc[:, common]
+            except (KeyError, TypeError) as exc:
+                raise FactorBacktestDataError(
+                    "execution_timing='next_open' 需要开盘价，但当前数据版本"
+                    "没有 open 字段"
+                ) from exc
 
         industry_map = None
         market_fields: dict[str, pd.DataFrame] = {}
@@ -165,6 +177,8 @@ class BacktestEngine:
                 commission_rate=spec.commission_rate,
                 stamp_tax=spec.stamp_tax,
                 slippage_rate=spec.slippage_rate,
+                execution_timing=spec.execution_timing,
+                open_prices=open_prices,
                 periods_per_year=spec.periods_per_year,
                 analysis_level=spec.analysis_level,
                 benchmark_loader=load_benchmark,
@@ -208,8 +222,31 @@ class BacktestEngine:
                 "factor_price_fields": list(_PRICE_FIELDS),
                 "factor_price_precision": "source_precision_no_rounding",
                 "return_price_adjustment": "hfq",
-                "return_price_source": "data_engine.close",
+                "return_price_source": (
+                    "data_engine.open + data_engine.close"
+                    if spec.execution_timing == "next_open"
+                    else "data_engine.close"
+                ),
                 "return_price_precision": "source_precision_no_rounding",
+                "execution_timing": spec.execution_timing,
+                "execution_model": {
+                    "signal": "at_close",
+                    "fill_price": spec.execution_timing,
+                    "fill_session": (
+                        "T" if spec.execution_timing == "same_close" else "T+1"
+                    ),
+                    "main_portfolio_returns": (
+                        "overnight_gap_on_previous_weights_plus_intraday_on_current_weights"
+                        if spec.execution_timing == "next_open"
+                        else "close_to_close_on_shifted_weights"
+                    ),
+                    "layered_and_long_short": "matches_main_portfolio_timing_gross",
+                    "industry_curves": "matches_main_portfolio_timing_gross",
+                    "ic_rank_ic_and_industry_ic": (
+                        "measured_on_execution_aligned_forward_returns"
+                    ),
+                    "ff3": "built_from_close_and_market_cap_unaffected",
+                },
                 "factor_preprocess": {
                     **preprocess,
                 },

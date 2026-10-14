@@ -29,6 +29,7 @@ class FactorBacktestBatchProfile:
     commission_rate: float = 0.0
     stamp_tax: float = 0.0
     slippage_rate: float = 0.0
+    execution_timing: str = "next_close"
     winsorize: int = 0
     standardize: int = 0
 
@@ -75,6 +76,7 @@ class FactorBacktestBatchProfile:
             "commission_rate": self.commission_rate,
             "stamp_tax": self.stamp_tax,
             "slippage_rate": self.slippage_rate,
+            "execution_timing": self.execution_timing,
             "winsorize": self.winsorize,
             "standardize": self.standardize,
         }

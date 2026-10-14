@@ -43,7 +43,7 @@ def test_builtin_factor_library_exposes_selected_gtja_factors():
     library = FactorLoader().load()
     factors = library_factors(library)
 
-    assert len(factors) == 432
+    assert len(factors) == 331
     assert {
         "alpha191_001",
         "alpha191_002",

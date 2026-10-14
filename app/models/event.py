@@ -69,6 +69,10 @@ class EventBacktestConfig:
     stamp_tax_rate: float = 0.0005
     #: 滑点率：买入向上、卖出向下调整成交价，模拟更差的执行价格。
     slippage_rate: float = 0.0
+    #: 成交时点。策略回调始终只看到截至前一交易日收盘的数据，因此信号恒在
+    #: T 日收盘产生：next_close = T+1（即当日）收盘价成交，next_open = 当日
+    #: 开盘价成交。退市强平不受此影响，恒按转换日收盘价处置。
+    execution_timing: str = "next_close"
     lot_size: int = 100
     #: 是否拒绝买入 ST/*ST 标的。停牌与涨跌停由撮合层无条件拦截，不受配置影响。
     filter_st: bool = False

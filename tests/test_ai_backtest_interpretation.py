@@ -8,6 +8,7 @@ from uuid import uuid4
 from fastapi.testclient import TestClient
 
 from app.api import ai_interpretation
+from app.config import default_runtime_settings
 from app.main import app
 
 
@@ -41,6 +42,15 @@ def test_interpretation_returns_deterministic_evidence_and_research_first_experi
     monkeypatch.delenv("AI_BACKTEST_INTERPRETATION_API_KEY", raising=False)
     monkeypatch.delenv("AI_FACTOR_API_KEY", raising=False)
     monkeypatch.delenv("ARK_API_KEY", raising=False)
+    # config.yaml 不受 git 跟踪、内容按机器而异（本机配了可用的 Ark key），
+    # 测试结果不能依赖它。把本模块读到的运行时配置换成「未加载 config.yaml」
+    # 的开发默认值，让「未配置 provider」成为确定性前提——否则本机走
+    # llm_grounded、CI 走 deterministic_fallback，用例随环境翻脸。
+    monkeypatch.setattr(
+        ai_interpretation,
+        "get_runtime_settings",
+        lambda *args, **kwargs: default_runtime_settings(),
+    )
     ai_interpretation._IDEMPOTENCY.clear()
 
     response = client.post("/api/ai/backtest-interpretations", json=_payload())

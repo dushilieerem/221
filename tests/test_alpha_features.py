@@ -42,7 +42,7 @@ def test_alpha_feature_library_registers_all_standard_features():
     library = loader.load()
     factors = library_factors(library)
 
-    assert len(factors) == 432
+    assert len(factors) == 331
     assert {
         "alpha158_kmid",
         "alpha360_close",

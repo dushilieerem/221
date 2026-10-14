@@ -325,7 +325,7 @@ def _from_manager(manager: ConfigManager, config_path: Path) -> RuntimeSettings:
         factor_backtest_database=factor_backtest_database,
         output_path=output_path,
         ai_base_url=(
-            ai_base_url or "https://ark.cn-beijing.volces.com/api/plan/v3"
+            ai_base_url or "https://ark.cn-beijing.volces.com/api/coding/v3"
         ).rstrip("/"),
         ai_api_key=ai_api_key,
         ai_model=ai_model or "ark-code-latest",

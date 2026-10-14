@@ -50,6 +50,8 @@ def calculate_group_returns(
     group_assignments: pd.DataFrame,
     rebalance_mask: pd.Series,
     n_groups: int,
+    *,
+    lag: int = 1,
 ) -> pd.DataFrame:
     """一次性计算所有分组的等权毛收益。
 
@@ -57,7 +59,13 @@ def calculate_group_returns(
     承担，因此先用 NumPy 的索引传播得到每个交易日的上一调仓分组，
     再用 ``bincount`` 按 ``(date, group)`` 聚合收益和成员数。整个过程
     不创建每个分组的 ``T×N`` 权重表，也不包含 Python 日期/标的循环。
+
+    ``lag`` 控制分组的生效日，与主组合的持仓位移口径一致：``1``（默认）
+    表示信号日收盘成交、次日生效；``2`` 表示再晚一天生效（T+1 收盘成交）。
     """
+
+    if lag < 1:
+        raise ValueError(f"lag 至少为 1，得到 {lag}")
 
     if n_groups < 2:
         raise ValueError(f"n_groups 至少为 2，得到 {n_groups}")
@@ -83,6 +91,14 @@ def calculate_group_returns(
     previous_signal = np.full(n_dates, -1, dtype=np.intp)
     if n_dates > 1:
         previous_signal[1:] = np.maximum.accumulate(signal_rows[:-1])
+
+    # lag 把「最近一次调仓」整体前推：收益日 t 改用 t-lag 之前的最近调仓
+    # 所产生的分组，等价于持仓再晚 lag-1 天生效。
+    if lag > 1:
+        shifted = np.full(n_dates, -1, dtype=np.intp)
+        if n_dates > lag - 1:
+            shifted[lag - 1:] = previous_signal[: n_dates - (lag - 1)]
+        previous_signal = shifted
 
     # 将每个收益日映射到上一调仓日的组号；-1 表示尚未入场或当日无效。
     held_groups = np.full_like(assignment_values, np.nan, dtype=float)

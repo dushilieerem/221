@@ -6,6 +6,7 @@ import math
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -16,6 +17,7 @@ from app.services.factor.base import BaseFactor
 from app.services.factor.engine import FactorEngine
 from app.services.factor.errors import FactorBacktestDataError
 from app.services.portfolio.engine import PortfolioEngine
+from app.services.portfolio.returns import calculate_group_returns
 from app.services.metric.engine import MetricEngine
 
 
@@ -330,6 +332,20 @@ def test_factor_spec_identity_covers_all_filter_flags():
     assert len({spec.identity() for spec in variants}) == len(variants)
 
 
+def test_factor_spec_identity_covers_execution_timing():
+    """成交时点改变持仓生效日，必须进计算身份，否则两种口径共用缓存。"""
+
+    base = {"factor_name": "factor", "start": "2026-01-02", "end": "2026-01-31"}
+    closed = FactorBacktestSpec(**base, execution_timing="next_close")
+    opened = FactorBacktestSpec(**base, execution_timing="next_open")
+
+    assert closed.identity() != opened.identity()
+    assert closed.computation_payload()["execution_timing"] == "next_close"
+    assert opened.computation_payload()["execution_timing"] == "next_open"
+    # 默认值与显式 next_close 同身份。
+    assert FactorBacktestSpec(**base).identity() == closed.identity()
+
+
 def test_factor_engine_masks_before_cross_sectional_preprocessing():
     dates = pd.date_range("2026-01-02", periods=1)
     values = pd.DataFrame([[1.0, 2.0, 1000.0]], index=dates, columns=list("ABC"))
@@ -362,16 +378,55 @@ def test_portfolio_and_metric_preserve_first_forward_holding_period():
     )
     evaluation = MetricEngine().evaluate(portfolio)
 
+    # 默认 next_close：信号次日收盘成交、再次日生效，因此首个展示期还没有
+    # 持仓（收益 0），净值序列本身不变（首个展示期收益本就是 0）。
     pd.testing.assert_series_equal(
         evaluation["returns"],
-        pd.Series([0.1, 0.1, 0.1], index=dates[1:], name=None),
+        pd.Series([0.0, 0.1, 0.1], index=dates[1:], name=None),
     )
     pd.testing.assert_series_equal(
         evaluation["equity_curve"],
         pd.Series([1.0, 1.1, 1.21], index=dates[1:], name=None),
     )
     assert pd.isna(portfolio["forward_returns"].loc[dates[-1], "A"])
+    assert portfolio["positions"].loc[dates[1], "A"] == 0.0
+    assert portfolio["positions"].loc[dates[2], "A"] == 1.0
+
+
+def test_portfolio_next_open_earns_intraday_on_entry_day():
+    """next_open：信号次日开盘成交，当日只赚日内、不赚隔夜跳空。"""
+
+    dates = pd.date_range("2026-01-02", periods=3, freq="B")
+    open_ = pd.DataFrame({"A": [100.0, 105.0, 110.0]}, index=dates)
+    close = pd.DataFrame({"A": [100.0, 110.0, 121.0]}, index=dates)
+    factor = pd.DataFrame({"A": [1.0, 1.0, 1.0]}, index=dates)
+
+    portfolio = PortfolioEngine().build(
+        factor, close, groups=None, portfolio_type="long_only",
+        rebalance=1, stock_num=1, execution_timing="next_open",
+    )
+    # next_open 下持仓位移与「信号日收盘成交」相同（shift(1)），差别在收益公式。
     assert portfolio["positions"].loc[dates[1], "A"] == 1.0
+
+    evaluation = MetricEngine().evaluate(
+        portfolio, execution_timing="next_open", open_prices=open_
+    )
+
+    # 建仓日只赚日内（110/105-1），次日持仓不变、退化为收盘价对收盘价。
+    assert evaluation["returns"].iloc[0] == pytest.approx(110.0 / 105.0 - 1.0)
+    assert evaluation["returns"].iloc[1] == pytest.approx(121.0 / 110.0 - 1.0)
+
+
+def test_portfolio_execution_timing_rejects_unknown_value():
+    dates = pd.date_range("2026-01-02", periods=2, freq="B")
+    close = pd.DataFrame({"A": [100.0, 110.0]}, index=dates)
+    factor = pd.DataFrame({"A": [1.0, 1.0]}, index=dates)
+
+    with pytest.raises(ValueError, match="execution_timing"):
+        PortfolioEngine().build(
+            factor, close, groups=None, portfolio_type="long_only",
+            rebalance=1, stock_num=1, execution_timing="same_open",
+        )
 
 
 def test_portfolio_skips_rebalance_logs_by_default_and_supports_opt_in():
@@ -524,10 +579,11 @@ def test_metric_engine_reports_weight_change_cost_summary():
     assert summary["total_cost"] == pytest.approx(0.013)
     assert evaluation["metrics"]["total_cost"] == pytest.approx(0.013)
 
-    # 净收益 = 毛收益 − 当日成本：首个持有期承担 0.087（= 0.1 − 0.013）。
+    # 净收益 = 毛收益 − 当日成本。next_close 下换手落在第二个展示期，
+    # 该期收益 0.1 − 0.013 = 0.087。
     returns = evaluation["returns"]
-    assert returns.iloc[0] == pytest.approx(0.087)
-    assert returns.iloc[1] == pytest.approx(0.1)
+    assert returns.iloc[0] == pytest.approx(0.0)
+    assert returns.iloc[1] == pytest.approx(0.087)
 
 
 def test_metric_engine_costs_default_to_zero():
@@ -544,7 +600,8 @@ def test_metric_engine_costs_default_to_zero():
 
     summary = evaluation["transaction_summary"]
     assert summary["total_cost"] == pytest.approx(0.0)
-    assert evaluation["returns"].iloc[0] == pytest.approx(0.1)
+    assert evaluation["returns"].iloc[0] == pytest.approx(0.0)
+    assert evaluation["returns"].iloc[1] == pytest.approx(0.1)
     assert evaluation["equity_curve"].iloc[-1] == pytest.approx(1.1)
 
 
@@ -562,3 +619,118 @@ def test_factor_path_does_not_reference_legacy_signal_algorithm():
     assert "FactorGroupStrategy" not in engine_source
     assert "NativeEngine" not in engine_source
     assert "_FactorBacktestAlgorithm" not in factor_source
+
+
+def test_group_returns_lag_shifts_which_assignment_earns_the_return():
+    """lag 决定「哪一天的分组」承担「哪一天」的收益：lag=1 用上一日分组，
+    lag=2 用再上一日分组，持仓因此晚一天生效。"""
+
+    dates = pd.date_range("2026-01-02", periods=6, freq="B")
+    symbols = ["A", "B", "C", "D"]
+    asset_returns = pd.DataFrame(
+        [
+            [0.01, 0.02, 0.03, 0.04],
+            [0.02, 0.01, 0.04, 0.03],
+            [0.03, 0.03, 0.01, 0.02],
+            [0.04, 0.02, 0.02, 0.01],
+            [0.01, 0.04, 0.03, 0.02],
+            [0.02, 0.03, 0.01, 0.04],
+        ],
+        index=dates,
+        columns=symbols,
+    )
+    # 第 0~1 日 A/B 在 Q1，第 2 日起换成 C/D —— 分组会变化，口径才可区分。
+    assignments = pd.DataFrame(
+        [
+            [1, 1, 2, 2],
+            [1, 1, 2, 2],
+            [2, 2, 1, 1],
+            [2, 2, 1, 1],
+            [2, 2, 1, 1],
+            [2, 2, 1, 1],
+        ],
+        index=dates,
+        columns=symbols,
+        dtype=float,
+    )
+    rebalance_mask = pd.Series(True, index=dates)
+    # 两口径都丢掉首行（信号日无持有收益）。
+    index = dates[1:]
+
+    lag1 = calculate_group_returns(
+        asset_returns, assignments, rebalance_mask, 2, lag=1
+    )
+    lag2 = calculate_group_returns(
+        asset_returns, assignments, rebalance_mask, 2, lag=2
+    )
+
+    # lag=1：收益日 t 用 t-1 日的分组。
+    assert lag1["Q1"].tolist() == pytest.approx([0.015, 0.03, 0.015, 0.025, 0.025])
+    # lag=2：改用 t-2 日的分组，首个收益日还没持仓。
+    assert lag2["Q1"].tolist() == pytest.approx([0.0, 0.03, 0.03, 0.025, 0.025])
+    assert lag1.index.equals(index) and lag2.index.equals(index)
+
+
+def test_group_returns_rejects_non_positive_lag():
+    dates = pd.date_range("2026-01-02", periods=2, freq="B")
+    frame = pd.DataFrame(1.0, index=dates, columns=["A"])
+    assignments = pd.DataFrame(1.0, index=dates, columns=["A"])
+
+    with pytest.raises(ValueError, match="lag"):
+        calculate_group_returns(
+            frame, assignments, pd.Series(True, index=dates), 2, lag=0
+        )
+
+
+def test_ic_statistics_all_follow_execution_timing():
+    """IC / RankIC / 行业 IC 统一按成交时点平移配对用的收益。"""
+
+    dates = pd.bdate_range("2026-01-02", periods=60)
+    symbols = [f"S{index:02d}" for index in range(12)]
+    rng = np.random.default_rng(7)
+    close = pd.DataFrame(
+        100.0 * np.cumprod(1.0 + rng.normal(0, 0.02, (60, 12)), axis=0),
+        index=dates,
+        columns=symbols,
+    )
+    open_prices = close * 0.995
+    factor = pd.DataFrame(rng.normal(0, 1, (60, 12)), index=dates, columns=symbols)
+    industry_map = pd.Series(["银行"] * 6 + ["医药"] * 6, index=symbols)
+
+    def analyse(timing: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+        portfolio = PortfolioEngine().build(
+            factor,
+            close,
+            groups=3,
+            portfolio_type="long_only",
+            rebalance=1,
+            stock_num=3,
+            execution_timing=timing,
+        )
+        evaluation = MetricEngine().evaluate_factor_portfolio(
+            portfolio,
+            analysis_level="full",
+            execution_timing=timing,
+            open_prices=open_prices,
+            industry_map=industry_map,
+            benchmark_loader=lambda index: pd.Series(1.0, index=index),
+            groups=3,
+        )
+        return (
+            evaluation["factor_analysis"]["industry_ic_ir"],
+            evaluation["factor_analysis"]["ic_series"],
+        )
+
+    closed_ic, closed_series = analyse("same_close")
+    default_ic, default_series = analyse("next_close")
+    opened_ic, opened_series = analyse("next_open")
+
+    assert not closed_ic.empty
+    # 行业 IC 随成交时点变（配对的收益起点不同）。
+    assert not closed_ic.equals(default_ic)
+    assert not closed_ic.equals(opened_ic)
+    assert not default_ic.equals(opened_ic)
+
+    # 总体 IC 与行业 IC 用同一份矩阵，因此同样随成交时点变化。
+    assert not closed_series.equals(default_series)
+    assert not closed_series.equals(opened_series)

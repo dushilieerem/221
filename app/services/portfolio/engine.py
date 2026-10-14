@@ -120,6 +120,7 @@ class PortfolioEngine:
         stock_num: int = 100,
         horizon: int = 1,
         include_rebalance_logs: bool = False,
+        execution_timing: str = "next_close",
     ) -> dict[str, Any]:
         """生成组合产物。
 
@@ -174,7 +175,18 @@ class PortfolioEngine:
             )
             group_count = n_groups
 
-        positions = target.ffill().shift(1).fillna(0.0)
+        # 信号在 t 日收盘产生，持仓生效日随成交时点变化：
+        #   same_close  t 日收盘成交 -> 持仓 t+1 日生效（lag=1，旧口径）
+        #   next_open   t+1 日开盘成交 -> 同样 t+1 日生效（lag=1），差别在
+        #               收益公式上（隔夜跳空归昨日持仓），见 MetricEngine
+        #   next_close  t+1 日收盘成交 -> t+2 日才生效（lag=2）
+        if execution_timing not in {"same_close", "next_close", "next_open"}:
+            raise ValueError(
+                f"不支持的 execution_timing: {execution_timing!r}，"
+                "可选 same_close | next_close | next_open"
+            )
+        lag = 2 if execution_timing == "next_close" else 1
+        positions = target.ffill().shift(lag).fillna(0.0)
         forward = full_prices.loc[:, prices.columns].shift(-int(horizon)).div(
             full_prices.loc[:, prices.columns]
         ).sub(1.0)

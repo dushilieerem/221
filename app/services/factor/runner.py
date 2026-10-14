@@ -181,6 +181,7 @@ def _request_spec(req: FactorBacktestRequest) -> FactorBacktestSpec:
         commission_rate=req.commission_rate,
         stamp_tax=req.stamp_tax,
         slippage_rate=req.slippage_rate,
+        execution_timing=req.execution_timing,
         filter_suspended=req.filter_suspended,
         filter_st=req.filter_st,
         filter_limit_up=req.filter_limit_up,
@@ -795,6 +796,10 @@ def _serialize_factor_execution(
                 "units": "fraction_of_portfolio_nav_summed_over_period",
                 "note": "首个持有期的建仓成本不计入",
             },
+            execution_timing=result.meta.get(
+                "execution_timing", execution.spec.execution_timing
+            ),
+            execution_model=result.meta.get("execution_model", {}),
             execution_version=result.meta.get("execution_version", execution.spec.execution_version),
             metric_version=result.meta.get("metric_version", execution.spec.metric_version),
             data_release_id=result.meta.get("data_release_id", execution.data_release_id),

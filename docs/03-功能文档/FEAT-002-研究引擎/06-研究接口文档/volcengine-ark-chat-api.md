@@ -9,7 +9,7 @@
 项目不是调用标准在线推理地址 `/api/v2/v3/chat/completions`，而是使用火山方舟 Agent Plan 地址：
 
 ```text
-POST https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions
+POST https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions
 Authorization: Bearer <API Key>
 Content-Type: application/json
 ```
@@ -18,7 +18,7 @@ Content-Type: application/json
 
 ```python
 base_url = os.environ.get(
-    "AI_FACTOR_BASE_URL", "https://ark.cn-beijing.volces.com/api/plan/v3"
+    "AI_FACTOR_BASE_URL", "https://ark.cn-beijing.volces.com/api/coding/v3"
 ).rstrip("/")
 
 url = f"{base_url}/chat/completions"
@@ -27,7 +27,7 @@ url = f"{base_url}/chat/completions"
 因此，只有在设置 `AI_FACTOR_BASE_URL` 时，才会改用新的 Base URL；默认最终地址始终是：
 
 ```text
-https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions
+https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions
 ```
 
 ## 2. 项目读取的环境变量
@@ -35,7 +35,7 @@ https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions
 | 配置 | 源码规则 |
 |---|---|
 | API Key | 优先读取 `AI_FACTOR_API_KEY`；未设置时读取 `ARK_API_KEY`。 |
-| Base URL | 读取 `AI_FACTOR_BASE_URL`；默认 `https://ark.cn-beijing.volces.com/api/plan/v3`。 |
+| Base URL | 读取 `AI_FACTOR_BASE_URL`；默认 `https://ark.cn-beijing.volces.com/api/coding/v3`。 |
 | 模型 | 读取 `AI_FACTOR_MODEL_ALIAS`；默认 `ark-code-latest`。 |
 
 PowerShell 配置示例：
@@ -122,7 +122,7 @@ POST /api/ai/factor-generations
 
 ```bash
 curl --request POST \
-  "https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions" \
+  "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions" \
   --header "Authorization: Bearer ${AI_FACTOR_API_KEY}" \
   --header "Content-Type: application/json" \
   --data @- <<JSON
@@ -218,7 +218,7 @@ raw_content = body["choices"][0]["message"]["content"]
 ```text
 AI_FACTOR_API_KEY / ARK_API_KEY
             ↓
-AI_FACTOR_BASE_URL（默认 /api/v2/plan/v3）
+AI_FACTOR_BASE_URL（默认 /api/coding/v3）
             ↓
 POST /chat/completions
             ↓

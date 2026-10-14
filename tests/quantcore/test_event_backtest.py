@@ -17,6 +17,19 @@ def _panels():
     }
 
 
+def _config(**overrides):
+    """事件回测配置。
+
+    成交时点参数 ``execution_timing`` 的默认值是 ``next_close``；本文件里的
+    既有用例都按"当日开盘价成交"构造（购买数量也是照开盘价配的），因此这里
+    显式固定为 ``next_open`` 保持原意。成交时点本身由本文件末尾的
+    ``test_execution_timing_*`` 用例覆盖。
+    """
+
+    overrides.setdefault("execution_timing", "next_open")
+    return EventBacktestConfig(initial_capital=10_000, **overrides)
+
+
 def test_before_open_only_sees_previous_close_and_fills_at_current_open():
     seen = []
 
@@ -29,7 +42,7 @@ def test_before_open_only_sees_previous_close_and_fills_at_current_open():
 
             context.schedule.daily(rebalance)
 
-    result = EventBacktestEngine(_panels(), EventBacktestConfig(initial_capital=10_000)).run(Strategy())
+    result = EventBacktestEngine(_panels(), _config()).run(Strategy())
 
     assert seen[0] == []
     assert seen[1] == [pd.Timestamp("2024-01-02")]
@@ -49,7 +62,7 @@ def test_t_plus_one_and_lot_size_rejections_are_audited():
 
             context.schedule.daily(trade)
 
-    result = EventBacktestEngine(_panels(), EventBacktestConfig(initial_capital=10_000)).run(Strategy())
+    result = EventBacktestEngine(_panels(), _config()).run(Strategy())
     rejected = {order.reason_code for order in result.orders if order.status == "rejected"}
 
     assert "LOT_SIZE" in rejected
@@ -71,7 +84,7 @@ def test_limit_up_rejects_buy():
 
             context.schedule.daily(trade)
 
-    result = EventBacktestEngine(panels, EventBacktestConfig(initial_capital=10_000)).run(Strategy())
+    result = EventBacktestEngine(panels, _config()).run(Strategy())
 
     assert result.orders[0].reason_code == "LIMIT_UP"
 
@@ -90,7 +103,7 @@ def test_suspended_rejects_buy():
 
             context.schedule.daily(trade)
 
-    result = EventBacktestEngine(panels, EventBacktestConfig(initial_capital=10_000)).run(Strategy())
+    result = EventBacktestEngine(panels, _config()).run(Strategy())
 
     assert result.orders[0].reason_code == "SUSPENDED"
 
@@ -110,7 +123,7 @@ def test_st_buy_rejected_when_filter_st_enabled():
             context.schedule.daily(trade)
 
     result = EventBacktestEngine(
-        panels, EventBacktestConfig(initial_capital=10_000, filter_st=True)
+        panels, _config(filter_st=True)
     ).run(Strategy())
 
     assert result.orders[0].reason_code == "ST"
@@ -131,7 +144,7 @@ def test_st_filter_is_off_by_default():
             context.schedule.daily(trade)
 
     result = EventBacktestEngine(
-        panels, EventBacktestConfig(initial_capital=10_000)
+        panels, _config()
     ).run(Strategy())
 
     assert result.orders[0].reason_code is None
@@ -155,7 +168,7 @@ def test_st_filter_still_allows_selling_existing_holding():
             context.schedule.daily(trade)
 
     result = EventBacktestEngine(
-        panels, EventBacktestConfig(initial_capital=10_000, filter_st=True)
+        panels, _config(filter_st=True)
     ).run(Strategy())
 
     # 转 ST 只拦买入；已持仓仍须可以卖出，否则会被套死。
@@ -179,7 +192,7 @@ def test_normal_status_does_not_reject_sell_as_limit_down():
             context.schedule.daily(trade)
 
     result = EventBacktestEngine(
-        panels, EventBacktestConfig(initial_capital=10_000)
+        panels, _config()
     ).run(Strategy())
 
     assert len(result.fills) == 2
@@ -218,7 +231,7 @@ def test_donchian_style_signal_uses_previous_close_and_target_value():
 
             context.schedule.daily(rebalance)
 
-    result = EventBacktestEngine(panels, EventBacktestConfig(initial_capital=10_000)).run(DonchianStyleStrategy())
+    result = EventBacktestEngine(panels, _config()).run(DonchianStyleStrategy())
 
     assert result.fills[0].timestamp == dates[3].to_pydatetime()
     assert result.fills[0].quantity == 100
@@ -239,7 +252,7 @@ def test_portfolio_average_cost_tracks_open_fills_and_clears_after_exit():
 
             context.schedule.daily(trade)
 
-    result = EventBacktestEngine(_panels(), EventBacktestConfig(initial_capital=10_000)).run(Strategy())
+    result = EventBacktestEngine(_panels(), _config()).run(Strategy())
 
     assert seen == [10.0]
     assert result.position_snapshots[-1].positions["A"] == 0
@@ -282,7 +295,7 @@ def test_delisted_buy_is_rejected_without_any_switch():
             context.schedule.daily(trade)
 
     # 没有传任何过滤开关：退市剔除恒开启。
-    result = EventBacktestEngine(panels, EventBacktestConfig(initial_capital=10_000)).run(Strategy())
+    result = EventBacktestEngine(panels, _config()).run(Strategy())
 
     assert result.orders[0].status == "rejected"
     assert result.orders[0].reason_code == "DELISTED"
@@ -293,7 +306,7 @@ def test_engine_force_liquidates_delisted_holding_at_transition_close():
     panels["listed_status"] = _listed(["在市", "终止上市", "终止上市"])
 
     result = EventBacktestEngine(
-        panels, EventBacktestConfig(initial_capital=10_000)
+        panels, _config()
     ).run(_buy_once_then_hold())
 
     exits = [order for order in result.orders if order.reason_code == "DELISTED"]
@@ -329,7 +342,7 @@ def test_force_liquidation_survives_missing_open_price():
     panels["listed_status"] = _listed(["在市", "终止上市", "终止上市"])
 
     result = EventBacktestEngine(
-        panels, EventBacktestConfig(initial_capital=10_000)
+        panels, _config()
     ).run(_buy_once_then_hold())
 
     exits = [order for order in result.orders if order.reason_code == "DELISTED"]
@@ -346,7 +359,7 @@ def test_force_liquidation_ignores_suspension_and_limit_down_status():
     )
 
     result = EventBacktestEngine(
-        panels, EventBacktestConfig(initial_capital=10_000)
+        panels, _config()
     ).run(_buy_once_then_hold())
 
     exits = [order for order in result.orders if order.reason_code == "DELISTED"]
@@ -360,7 +373,7 @@ def test_force_liquidation_leaves_no_ghost_sellable_quantity():
     panels["listed_status"] = _listed(["在市", "终止上市", "终止上市"])
 
     result = EventBacktestEngine(
-        panels, EventBacktestConfig(initial_capital=10_000)
+        panels, _config()
     ).run(_buy_once_then_hold())
 
     # 强平当日及之后都不应残留可卖数量或反手的持仓。
@@ -380,7 +393,7 @@ def test_backtest_ending_before_transition_does_not_liquidate():
     )
 
     result = EventBacktestEngine(
-        panels, EventBacktestConfig(initial_capital=10_000)
+        panels, _config()
     ).run(_buy_once_then_hold())
 
     # 区间结束在转换日之前：持仓保留，不做任何强平。
@@ -392,7 +405,7 @@ def test_no_force_liquidation_when_listed_status_field_is_absent():
     """数据版本缺少 listed_status 时按降级处理：不拦截也不强平。"""
 
     result = EventBacktestEngine(
-        _panels(), EventBacktestConfig(initial_capital=10_000)
+        _panels(), _config()
     ).run(_buy_once_then_hold())
 
     assert not [order for order in result.orders if order.reason_code == "DELISTED"]
@@ -404,7 +417,7 @@ def test_symbol_already_delisted_at_first_date_is_never_bought():
     panels["listed_status"] = _listed(["暂停上市", "暂停上市", "暂停上市"])
 
     result = EventBacktestEngine(
-        panels, EventBacktestConfig(initial_capital=10_000)
+        panels, _config()
     ).run(_buy_once_then_hold())
 
     assert result.fills == []
@@ -418,7 +431,7 @@ def test_strategy_sell_on_transition_day_is_not_liquidated_twice():
     panels["listed_status"] = _listed(["在市", "终止上市", "终止上市"])
 
     result = EventBacktestEngine(
-        panels, EventBacktestConfig(initial_capital=10_000)
+        panels, _config()
     ).run(_buy_once_then_hold(close_day="2024-01-03"))
 
     exits = [order for order in result.orders if order.reason_code == "DELISTED"]
@@ -446,7 +459,7 @@ def test_slippage_worsens_fill_price_on_both_sides():
 
     result = EventBacktestEngine(
         panels,
-        EventBacktestConfig(initial_capital=10_000, slippage_rate=0.01),
+        _config(slippage_rate=0.01),
     ).run(_buy_once_then_hold(close_day="2024-01-04"))
 
     buy, sell = result.fills[0], result.fills[1]
@@ -462,7 +475,7 @@ def test_slippage_worsens_fill_price_on_both_sides():
 def test_slippage_defaults_to_zero_and_leaves_fills_unchanged():
     panels = _panels()
     result = EventBacktestEngine(
-        panels, EventBacktestConfig(initial_capital=10_000)
+        panels, _config()
     ).run(_buy_once_then_hold(close_day="2024-01-04"))
 
     assert result.fills[0].price == 10.0
@@ -474,7 +487,7 @@ def test_min_commission_can_be_disabled_but_defaults_to_five_yuan():
 
     def commission_for(**config):
         result = EventBacktestEngine(
-            panels, EventBacktestConfig(initial_capital=10_000, **config)
+            panels, _config(**config)
         ).run(_buy_once_then_hold())
         return result.fills[0].commission
 
@@ -484,3 +497,113 @@ def test_min_commission_can_be_disabled_but_defaults_to_five_yuan():
     assert commission_for(min_commission=0.0) == pytest.approx(0.3, abs=1e-9)
     # 费率与最低收费都为 0 时才是真正的零成本。
     assert commission_for(min_commission=0.0, commission_rate=0.0) == 0.0
+
+
+# ---------------- 成交时点 execution_timing ----------------
+
+def _buy_on_first_day():
+    class Strategy:
+        def initialize(self, context):
+            def trade(ctx):
+                if ctx.current_dt.date().isoformat() == "2024-01-02":
+                    ctx.orders.target_quantity("A", 100)
+
+            context.schedule.daily(trade)
+
+    return Strategy()
+
+
+def test_execution_timing_picks_open_or_close_of_the_fill_day():
+    """信号恒在前一收盘产生，成交发生在次日：
+    next_close 取当日收盘价，next_open 取当日开盘价。"""
+
+    def run(timing: str):
+        result = EventBacktestEngine(
+            _panels(), _config(execution_timing=timing)
+        ).run(_buy_on_first_day())
+        return result.fills[0].price, result.assumptions["execution"]
+
+    # _panels(): 2024-01-02 的 open=10.0、close=10.5
+    close_price, close_assumption = run("next_close")
+    open_price, open_assumption = run("next_open")
+
+    assert close_price == 10.5
+    assert open_price == 10.0
+    assert close_assumption == "next_close"
+    assert open_assumption == "next_open"
+
+
+def test_execution_timing_defaults_to_next_close():
+    """不传时用 next_close，且与显式传入逐位一致。"""
+
+    default = EventBacktestEngine(
+        _panels(), EventBacktestConfig(initial_capital=10_000)
+    ).run(_buy_on_first_day())
+    explicit = EventBacktestEngine(
+        _panels(), _config(execution_timing="next_close")
+    ).run(_buy_on_first_day())
+
+    assert default.fills[0].price == 10.5
+    assert default.fills[0].price == explicit.fills[0].price
+
+
+def test_force_liquidation_uses_close_regardless_of_execution_timing():
+    """退市强平恒按转换日收盘价处置，不受成交时点参数影响。"""
+
+    panels = _panels()
+    panels["listed_status"] = _listed(["在市", "终止上市", "终止上市"])
+
+    class Strategy:
+        """按股数买入，避免 target_value 的整手取整随成交价变化。"""
+
+        def initialize(self, context):
+            def trade(ctx):
+                if ctx.current_dt.date().isoformat() == "2024-01-02":
+                    ctx.orders.target_quantity("A", 100)
+
+            context.schedule.daily(trade)
+
+    for timing in ("next_close", "next_open"):
+        result = EventBacktestEngine(
+            panels, _config(execution_timing=timing)
+        ).run(Strategy())
+
+        exits = [order for order in result.orders if order.reason_code == "DELISTED"]
+        assert len(exits) == 1, timing
+        fill = next(fill for fill in result.fills if fill.order_id == exits[0].order_id)
+        assert fill.price == 11.5, timing  # 转换日 close，不是 open 11.0
+
+
+def test_same_close_lets_the_strategy_see_the_fill_day_close():
+    """same_close 是「当日收盘出信号、当日收盘成交」：回调能看到当日收盘。"""
+
+    def visibility(timing: str):
+        """回测并返回 2024-01-03 回调当日可见的收盘序列。"""
+
+        seen = []
+
+        class Strategy:
+            def initialize(self, context):
+                def trade(ctx):
+                    if ctx.current_dt.date().isoformat() == "2024-01-03":
+                        history = ctx.data.history(["A"], ["close"], 5)["close"]
+                        seen.append(history.index.tolist())
+
+                context.schedule.daily(trade)
+
+        result = EventBacktestEngine(
+            _panels(), _config(execution_timing=timing)
+        ).run(Strategy())
+        return seen[0], result
+
+    same_dates, same = visibility("same_close")
+    previous_dates, later = visibility("next_close")
+
+    # same_close：回调看得到当日（01-03）；其余口径只到前一收盘（01-02）。
+    assert pd.Timestamp("2024-01-03") in same_dates
+    assert same_dates[-1] == pd.Timestamp("2024-01-03")
+    assert previous_dates[-1] == pd.Timestamp("2024-01-02")
+
+    assert same.assumptions["data_visibility"] == "same_close"
+    assert later.assumptions["data_visibility"] == "previous_close"
+    assert same.assumptions["execution"] == "same_close"

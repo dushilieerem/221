@@ -49,7 +49,7 @@ def test_builtin_factor_library_exposes_selected_worldquant_factors():
     library = FactorLoader().load()
     factors = library_factors(library)
 
-    assert len(factors) == 432
+    assert len(factors) == 331
     assert {"alpha001", "alpha002", "alpha041", "alpha058", "alpha101"}.issubset(factors)
 
 

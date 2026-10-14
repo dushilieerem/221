@@ -21,32 +21,17 @@ def _panel() -> Panel:
     })
 
 
+#: 因子库在 beebeb4 由 432 条裁剪到 331 条，本文件原有的 parkinson_volatility /
+#: garman_klass_volatility / rogers_satchell_volatility 已随该次裁剪从库中移除
+#: （实现只存在于 SQLite 的 factor_code 列，取回需从 c2e9784 恢复整库）。
+#: 这里只保留仍在库中的 chaikin_volatility。
+FACTOR_NAMES = {"chaikin_volatility"}
+
+
 def test_range_volatility_factor_formulae_match_reference():
     loader = FactorLoader()
     loader.load()
     panel = _panel()
-
-    expected_parkinson = np.sqrt(
-        np.log(panel.high / panel.low).pow(2).rolling(20).mean() / (4 * np.log(2))
-    )
-    pd.testing.assert_frame_equal(loader.factors["parkinson_volatility"].compute(panel), expected_parkinson)
-
-    high_low = np.log(panel.high / panel.low)
-    close_open = np.log(panel.close / panel.open)
-    expected_garman_klass = np.sqrt(
-        (0.5 * high_low.pow(2) - (2 * np.log(2) - 1) * close_open.pow(2)).rolling(20).mean().clip(lower=0)
-    )
-    pd.testing.assert_frame_equal(
-        loader.factors["garman_klass_volatility"].compute(panel), expected_garman_klass
-    )
-
-    expected_rogers_satchell = np.sqrt((
-        np.log(panel.high / panel.close) * np.log(panel.high / panel.open)
-        + np.log(panel.low / panel.close) * np.log(panel.low / panel.open)
-    ).rolling(20).mean().clip(lower=0))
-    pd.testing.assert_frame_equal(
-        loader.factors["rogers_satchell_volatility"].compute(panel), expected_rogers_satchell
-    )
 
     high_low_average = (panel.high - panel.low).ewm(span=10, adjust=False).mean()
     expected_chaikin = (high_low_average / high_low_average.shift(10) - 1) * 100
@@ -57,7 +42,4 @@ def test_range_volatility_factors_are_discoverable():
     loader = FactorLoader()
     loader.load()
 
-    assert {
-        "parkinson_volatility", "garman_klass_volatility",
-        "rogers_satchell_volatility", "chaikin_volatility",
-    }.issubset(loader.factors)
+    assert FACTOR_NAMES.issubset(loader.factors)
