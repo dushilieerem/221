@@ -46,12 +46,16 @@ class BacktestSignals:
 class BacktestConfig:
     """回测配置（后端无关）。
 
-    成本默认 0，与 ``build_factor_portfolio`` 现状（不扣成本）逐位一致；显式给
-    ``commission_rate`` / ``slippage_rate`` 时由 NativeEngine 计入；``stamp_tax`` 仅在卖出时计入。
+    成本默认 0；显式给 ``commission_rate`` / ``slippage_rate`` 时由 NativeEngine
+    按换手率计入，``stamp_tax`` 仅对卖出部分计入。
 
     Notes
     -----
-    - ``min_commission``（每笔最低手续费）由 NativeEngine 支持。
+    - ``min_commission``（每笔最低手续费）**本引擎不支持**：NativeEngine 按
+      ``|Δ权重|`` 的换手率建模，没有「单笔成交」的概念，无法表达按笔下限。
+      需要每笔最低手续费时请使用事件模式（``EventBacktestConfig``）。
+    - 佣金与滑点在公式里同项相加（``换手 × (commission_rate + slippage_rate)``），
+      因此单独设置其中一个得到的结果相同。
     - 权益口径：从 ``initial_capital`` 开始，输出真实资金金额；收益率仍为小数。
     """
 

@@ -135,6 +135,9 @@ async def trigger_factor_backtest_batch(
         as_of_date=req.as_of_date,
         filter_suspended=req.filter_suspended,
         filter_limit_up=req.filter_limit_up,
+        commission_rate=req.commission_rate,
+        stamp_tax=req.stamp_tax,
+        slippage_rate=req.slippage_rate,
         winsorize=req.winsorize,
         standardize=req.standardize,
     )

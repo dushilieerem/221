@@ -171,27 +171,52 @@ class MetricEngine:
         held = positions.ffill().fillna(0.0)
         portfolio_returns = (held * returns).sum(axis=1)
         change = held.diff().fillna(0.0)
-        turnover = change.abs().sum(axis=1)
-        sells = (-change.clip(upper=0.0)).sum(axis=1)
+        costs = MetricEngine._trading_costs(
+            change,
+            commission_rate=commission_rate,
+            stamp_tax=stamp_tax,
+            slippage_rate=slippage_rate,
+        )
+        return {
+            "gross_returns": portfolio_returns,
+            "net_returns": portfolio_returns - costs["total"],
+            "held": held,
+            "weight_change": change,
+            "turnover": change.abs().sum(axis=1),
+            "sell_turnover": (-change.clip(upper=0.0)).sum(axis=1),
+            "costs": costs,
+        }
+
+    @staticmethod
+    def _trading_costs(
+        weight_change: pd.DataFrame,
+        *,
+        commission_rate: float = 0.0,
+        stamp_tax: float = 0.0,
+        slippage_rate: float = 0.0,
+    ) -> pd.DataFrame:
+        """按持有权重变化拆分的逐期交易成本。
+
+        因子回测没有真实成交量与成交价，成本以归一化组合权重变化表示：
+        佣金与滑点按 ``|Δ权重|`` 计，印花税只对卖出（权重下降）部分计。
+        返回的每一列都是「占组合净值的比例」，不是货币金额。
+
+        首个持有期的建仓成本不计入：``weight_change`` 的首行被填为 0，
+        与向量化策略引擎的口径一致。
+        """
+
+        turnover = weight_change.abs().sum(axis=1)
+        sell_turnover = (-weight_change.clip(upper=0.0)).sum(axis=1)
         costs = pd.DataFrame(
             {
                 "commission": turnover * float(commission_rate),
-                "stamp_tax": sells * float(stamp_tax),
+                "stamp_tax": sell_turnover * float(stamp_tax),
                 "slippage": turnover * float(slippage_rate),
             },
-            index=held.index,
+            index=weight_change.index,
         )
         costs["total"] = costs.sum(axis=1)
-        net_returns = portfolio_returns - costs["total"]
-        return {
-            "gross_returns": portfolio_returns,
-            "net_returns": net_returns,
-            "held": held,
-            "weight_change": change,
-            "turnover": turnover,
-            "sell_turnover": sells,
-            "costs": costs,
-        }
+        return costs
 
     @staticmethod
     def _display_equity(returns: pd.Series) -> pd.Series:
@@ -564,10 +589,20 @@ class MetricEngine:
         positions = portfolio["positions"]
         factor_values = portfolio.get("factor_values")
         forward_returns = portfolio.get("forward_returns")
-        # 因子回测固定采用毛收益。成本参数保留在接口中用于兼容旧请求，
-        # 但不进入收益矩阵，也不触发任何额外的成本计算。
         return_bundle: GrossReturnBundle = calculate_gross_returns(close, positions)
-        returns = return_bundle.portfolio_returns.iloc[1:].dropna()
+        # 主组合按请求的费率扣减交易成本：佣金与滑点按 |Δ权重| 换手计，
+        # 印花税只对卖出部分计。净值、收益、指标因此都是净口径。
+        #
+        # 分层曲线与由它派生的多空价差仍用毛收益：它们衡量的是因子的排序
+        # 能力，属于诊断口径，扣成本会干扰分组单调性的判断。这一分工写进
+        # 了 meta 的 cost_model。
+        costs = self._trading_costs(
+            return_bundle.weight_change,
+            commission_rate=commission_rate,
+            stamp_tax=stamp_tax,
+            slippage_rate=slippage_rate,
+        )
+        returns = (return_bundle.portfolio_returns - costs["total"]).iloc[1:].dropna()
         equity = self._display_equity(returns)
         positions_out = return_bundle.held_weights.reindex(returns.index)
         factor_statistics = self._factor_statistics(
@@ -597,10 +632,12 @@ class MetricEngine:
             # 这是按标的权重变化计数的调仓意图，不是真实成交笔数。
             "trade_count": int((change.abs().to_numpy() > 0).sum()),
             "total_turnover": float(return_bundle.turnover.sum()),
-            "commission_cost": 0.0,
-            "stamp_tax_cost": 0.0,
-            "slippage_cost": 0.0,
-            "total_cost": 0.0,
+            # 成本口径为「占组合净值的比例」，与 total_turnover 同为全区间累加，
+            # 不是货币金额（因子回测的净值从 1.0 起算，没有真实资金规模）。
+            "commission_cost": float(costs["commission"].sum()),
+            "stamp_tax_cost": float(costs["stamp_tax"].sum()),
+            "slippage_cost": float(costs["slippage"].sum()),
+            "total_cost": float(costs["total"].sum()),
         }
         # 这些附加标量只属于完整因子评价入口；通用 calculate_all() 的
         # 默认十项指标保持不变，避免影响策略回测的旧注册契约。

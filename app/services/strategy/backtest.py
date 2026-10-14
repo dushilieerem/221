@@ -288,6 +288,7 @@ def run_strategy_backtest(
             bt_result.rebalance_logs, stock_names,
         )
 
+    cost_meta = _cost_meta(req, engine_mode="vectorized")
     return StrategyBacktestResponse(
         metrics=metrics,
         equity_curve=equity_points,
@@ -312,6 +313,7 @@ def run_strategy_backtest(
             filter_limit_up=req.filter_limit_up,
             filter_limit_down=req.filter_limit_down,
             filter_status=filter_info["status"],
+            **cost_meta,
             trading_symbols=list(declared_symbols) or None,
         ),
         positions=positions,
@@ -319,6 +321,44 @@ def run_strategy_backtest(
         execution_timeline=execution_timeline,
         error=None,
     )
+
+
+def _cost_meta(req: StrategyBacktestRequest, *, engine_mode: str) -> dict:
+    """回显本次实际生效的交易成本参数与建模口径。
+
+    两种 engine_mode 对成本的建模方式不同，回显出来让结果可以自证：
+    向量化按换手率计提、没有单笔概念；事件模式按笔成交、滑点体现在成交价上。
+    """
+
+    if engine_mode == "event":
+        return {
+            "commission_rate": req.commission_rate,
+            "stamp_tax": req.stamp_tax,
+            "slippage_rate": req.slippage_rate,
+            "min_commission": req.min_commission,
+            "cost_model": {
+                "commission": "per_fill_amount_times_rate_floored_at_min_commission",
+                "stamp_tax": "per_sell_fill_amount_times_rate",
+                "slippage": "price_adjusted_buy_up_sell_down",
+                "min_commission": "per_fill_floor",
+                "timing": "at_fill",
+            },
+        }
+    return {
+        "commission_rate": req.commission_rate,
+        "stamp_tax": req.stamp_tax,
+        "slippage_rate": req.slippage_rate,
+        # 换手率模型没有「单笔成交」，无法表达按笔下限。
+        "min_commission": None,
+        "cost_model": {
+            "commission": "turnover_times_rate",
+            "stamp_tax": "sell_turnover_times_rate",
+            "slippage": "turnover_times_rate",
+            "min_commission": "not_applicable",
+            "timing": "per_rebalance",
+            "note": "佣金与滑点同项相加，单独设置其中一个结果相同",
+        },
+    }
 
 
 def _strategy_filter_info(data_engine, panels, req: StrategyBacktestRequest) -> dict:
@@ -424,7 +464,9 @@ def _run_event_strategy_backtest(
             EventBacktestConfig(
                 initial_capital=req.initial_capital,
                 commission_rate=req.commission_rate,
+                min_commission=req.min_commission,
                 stamp_tax_rate=req.stamp_tax,
+                slippage_rate=req.slippage_rate,
                 filter_st=req.filter_st and listed_status_available,
             ),
         ).run(strategy)
@@ -505,6 +547,7 @@ def _run_event_strategy_backtest(
                         else "skipped_missing_field"
                     ),
                 },
+                **_cost_meta(req, engine_mode="event"),
                 trading_symbols=list(declared_symbols) or None,
             ),
             orders=orders,

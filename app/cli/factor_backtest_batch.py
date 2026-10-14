@@ -36,6 +36,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--filter-suspended", action="store_true")
     parser.add_argument("--filter-limit-up", action="store_true")
+    parser.add_argument("--commission-rate", type=float, default=0.0)
+    parser.add_argument("--stamp-tax", type=float, default=0.0)
+    parser.add_argument("--slippage-rate", type=float, default=0.0)
     parser.add_argument("--winsorize", type=int, choices=range(4), default=0)
     parser.add_argument("--standardize", type=int, choices=range(4), default=0)
     parser.add_argument(
@@ -95,6 +98,9 @@ def main(argv: list[str] | None = None) -> int:
                 "dry_run": args.dry_run,
                 "filter_suspended": args.filter_suspended,
                 "filter_limit_up": args.filter_limit_up,
+                "commission_rate": args.commission_rate,
+                "stamp_tax": args.stamp_tax,
+                "slippage_rate": args.slippage_rate,
                 "winsorize": args.winsorize,
                 "standardize": args.standardize,
             },

@@ -88,15 +88,37 @@ GET /api/backtest/factor/9f1c...
 | `filter_st` | boolean | `false` | 是否把 ST、\*ST 标的排除出研究样本。 |
 | `filter_limit_up` | boolean | `false` | 是否把涨停标的排除出研究样本。 |
 | `filter_limit_down` | boolean | `false` | 是否把跌停标的排除出研究样本。 |
-| `commission_rate` | number | `0.0` | 兼容旧请求；因子回测统一按毛收益计算并忽略该参数。 |
-| `stamp_tax` | number | `0.0` | 兼容旧请求；因子回测统一按毛收益计算并忽略该参数。 |
-| `slippage_rate` | number | `0.0` | 兼容旧请求；因子回测统一按毛收益计算并忽略该参数。 |
+| `commission_rate` | number | `0.0` | 佣金率，按主组合的 `\|Δ权重\|` 换手计提，作用于净值与指标。 |
+| `stamp_tax` | number | `0.0` | 印花税率，只对主组合的卖出（权重下降）部分计提。 |
+| `slippage_rate` | number | `0.0` | 滑点率，同样按换手计提。与佣金同项相加，单独设置其中一个结果相同。 |
 
 ### 日期语义
 
 `start/end` 是收益确认区间，不是因子计算区间。服务端会先用当前数据版本的完整可用历史计算因子（包括区间起点之前的预热数据），再将因子值、收盘价、远期收益、分层结果、指标和净值裁剪到请求区间。因子不需要额外声明 `warmup_days`；因子实现仍需自行避免使用未来数据。
 
 完整示例和因子写法见 [因子与策略指南](../07-factor-strategy-guide.md)。
+
+### 交易成本
+
+三个成本参数只作用于**主组合**（`equity_curve`、`returns`、`metrics`、`annual_returns`、`excess_return` 均为净口径）：
+
+| 成本 | 计提方式 | 口径 |
+|---|---|---|
+| `commission_rate` | `\|Δ权重\|` 换手 × 费率 | 占组合净值的比例 |
+| `slippage_rate` | `\|Δ权重\|` 换手 × 费率 | 同上 |
+| `stamp_tax` | 卖出（权重下降）部分 × 费率 | 同上 |
+
+三点需要注意：
+
+1. **分层曲线（Q1~Qn）与由它派生的多空价差保持毛收益**。它们衡量的是因子的排序能力，属于诊断口径，扣成本会干扰分组单调性的判断。这一分工回显在 `meta.cost_model` 里。
+2. **首个持有期的建仓成本不计入**（`weight_change` 首行填 0），与向量化策略引擎一致。
+3. 成本量纲是「占组合净值的比例」而非货币金额——因子回测的净值从 1.0 起算，没有真实资金规模。`meta.metrics.commission_cost` 等字段是全区间累加值。
+
+不传成本参数时结果与扣成本前逐位一致，既有回测结论不受影响。`meta` 会回显 `commission_rate` / `stamp_tax` / `slippage_rate` 与 `cost_model`，便于结果自证。
+
+**批量回测**（`POST /api/internal/factor-backtest-batches` 与 `python -m app.cli.factor_backtest_batch`）同样接受 `commission_rate` / `stamp_tax` / `slippage_rate`，口径与单因子完全一致；三者已进入批次身份（`profile_hash`），改动费率会生成新批次而不是复用旧结果。
+
+> **缓存**：成本参数已进入计算身份（`computation_payload`）。此前它们被固定为 0，若沿用旧口径，不同费率的请求会共用缓存键并互相返回错误结果。同时 `execution_version` 升到 `factor-execution-v7`，旧缓存与库里已存结果按新口径重算。
 
 ### 样本过滤
 

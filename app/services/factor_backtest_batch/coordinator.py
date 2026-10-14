@@ -29,7 +29,7 @@ from app.services.experiment.manager import ExperimentManager, ExperimentQueueFu
 
 
 METRIC_VERSION = "factor-scorecard-v3"
-EXECUTION_VERSION = "factor-execution-v6"
+EXECUTION_VERSION = "factor-execution-v7"
 
 
 class FactorBatchSkip(RuntimeError):
