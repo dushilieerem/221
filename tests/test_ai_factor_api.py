@@ -141,7 +141,7 @@ def test_volcengine_settings_accept_official_ark_api_key_name(monkeypatch):
     settings = ai_factor._settings_from_env()
 
     assert settings.api_key == "test-key"
-    assert settings.base_url == "https://ark.cn-beijing.volces.com/api/plan/v3"
+    assert settings.base_url == "https://ark.cn-beijing.volces.com/api/coding/v3"
     assert settings.model == "ark-code-latest"
 
 
