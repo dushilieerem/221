@@ -30,6 +30,9 @@ class BacktestSignals:
 
     target_weights: pd.DataFrame
     close: pd.DataFrame
+    #: 开盘价宽表，仅 ``execution_timing="next_open"`` 需要；缺失时引擎会报错
+    #: 而不是静默退化成收盘价口径。
+    open: pd.DataFrame | None = None
 
     def __post_init__(self) -> None:
         # 与 build_factor_portfolio 的对齐逻辑一致：以 target_weights 为准对齐 close
@@ -38,6 +41,13 @@ class BacktestSignals:
             or not self.target_weights.columns.equals(self.close.columns)
         ):
             self.close = self.close.reindex(
+                index=self.target_weights.index, columns=self.target_weights.columns
+            )
+        if self.open is not None and not (
+            self.open.index.equals(self.target_weights.index)
+            and self.open.columns.equals(self.target_weights.columns)
+        ):
+            self.open = self.open.reindex(
                 index=self.target_weights.index, columns=self.target_weights.columns
             )
 
@@ -71,6 +81,8 @@ class BacktestConfig:
     slippage_rate: float = 0.0
     #: 印花税率（按卖出成交额；仅 Native 支持）
     stamp_tax: float = 0.0
+    #: 成交时点：next_close = 信号次日收盘价成交，next_open = 信号次日开盘价成交
+    execution_timing: str = "next_close"
     #: 频率字符串（日线默认 ``"1D"``）
     freq: str = "1D"
     #: 年化周期数（日线 252）

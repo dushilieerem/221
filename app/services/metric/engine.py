@@ -188,6 +188,129 @@ class MetricEngine:
         }
 
     @staticmethod
+    def _industry_forward_returns(
+        forward_returns: pd.DataFrame,
+        close: pd.DataFrame,
+        open_prices: pd.DataFrame | None,
+        execution_timing: str,
+    ) -> pd.DataFrame:
+        """行业净值曲线用的远期收益矩阵，按成交时点平移。
+
+        行业曲线把「信号日的因子值」与「该信号持仓期的收益」配对：默认
+        （``same_close``）配对 ``(t, t+1]``，``next_close`` 换成 ``(t+1, t+2]``，
+        ``next_open`` 换成次日的开盘到收盘。远期收益的期数由
+        ``forward_return_days`` 决定（当前固定为 1），因此三种口径的持仓期
+        长度一致，只是起点随成交时点后移。
+
+        行业 IC 不用这个矩阵——它衡量因子的预测能力，与成交时点无关。
+        """
+
+        if execution_timing == "same_close":
+            return forward_returns
+        if execution_timing == "next_close":
+            return forward_returns.shift(-1)
+        if execution_timing == "next_open":
+            if open_prices is None:
+                raise ValueError(
+                    "execution_timing='next_open' 需要开盘价，但评测层没有收到 "
+                    "open 面板"
+                )
+            prices_open = open_prices.reindex(
+                index=close.index, columns=close.columns
+            )
+            intraday = close / prices_open.replace(0.0, float("nan")) - 1.0
+            return intraday.reindex(
+                index=forward_returns.index, columns=forward_returns.columns
+            ).shift(-1)
+        raise ValueError(
+            f"不支持的 execution_timing: {execution_timing!r}，"
+            "可选 same_close | next_close | next_open"
+        )
+
+    @staticmethod
+    def _layered_returns(
+        asset_returns: pd.DataFrame,
+        group_assignments: pd.DataFrame,
+        rebalance_mask: pd.Series,
+        n_groups: int,
+        *,
+        execution_timing: str,
+        close: pd.DataFrame,
+        open_prices: pd.DataFrame | None,
+    ) -> pd.DataFrame:
+        """分层曲线与主组合用**同一成交口径**，便于直接对比分组单调性。
+
+        口径映射与主组合一致：
+
+        * ``same_close``：分组在信号日收盘成交、次日生效（``lag=1``），
+          收益用收盘价对收盘价；
+        * ``next_close``：晚一天生效（``lag=2``），收益仍是收盘价对收盘价；
+        * ``next_open``：持仓 ``lag=1`` 生效，但当日收益要拆成两段——
+          隔夜跳空按**上一个**分组（``lag=2``）承担、日内按**当前**分组
+          （``lag=1``）承担。
+
+        仍是不含交易成本的毛收益（成本只作用于主组合）。
+        """
+
+        if execution_timing == "next_open":
+            if open_prices is None:
+                raise ValueError(
+                    "execution_timing='next_open' 需要开盘价，但评测层没有收到 "
+                    "open 面板"
+                )
+            prices_open = open_prices.reindex(
+                index=close.index, columns=close.columns
+            )
+            gap = prices_open / close.shift(1) - 1.0
+            intraday = close / prices_open.replace(0.0, float("nan")) - 1.0
+            return calculate_group_returns(
+                intraday, group_assignments, rebalance_mask, n_groups, lag=1
+            ) + calculate_group_returns(
+                gap, group_assignments, rebalance_mask, n_groups, lag=2
+            )
+        if execution_timing not in {"same_close", "next_close"}:
+            raise ValueError(
+                f"不支持的 execution_timing: {execution_timing!r}，"
+                "可选 same_close | next_close | next_open"
+            )
+        return calculate_group_returns(
+            asset_returns,
+            group_assignments,
+            rebalance_mask,
+            n_groups,
+            lag=2 if execution_timing == "next_close" else 1,
+        )
+
+    @staticmethod
+    def _next_open_returns(
+        held: pd.DataFrame,
+        close: pd.DataFrame,
+        open_prices: pd.DataFrame | None,
+    ) -> pd.Series:
+        """信号次日开盘成交时主组合的逐期收益。
+
+        当日收益拆成两段：隔夜跳空由**昨日**持仓承担（开盘才换仓），日内由
+        **今日**持仓承担。权重不变时两段相加退化为收盘价对收盘价，只差二阶
+        交叉项；建仓当日只赚日内、清仓当日只赚跳空，都与真实成交一致。
+
+        ``held`` 已是「第 t 日实际持有」的权重（next_open 下由
+        ``PortfolioEngine.build`` 用 ``shift(1)`` 产出），位移与「信号日收盘
+        成交」一致，差别只在这条公式上。
+        """
+
+        if open_prices is None:
+            raise ValueError(
+                "execution_timing='next_open' 需要开盘价，但评测层没有收到 "
+                "open 面板"
+            )
+        prices_open = open_prices.reindex(index=close.index, columns=close.columns)
+        overnight_gap = prices_open / close.shift(1) - 1.0
+        intraday = close / prices_open.replace(0.0, float("nan")) - 1.0
+        return (held.shift(1).fillna(0.0) * overnight_gap).sum(axis=1) + (
+            held * intraday
+        ).sum(axis=1)
+
+    @staticmethod
     def _trading_costs(
         weight_change: pd.DataFrame,
         *,
@@ -479,8 +602,14 @@ class MetricEngine:
         market_fields: Mapping[str, pd.DataFrame] | None = None,
         rebalance: str | int = 1,
         groups: int | None = 5,
+        industry_forward_returns: pd.DataFrame | None = None,
     ) -> dict[str, Any]:
-        """计算因子回测的 core/full 分析，不读取市场数据。"""
+        """计算因子回测的 core/full 分析，不读取市场数据。
+
+        ``industry_forward_returns`` 是**按成交时点平移过**的远期收益，只用于
+        行业净值曲线；行业 IC 与其它分析仍用原始 ``future``（衡量因子的预测
+        能力，与成交时点无关）。
+        """
 
         if analysis_level not in {"core", "full"}:
             return {}
@@ -518,7 +647,14 @@ class MetricEngine:
                     factor_values, future, industry_map
                 )
                 out["industry_equity"], out["industry_group_equity"] = _industry_equity(
-                    factor_values, future, industry_map, group_count
+                    factor_values,
+                    (
+                        future
+                        if industry_forward_returns is None
+                        else industry_forward_returns
+                    ),
+                    industry_map,
+                    group_count,
                 )
             except Exception as exc:  # noqa: BLE001 - 辅助分析失败不阻断主流程
                 _LOGGER.warning("行业因子分析失败，已跳过: %s", exc, exc_info=True)
@@ -565,6 +701,8 @@ class MetricEngine:
         commission_rate: float = 0.0,
         stamp_tax: float = 0.0,
         slippage_rate: float = 0.0,
+        execution_timing: str = "next_close",
+        open_prices: pd.DataFrame | None = None,
         periods_per_year: int = 252,
         analysis_level: str | None = None,
         benchmark_equity: pd.Series | None = None,
@@ -593,16 +731,30 @@ class MetricEngine:
         # 主组合按请求的费率扣减交易成本：佣金与滑点按 |Δ权重| 换手计，
         # 印花税只对卖出部分计。净值、收益、指标因此都是净口径。
         #
-        # 分层曲线与由它派生的多空价差仍用毛收益：它们衡量的是因子的排序
-        # 能力，属于诊断口径，扣成本会干扰分组单调性的判断。这一分工写进
-        # 了 meta 的 cost_model。
+        # 成交时点决定用哪条收益公式：next_close 沿用收盘价对收盘价（持仓
+        # 位移已由 PortfolioEngine 按口径调好），next_open 走两段式（隔夜
+        # 跳空由昨日持仓承担、日内由今日持仓承担）并需要开盘价。
+        #
+        # 分层曲线与由它派生的多空价差仍是毛收益、且沿用收盘价口径：它们
+        # 衡量的是因子的排序能力，属于诊断口径。这一分工写进了 meta 的
+        # cost_model 与 execution_model。
         costs = self._trading_costs(
             return_bundle.weight_change,
             commission_rate=commission_rate,
             stamp_tax=stamp_tax,
             slippage_rate=slippage_rate,
         )
-        returns = (return_bundle.portfolio_returns - costs["total"]).iloc[1:].dropna()
+        portfolio_returns = return_bundle.portfolio_returns
+        if execution_timing == "next_open":
+            portfolio_returns = self._next_open_returns(
+                return_bundle.held_weights, close, open_prices
+            )
+        elif execution_timing not in {"same_close", "next_close"}:
+            raise ValueError(
+                f"不支持的 execution_timing: {execution_timing!r}，"
+                "可选 same_close | next_close | next_open"
+            )
+        returns = (portfolio_returns - costs["total"]).iloc[1:].dropna()
         equity = self._display_equity(returns)
         positions_out = return_bundle.held_weights.reindex(returns.index)
         factor_statistics = self._factor_statistics(
@@ -652,11 +804,14 @@ class MetricEngine:
         if group_count is None:
             layered_returns = pd.DataFrame()
         else:
-            layered_returns = calculate_group_returns(
+            layered_returns = self._layered_returns(
                 return_bundle.asset_returns,
                 portfolio["group_assignments"],
                 portfolio["rebalance_mask"],
                 int(group_count),
+                execution_timing=execution_timing,
+                close=close,
+                open_prices=open_prices,
             ).reindex(returns.index)
         layered_equity = layered_returns.copy()
         if not layered_equity.empty:
@@ -693,6 +848,9 @@ class MetricEngine:
                 market_fields=market_fields,
                 rebalance=rebalance,
                 groups=groups,
+                industry_forward_returns=self._industry_forward_returns(
+                    forward_returns, close, open_prices, execution_timing
+                ),
             )
             self._merge_ff3_metrics(metrics, factor_analysis)
             result.update({

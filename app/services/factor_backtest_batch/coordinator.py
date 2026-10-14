@@ -29,7 +29,7 @@ from app.services.experiment.manager import ExperimentManager, ExperimentQueueFu
 
 
 METRIC_VERSION = "factor-scorecard-v3"
-EXECUTION_VERSION = "factor-execution-v7"
+EXECUTION_VERSION = "factor-execution-v8"
 
 
 class FactorBatchSkip(RuntimeError):
@@ -189,6 +189,7 @@ def _factor_spec(
         commission_rate=profile.commission_rate,
         stamp_tax=profile.stamp_tax,
         slippage_rate=profile.slippage_rate,
+        execution_timing=profile.execution_timing,
         filter_limit_up=profile.filter_limit_up,
         filter_suspended=profile.filter_suspended,
         filters_enabled=bool(profile.filter_limit_up or profile.filter_suspended),

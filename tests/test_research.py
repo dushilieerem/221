@@ -228,6 +228,12 @@ def test_plot_equity_drawdown_yearly_table(tmp_path):
 
 # ---------------- 组合构建 ----------------
 
+def _invested_rows(positions):
+    """剔除建仓前的空窗期：next_close 下信号次日收盘成交，前几天持仓为 0。"""
+
+    return positions.abs().sum(axis=1) > 0
+
+
 def test_build_factor_portfolio_weights():
     from app.services.factor.portfolio import build_factor_portfolio
 
@@ -243,16 +249,20 @@ def test_build_factor_portfolio_weights():
     _, _, pos = build_factor_portfolio(
         fv, close, rebalance="daily", stock_num=5, long_short=True
     )
-    assert (pos.sum(axis=1).abs() < 1e-9).all()
+    # 默认 next_close 口径下信号次日收盘成交，建仓前的空窗期持仓为 0；
+    # 这里只校验已建仓的区间。
+    invested = _invested_rows(pos)
+    assert (pos.loc[invested].sum(axis=1).abs() < 1e-9).all()
     assert (pos.abs() <= 1.0).all().all()
     # 实际单边持仓 = stock_num 只（多空各 5，共 10 只非零）
-    assert (pos.abs().gt(0).sum(axis=1) <= 2 * 5).all()
+    assert (pos.loc[invested].abs().gt(0).sum(axis=1) <= 2 * 5).all()
 
     # 只做多：做多 top stock_num，每日权重和 ≈ 1
     _, _, pos_long = build_factor_portfolio(
         fv, close, rebalance="daily", stock_num=5, long_short=False
     )
-    assert ((pos_long.sum(axis=1) - 1.0).abs() < 1e-9).all()
+    invested_long = _invested_rows(pos_long)
+    assert ((pos_long.loc[invested_long].sum(axis=1) - 1.0).abs() < 1e-9).all()
     assert (pos_long >= 0).all().all()
     # 实际持仓 = stock_num 只
-    assert (pos_long.gt(0).sum(axis=1) == 5).all()
+    assert (pos_long.loc[invested_long].gt(0).sum(axis=1) == 5).all()

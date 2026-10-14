@@ -111,6 +111,11 @@ class FactorBacktestRequest(BaseModel):
     stamp_tax: float = 0.0
     #: 滑点率（默认 0）
     slippage_rate: float = 0.0
+    #: 成交时点。信号恒在 T 日收盘产生；same_close = T 日收盘价成交（旧口径，
+    #: 最乐观），next_close = T+1 日收盘价成交，next_open = T+1 日开盘价成交。
+    execution_timing: Literal["same_close", "next_close", "next_open"] = Field(
+        "next_close", description="same_close | next_close | next_open"
+    )
     #: core 只计算回测和汇总指标；full 额外计算分层、FF3、行业曲线
     analysis_level: Literal["core", "full"] = Field(
         "core", description="core | full"
@@ -179,6 +184,11 @@ class StrategyBacktestRequest(BaseModel):
     slippage_rate: float = Field(0.0, ge=0)
     #: 每笔最低手续费；仅事件模式生效，显式设 0 即取消最低收费
     min_commission: float = Field(5.0, ge=0)
+    #: 成交时点。same_close = T 日收盘价成交（旧口径，事件模式下策略能看到
+    #: 当日收盘），next_close = T+1 日收盘价成交，next_open = T+1 日开盘价成交。
+    execution_timing: Literal["same_close", "next_close", "next_open"] = Field(
+        "next_close", description="same_close | next_close | next_open"
+    )
     initial_capital: float = Field(1_000_000.0, gt=0)
     #: 返回持仓权重（前端画持仓图用）
     include_positions: bool = False
@@ -362,7 +372,10 @@ class FactorBacktestMeta(BaseModel):
     stamp_tax: float = 0.0
     slippage_rate: float = 0.0
     cost_model: dict[str, str] = Field(default_factory=dict)
-    execution_version: str = "factor-execution-v7"
+    #: 成交时点口径回显（信号时点、成交价、成交日）。
+    execution_timing: Literal["same_close", "next_close", "next_open"] = "next_close"
+    execution_model: dict[str, str] = Field(default_factory=dict)
+    execution_version: str = "factor-execution-v8"
     metric_version: str = "factor-scorecard-v3"
     data_release_id: Optional[str] = None
     spec_hash: Optional[str] = None
@@ -402,6 +415,9 @@ class StrategyBacktestMeta(BaseModel):
     slippage_rate: float = 0.0
     min_commission: Optional[float] = None
     cost_model: dict[str, str] = Field(default_factory=dict)
+    #: 成交时点口径回显（信号时点、成交价、成交日）。
+    execution_timing: Literal["same_close", "next_close", "next_open"] = "next_close"
+    execution_model: dict[str, str] = Field(default_factory=dict)
     trading_symbols: Optional[list[str]] = Field(None, exclude_if=lambda value: value is None)
     universe_asset: Optional[ResolvedAssetMeta] = Field(None, exclude_if=lambda value: value is None)
     benchmark_asset: Optional[ResolvedAssetMeta] = Field(None, exclude_if=lambda value: value is None)
@@ -869,6 +885,8 @@ class FactorBacktestBatchTriggerRequest(BaseModel):
     commission_rate: float = Field(0.0, ge=0)
     stamp_tax: float = Field(0.0, ge=0)
     slippage_rate: float = Field(0.0, ge=0)
+    #: 成交时点；与单因子回测同口径，不传时用 next_close。
+    execution_timing: Literal["same_close", "next_close", "next_open"] = "next_close"
     winsorize: int = Field(0, ge=0, le=3)
     standardize: int = Field(0, ge=0, le=3)
 
@@ -916,7 +934,7 @@ class FactorBacktestBatchResponse(BaseModel):
     profile_hash: str
     catalog_version: str
     metric_version: str
-    execution_version: str = "factor-execution-v7"
+    execution_version: str = "factor-execution-v8"
     data_release_id: Optional[str] = None
     spec_hash: str = ""
     status: str

@@ -13,6 +13,7 @@ Web 端需要展示调仓或成交过程时，使用 `include_execution_timeline
   "benchmark": "CSI300",
   "commission_rate": 0.0, "stamp_tax": 0.001,
   "slippage_rate": 0.0, "min_commission": 5.0,
+  "execution_timing": "next_close",
   "initial_capital": 1000000,
   "include_positions": false, "include_rebalance_logs": true,
   "include_execution_timeline": true,
@@ -36,6 +37,7 @@ Web 端需要展示调仓或成交过程时，使用 `include_execution_timeline
 | `slippage_rate` | number | `0.0` | 滑点率。向量化与佣金同项相加按换手计提；事件模式下**调整成交价**（买入向上、卖出向下）。 |
 | `stamp_tax` | number | `0.001` | 卖出印花税率，两种模式都只对卖出部分计提。 |
 | `min_commission` | number | `5.0` | 每笔最低手续费，**仅事件模式生效**；显式设 `0` 即取消最低收费。向量化按换手率建模、没有单笔概念，回显为 `null`。 |
+| `execution_timing` | enum | `next_close` | `same_close` \| `next_close` \| `next_open`；信号恒在 T 日收盘产生，控制何时、以什么价成交。详见「成交时点语义」。 |
 | `initial_capital` | number | `1000000` | 初始资金。 |
 | `include_positions` | boolean | `false` | 返回持仓权重快照。 |
 | `include_rebalance_logs` | boolean | `false` | 仅向量化模式返回目标权重变化日志；事件模式请使用 `include_execution_timeline`。 |
@@ -44,6 +46,28 @@ Web 端需要展示调仓或成交过程时，使用 `include_execution_timeline
 | `filter_st` | boolean | `false` | 是否过滤 ST、\*ST 标的。向量化模式按信号剔除；事件模式**只拒绝买入**（见下）。 |
 | `filter_limit_up` | boolean | `false` | 是否过滤涨停标的。向量化模式按信号剔除；事件模式由撮合层常开拒单覆盖，该参数不额外生效。 |
 | `filter_limit_down` | boolean | `false` | 是否过滤跌停标的。向量化模式按信号剔除；事件模式由撮合层常开拒单覆盖，该参数不额外生效。 |
+
+## 成交时点语义
+
+`execution_timing` 控制信号产生后何时成交，默认 `next_close`。
+
+两种模式下的策略回调**都**只看到截至前一交易日收盘的数据，因此信号恒在 T 日收盘产生、成交发生在 T+1 日：
+
+| 取值 | 成交价 | 向量化模式（持仓生效） | 事件模式 |
+|---|---|---|---|
+| `same_close` | T 日**收盘价**（旧口径） | 次日（`lag=1`），收益收盘价对收盘价 | 当日收盘撮合，**回调能看到当日收盘** |
+| `next_close`（默认） | T+1 日**收盘价** | 再次日（`lag=2`） | 当日收盘撮合 |
+| `next_open` | T+1 日**开盘价** | 次日（`lag=1`），收益拆两段 | 当日开盘撮合 |
+
+三点需要注意：
+
+1. **事件模式的行为变了**：此前它恒按当日开盘价成交（`assumptions.execution` 为 `same_session_open_after_before_open`）。现在默认 `next_close` 取当日收盘价；需要开盘成交请显式传 `next_open`。
+2. **`same_close` 与 `next_close` 在事件模式下成交价相同**（都是当日收盘），区别在**数据可见性**：`same_close` 的回调能看到当日收盘（`assumptions.data_visibility` 为 `same_close`），另两种只到前一收盘。前者是「收盘出信号、收盘成交」的乐观口径，与因子/向量化路径的 `same_close` 对齐。
+3. **退市强平不受影响**：无论哪种口径，持仓遇退市都按转换日收盘价强制平仓（见上文「退市剔除」）。
+
+**成交价同时用于定量**：事件模式的目标金额换算成股数时用同一个价格，保证自洽；滑点仍然作用在这个价格之上。
+
+`meta.execution_model` 会回显 `signal`、`fill_price`、`fill_session` 与 `fill_field`；事件模式的 `assumptions.execution` 取值为 `next_close` 或 `next_open`。
 
 ## 交易成本语义
 

@@ -20,6 +20,35 @@ class NativeEngine(IBacktestEngine):
 
     name: str = "native"
 
+    @staticmethod
+    def _next_open_returns(
+        target: pd.DataFrame,
+        close: pd.DataFrame,
+        open_prices: pd.DataFrame | None,
+    ) -> tuple[pd.Series, pd.DataFrame]:
+        """信号次日开盘成交的收益与持仓序列。
+
+        当日收益拆成两段：隔夜跳空由**昨日**持仓承担（开盘才换仓），日内由
+        **今日**持仓承担。权重不变时两段相加退化为收盘价对收盘价，只差二阶
+        交叉项；建仓当日只赚日内、清仓当日只赚跳空，都与真实成交一致。
+
+        持仓位移与「信号日收盘成交」一致（``shift(1)``），差别只在这条收益
+        公式上。
+        """
+
+        if open_prices is None:
+            raise ValueError(
+                "execution_timing='next_open' 需要开盘价，但 BacktestSignals "
+                "未提供 open；请在编排层传入行情面板的 open 字段"
+            )
+        held = target.ffill().shift(1).fillna(0.0)
+        overnight_gap = open_prices / close.shift(1) - 1.0
+        intraday = close / open_prices.replace(0.0, float("nan")) - 1.0
+        port_ret = (held.shift(1).fillna(0.0) * overnight_gap).sum(axis=1) + (
+            held * intraday
+        ).sum(axis=1)
+        return port_ret, held
+
     def run(
         self,
         signals: BacktestSignals,
@@ -27,14 +56,22 @@ class NativeEngine(IBacktestEngine):
     ) -> BacktestResult:
         target = signals.target_weights
         close = signals.close
+        timing = config.execution_timing
 
-        ret = close.pct_change(fill_method=None)
-
-        # t 收盘形成目标权重；该权重承担 t -> t+1 的收盘收益。
-        # returns 保留首个信号日到次日的收益，供指标使用；equity 使用真实
-        # 初始资金，接口层与事件驱动回测统一输出资金金额。
-        held = target.ffill().shift(1).fillna(0.0)
-        port_ret = (held * ret).sum(axis=1)
+        if timing == "next_open":
+            port_ret, held = self._next_open_returns(target, close, signals.open)
+        elif timing in {"same_close", "next_close"}:
+            # 持仓生效日：same_close 在信号日收盘成交、次日生效（lag=1）；
+            # next_close 在信号次日收盘成交、再次日生效（lag=2）。两者收益
+            # 都用收盘价对收盘价，只差这一天的位移。
+            lag = 1 if timing == "same_close" else 2
+            held = target.ffill().shift(lag).fillna(0.0)
+            port_ret = (held * close.pct_change(fill_method=None)).sum(axis=1)
+        else:
+            raise ValueError(
+                f"不支持的 execution_timing: {timing!r}，"
+                "可选 same_close | next_close | next_open"
+            )
 
         # 可选成本（默认 0 -> 与 build_factor_portfolio 逐位一致）
         if config.commission_rate or config.slippage_rate or config.stamp_tax:

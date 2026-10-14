@@ -446,13 +446,16 @@ def test_factor_backtest_supermind_fixture_matches_rank_and_metric_contract(
     benchmark_close = supermind_api_data_dir["benchmark_close"]
     symbols = list(close.columns)
 
+    # 默认 next_close 口径：信号次日收盘成交、再次日生效，因此第 row 日
+    # 持有的是用 row-2 日收盘信号选出的分组，首个展示期还没有持仓。
+    # 主组合与分层曲线都用这一条口径，所以下面的期望值同时对两者成立。
     expected_returns = {}
     expected_equity = {}
     for group_number in range(1, 6):
-        raw = []
-        for row_number in range(1, len(close)):
+        raw = [0.0]
+        for row_number in range(2, len(close)):
             labels = rank_groups(
-                factor_values.iloc[[row_number - 1]],
+                factor_values.iloc[[row_number - 2]],
                 5,
             ).iloc[0]
             members = [
@@ -539,6 +542,8 @@ def test_factor_backtest_supermind_fixture_matches_rank_and_metric_contract(
         assert actual["sharpe"] == pytest.approx(expected_sharpe, abs=1e-12)
         assert actual["max_drawdown"] == pytest.approx(expected_drawdown, abs=1e-12)
 
+    # 主组合与 Q1 分层现在同口径（long_only 且 stock_num 覆盖全池），
+    # 因此可以直接拿上面的分层手算基准断言主组合指标。
     assert body["metrics"]["annual_return"] == pytest.approx(
         (1.0 + expected_returns[1]).prod() ** (252 / len(expected_returns[1])) - 1.0,
         abs=1e-12,
@@ -694,7 +699,9 @@ def test_factor_backtest_loads_sqlite_factor_by_stable_id(market_data_dir):
     payload.pop("factor_code")
     payload.update({
         "library_name": "主因子库",
-        "factor_name": "SV10_0004",
+        # SV10_0004 已随 beebeb4 的因子库裁剪（432→331）移除，改用同分类仍在
+        # 库中的 SV10_0001（收益率滚动峰度）。
+        "factor_name": "SV10_0001",
     })
     response = _wait_factor_task(payload)
 
@@ -739,7 +746,7 @@ def test_factor_api_lists_factors_from_sqlite_catalog():
     from app.api.routes import _builtin_factors
 
     names = {factor.name for factor in _builtin_factors()}
-    assert len(names) == 432
+    assert len(names) == 331
     assert {"SV01_0010", "SV09_0024"}.issubset(names)
 
 
@@ -752,7 +759,7 @@ def test_factor_api_lists_factor_libraries():
     assert "factors" not in payload
     libraries = {item["name"]: item for item in payload["libraries"]}
     assert set(libraries) == {"主因子库"}
-    assert libraries["主因子库"]["factor_count"] == 432
+    assert libraries["主因子库"]["factor_count"] == 331
 
     # /api/factors 只保留指定库因子资源，不再承担因子库目录功能。
     assert client.get("/api/factors").status_code == 404
@@ -967,7 +974,8 @@ def test_strategy_backtest_returns_equity_and_positions(market_data_dir):
     cost_meta = {
         key: meta.pop(key)
         for key in ("commission_rate", "stamp_tax", "slippage_rate",
-                    "min_commission", "cost_model")
+                    "min_commission", "cost_model",
+                    "execution_timing", "execution_model")
     }
     assert meta == {
         "strategy": "EqualWeightMomentum",
@@ -998,6 +1006,9 @@ def test_strategy_backtest_returns_equity_and_positions(market_data_dir):
     assert cost_meta["min_commission"] is None
     assert cost_meta["cost_model"]["commission"] == "turnover_times_rate"
     assert cost_meta["cost_model"]["min_commission"] == "not_applicable"
+    assert cost_meta["execution_timing"] == "next_close"
+    assert cost_meta["execution_model"]["fill_price"] == "next_close"
+    assert cost_meta["execution_model"]["signal"] == "at_close"
     assert body["metrics"]["total_return"] is not None
     assert len(body["equity_curve"]) > 0
     assert len(body["benchmark_curve"]) > 0
@@ -1038,7 +1049,7 @@ def test_strategy_backtest_routes_catalog_event_strategy_to_event_engine(market_
     assert body["events"]
     assert body["orders"] == []
     assert body["fills"] == []
-    assert body["assumptions"]["execution"] == "same_session_open_after_before_open"
+    assert body["assumptions"]["execution"] == "next_close"
 
 
 def test_strategy_backtest_injects_benchmark_ohlc_for_ichimoku(market_data_dir):
@@ -1701,15 +1712,20 @@ def test_vectorized_structured_excludes_delisted_point_in_time(market_data_dir):
         abs(base_curve[d] - filt_curve[d]) > 1e-6 for d in after
     ), "退市后权益应与基线不同，剔除没有生效"
 
-    # 转退市之后不再持有该标的（基线里它仍在候选池内）。
-    later = {
-        holding["symbol"]
+    # 退市后必须退出持仓。默认 next_close 口径下信号要次日收盘才成交，
+    # 因此不能断言「转换日次日立刻消失」——只断言到回测结束前它确实已被剔除。
+    held_dates = sorted(
+        pd.Timestamp(snapshot["date"])
         for snapshot in filtered["positions"]
-        if pd.Timestamp(snapshot["date"]) > transition
-        for holding in snapshot["holdings"]
-        if holding["weight"] > 0.0
-    }
-    assert "S000" not in later
+        if any(
+            holding["symbol"] == "S000" and holding["weight"] > 0.0
+            for holding in snapshot["holdings"]
+        )
+    )
+    assert held_dates, "基线里 S000 本应被持有过，说明样本构造有问题"
+    assert max(held_dates) < max(pd.Timestamp(p["date"]) for p in filtered["equity_curve"]), (
+        "退市标的一直被持有到回测结束，退市剔除没有生效"
+    )
 
 
 def test_factor_backtest_excludes_delisted_point_in_time(market_data_dir):
@@ -1888,3 +1904,99 @@ def test_event_strategy_echoes_cost_parameters(market_data_dir):
     assert vectorized_meta["stamp_tax"] == pytest.approx(0.001)
     assert vectorized_meta["min_commission"] is None
     assert vectorized_meta["cost_model"]["min_commission"] == "not_applicable"
+
+
+def test_factor_backtest_execution_timing_applies_to_layered_too(market_data_dir):
+    """成交时点同时作用于主组合与分层曲线，两者口径一致。"""
+
+    _write_structured_extra_fields(market_data_dir)
+
+    def run(timing: str) -> dict:
+        body = _wait_factor_task({
+            **_request_payload(), "execution_timing": timing,
+        }).json()["result"]
+        assert body["error"] is None, body["error"]
+        return body
+
+    default = run("next_close")
+    opened = run("next_open")
+    legacy = run("same_close")
+
+    # 默认就是 next_close，两者口径不同、结果也不同。
+    assert default["meta"]["execution_timing"] == "next_close"
+    assert opened["meta"]["execution_timing"] == "next_open"
+    assert default["final_equity"] != opened["final_equity"]
+    assert default["metrics"]["annual_return"] != opened["metrics"]["annual_return"]
+
+    # 回显：信号恒在收盘、成交在 T+1。
+    model = opened["meta"]["execution_model"]
+    assert model["signal"] == "at_close"
+    assert model["fill_price"] == "next_open"
+    assert model["fill_session"] == "T+1"
+    assert model["layered_and_long_short"] == "matches_main_portfolio_timing_gross"
+    assert opened["meta"]["return_price_source"] == "data_engine.open + data_engine.close"
+    assert default["meta"]["return_price_source"] == "data_engine.close"
+
+    # 分层曲线与主组合同口径，因此同样随成交时点变化。
+    assert default["factor_analysis"]["layered_returns"] != (
+        opened["factor_analysis"]["layered_returns"]
+    )
+    assert legacy["factor_analysis"]["layered_returns"] != (
+        default["factor_analysis"]["layered_returns"]
+    )
+
+    # same_close 是保留的旧口径（信号日收盘成交），三种取值互不相同。
+    assert legacy["meta"]["execution_timing"] == "same_close"
+    assert legacy["meta"]["execution_model"]["fill_session"] == "T"
+    assert len({
+        legacy["final_equity"], default["final_equity"], opened["final_equity"]
+    }) == 3
+
+
+def test_factor_backtest_execution_timing_defaults_to_next_close(market_data_dir):
+    _write_structured_extra_fields(market_data_dir)
+
+    omitted = _wait_factor_task(_request_payload()).json()["result"]
+    explicit = _wait_factor_task({
+        **_request_payload(), "execution_timing": "next_close",
+    }).json()["result"]
+
+    assert omitted["meta"]["execution_timing"] == "next_close"
+    assert omitted["final_equity"] == pytest.approx(explicit["final_equity"])
+    assert omitted["metrics"]["annual_return"] == pytest.approx(
+        explicit["metrics"]["annual_return"]
+    )
+
+
+def test_factor_industry_curves_follow_execution_timing(market_data_dir):
+    """行业净值曲线与主组合/分层同口径；行业 IC 不受成交时点影响。"""
+
+    _write_structured_extra_fields(market_data_dir)
+
+    def run(timing: str) -> dict:
+        body = _wait_factor_task({
+            **_request_payload(), "analysis_level": "full",
+            "execution_timing": timing,
+        }).json()["result"]
+        assert body["error"] is None, body["error"]
+        return body["factor_analysis"]
+
+    analysis = {t: run(t) for t in ("same_close", "next_close", "next_open")}
+
+    def industry(timing: str):
+        curves = analysis[timing]["industry_group_equity_curves"]
+        return {curve["industry_name"]: curve["points"] for curve in curves}
+
+    # 三种口径的行业净值曲线互不相同（曲线本身随成交时点平移）。
+    closed = industry("same_close")
+    default = industry("next_close")
+    opened = industry("next_open")
+    assert closed != default
+    assert closed != opened
+    assert default != opened
+
+    # IC 衡量因子的预测能力，与成交时点无关：三种口径的 IC 序列逐点一致。
+    ic = analysis["same_close"]["ic_series"]
+    assert ic
+    for timing in ("next_close", "next_open"):
+        assert analysis[timing]["ic_series"] == ic

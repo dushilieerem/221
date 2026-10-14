@@ -160,9 +160,11 @@ def test_native_engine_run_shapes():
     assert isinstance(res, BacktestResult)
     assert len(res.equity_curve) == len(res.returns)
     assert res.positions.shape[1] == 20
-    # 权益曲线使用真实初始资金；收益仍保留首日信号对应的持有期。
+    # 权益曲线使用真实初始资金。默认 next_close 口径下信号要次日收盘才成交，
+    # 首个展示期尚无持仓、收益为 0，之后才产生收益。
     assert res.equity_curve.iloc[0] == pytest.approx(1_000_000.0)
-    assert res.returns.iloc[0] != pytest.approx(0.0)
+    assert res.returns.iloc[0] == pytest.approx(0.0)
+    assert res.returns.iloc[1] != pytest.approx(0.0)
 
 
 def test_native_engine_starts_return_after_close_build_date():
@@ -172,10 +174,45 @@ def test_native_engine_starts_return_after_close_build_date():
 
     result = NativeEngine().run(BacktestSignals(target_weights=target, close=close), BacktestConfig())
 
+    # 信号在第 0 日收盘产生，next_close 口径下第 1 日收盘才成交，因此第 2 日
+    # 才开始承担收益：t 日目标权重在 t+2 生效。
     assert result.returns.index.tolist() == dates[1:].tolist()
-    assert result.returns.tolist() == pytest.approx([0.1, 0.1, 0.1])
+    assert result.returns.tolist() == pytest.approx([0.0, 0.1, 0.1])
     assert result.equity_curve.tolist() == pytest.approx([1_000_000.0, 1_100_000.0, 1_210_000.0])
-    assert result.positions.loc[dates[1], "A"] == pytest.approx(1.0)
+    assert result.positions.loc[dates[1], "A"] == pytest.approx(0.0)
+    assert result.positions.loc[dates[2], "A"] == pytest.approx(1.0)
+
+
+def test_native_engine_next_open_earns_intraday_on_the_fill_day():
+    """next_open 口径：信号次日开盘成交，当日只赚日内、不赚隔夜跳空。"""
+
+    dates = pd.bdate_range("2024-01-02", periods=3)
+    # 第 0 日收盘 100，第 1 日开盘 105、收盘 110（跳空 5%、日内约 4.76%）
+    open_ = pd.DataFrame({"A": [100.0, 105.0, 110.0]}, index=dates)
+    close = pd.DataFrame({"A": [100.0, 110.0, 121.0]}, index=dates)
+    target = pd.DataFrame({"A": [1.0, float("nan"), float("nan")]}, index=dates)
+
+    result = NativeEngine().run(
+        BacktestSignals(target_weights=target, close=close, open=open_),
+        BacktestConfig(execution_timing="next_open"),
+    )
+
+    # 第 1 日是建仓日：隔夜跳空（100→105）没持仓不赚，只赚日内 110/105-1。
+    assert result.returns.iloc[0] == pytest.approx(110.0 / 105.0 - 1.0)
+    # 第 2 日持仓不变：退化为收盘价对收盘价 121/110-1。
+    assert result.returns.iloc[1] == pytest.approx(121.0 / 110.0 - 1.0)
+
+
+def test_native_engine_next_open_requires_open_prices():
+    dates = pd.bdate_range("2024-01-02", periods=2)
+    close = pd.DataFrame({"A": [100.0, 110.0]}, index=dates)
+    target = pd.DataFrame({"A": [1.0, float("nan")]}, index=dates)
+
+    with pytest.raises(ValueError, match="next_open"):
+        NativeEngine().run(
+            BacktestSignals(target_weights=target, close=close),
+            BacktestConfig(execution_timing="next_open"),
+        )
 
 
 def test_native_engine_records_rebalance_logs():
@@ -198,8 +235,10 @@ def test_native_engine_only_charges_stamp_tax_on_sells():
 
     result = NativeEngine().run(signals, BacktestConfig(stamp_tax=0.001))
 
-    # 目标权重在次日开始承担收益，卖出发生在第二个保留日。
-    assert result.returns.iloc[1] == pytest.approx(-0.001)
+    # next_close 口径下目标权重在信号次日成交、再次日生效，卖出因此落在
+    # 第二个保留日之后；只有卖出那一期计提印花税。
+    assert result.returns.iloc[1] == pytest.approx(0.0)
+    assert result.returns.iloc[2] == pytest.approx(-0.001)
 
 
 def test_native_engine_parity_with_build_factor_portfolio():
@@ -238,3 +277,50 @@ def test_registry_unknown_raises():
 def test_registry_rejects_removed_vectorbt_backend():
     with pytest.raises(ValueError, match="未知回测后端"):
         get_backtest_engine("vectorbt")
+
+
+def test_native_engine_next_open_exit_day_earns_only_the_overnight_gap():
+    """next_open 清仓当日：开盘已卖出，只赚隔夜跳空、不赚日内。"""
+
+    dates = pd.bdate_range("2024-01-02", periods=3)
+    # 第 1 日收盘 100；第 2 日跳空开到 110、日内再涨到 121
+    open_ = pd.DataFrame({"A": [100.0, 100.0, 110.0]}, index=dates)
+    close = pd.DataFrame({"A": [100.0, 100.0, 121.0]}, index=dates)
+    target = pd.DataFrame(
+        {"A": [1.0, 0.0, float("nan")]}, index=dates
+    )  # 第 0 日建仓、第 1 日清仓
+
+    result = NativeEngine().run(
+        BacktestSignals(target_weights=target, close=close, open=open_),
+        BacktestConfig(execution_timing="next_open"),
+    )
+
+    # 第 1 日持仓建立、价格不动；第 2 日开盘清仓，只赚 110/100-1。
+    assert result.returns.iloc[0] == pytest.approx(0.0)
+    assert result.returns.iloc[1] == pytest.approx(0.1)
+    # 日内那一段（121/110-1）不该计入。
+    assert result.returns.iloc[1] != pytest.approx(121.0 / 100.0 - 1.0)
+
+
+def test_native_engine_same_close_reproduces_the_signal_day_convention():
+    """same_close = 信号日收盘成交（旧口径）：持仓次日生效，收益收盘价对收盘价。"""
+
+    dates = pd.bdate_range("2024-01-02", periods=4)
+    close = pd.DataFrame({"A": [100.0, 110.0, 121.0, 133.1]}, index=dates)
+    target = pd.DataFrame(
+        {"A": [1.0, float("nan"), float("nan"), float("nan")]}, index=dates
+    )
+
+    result = NativeEngine().run(
+        BacktestSignals(target_weights=target, close=close),
+        BacktestConfig(execution_timing="same_close"),
+    )
+
+    assert result.returns.tolist() == pytest.approx([0.1, 0.1, 0.1])
+    assert result.positions.loc[dates[1], "A"] == pytest.approx(1.0)
+    # 比 next_close 早一天生效：次日就有收益。
+    next_close = NativeEngine().run(
+        BacktestSignals(target_weights=target, close=close),
+        BacktestConfig(execution_timing="next_close"),
+    )
+    assert next_close.returns.iloc[0] == pytest.approx(0.0)

@@ -66,6 +66,8 @@ class FactorBacktestSpec:
     commission_rate: float = 0.0
     stamp_tax: float = 0.0
     slippage_rate: float = 0.0
+    #: 成交时点：next_close = T+1 收盘价成交，next_open = T+1 开盘价成交。
+    execution_timing: str = "next_close"
     filter_suspended: bool = False
     filter_st: bool = False
     filter_limit_up: bool = False
@@ -81,7 +83,7 @@ class FactorBacktestSpec:
     data_dir: str | None = field(default=None, compare=False, repr=False)
     output_path: str | None = field(default=None, compare=False, repr=False)
     storage: str = field(default="csv", compare=False, repr=False)
-    execution_version: str = "factor-execution-v7"
+    execution_version: str = "factor-execution-v8"
     metric_version: str = "factor-scorecard-v3"
 
     def computation_payload(self) -> dict[str, Any]:
@@ -109,6 +111,8 @@ class FactorBacktestSpec:
             "commission_rate": self.commission_rate,
             "stamp_tax": self.stamp_tax,
             "slippage_rate": self.slippage_rate,
+            # 成交时点改变持仓生效日，必须进计算身份，否则两种口径共用缓存键。
+            "execution_timing": self.execution_timing,
             "filter_suspended": self.filter_suspended,
             "filter_st": self.filter_st,
             "filter_limit_up": self.filter_limit_up,

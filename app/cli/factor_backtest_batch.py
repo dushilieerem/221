@@ -39,6 +39,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--commission-rate", type=float, default=0.0)
     parser.add_argument("--stamp-tax", type=float, default=0.0)
     parser.add_argument("--slippage-rate", type=float, default=0.0)
+    parser.add_argument(
+        "--execution-timing",
+        choices=["same_close", "next_close", "next_open"],
+        default="next_close",
+    )
     parser.add_argument("--winsorize", type=int, choices=range(4), default=0)
     parser.add_argument("--standardize", type=int, choices=range(4), default=0)
     parser.add_argument(
@@ -101,6 +106,7 @@ def main(argv: list[str] | None = None) -> int:
                 "commission_rate": args.commission_rate,
                 "stamp_tax": args.stamp_tax,
                 "slippage_rate": args.slippage_rate,
+                "execution_timing": args.execution_timing,
                 "winsorize": args.winsorize,
                 "standardize": args.standardize,
             },

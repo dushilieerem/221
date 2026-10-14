@@ -193,10 +193,17 @@ def run_strategy_backtest(
         else:
             strategy = _instantiate_vectorized_strategy(strategy_class, panels)
             signals = strategy.generate_signals()
+        # 开盘价只在 next_open 口径下被引擎使用；顺手带上不额外读盘
+        # （panels 已装载全部字段）。
+        open_prices = panels.open if "open" in panels else None
         if isinstance(signals, BacktestSignals):
             bt_signals = signals
+            if bt_signals.open is None and req.execution_timing == "next_open":
+                bt_signals.open = open_prices
         elif isinstance(signals, pd.DataFrame):
-            bt_signals = BacktestSignals(target_weights=signals, close=close)
+            bt_signals = BacktestSignals(
+                target_weights=signals, close=close, open=open_prices
+            )
         else:
             raise TypeError(
                 "generate_signals 必须返回 pandas.DataFrame 或 BacktestSignals"
@@ -219,6 +226,7 @@ def run_strategy_backtest(
             commission_rate=req.commission_rate,
             stamp_tax=req.stamp_tax,
             slippage_rate=req.slippage_rate,
+            execution_timing=req.execution_timing,
         )
         bt_engine = get_backtest_engine("native")
         bt_result = bt_engine.run(bt_signals, bt_config)
@@ -330,8 +338,22 @@ def _cost_meta(req: StrategyBacktestRequest, *, engine_mode: str) -> dict:
     向量化按换手率计提、没有单笔概念；事件模式按笔成交、滑点体现在成交价上。
     """
 
+    same_close = req.execution_timing == "same_close"
+    execution = {
+        "execution_timing": req.execution_timing,
+        "execution_model": {
+            "signal": "at_close",
+            "fill_price": req.execution_timing,
+            "fill_session": "T" if same_close else "T+1",
+            "fill_field": "open" if req.execution_timing == "next_open" else "close",
+            "data_visibility": (
+                "through_fill_day_close" if same_close else "through_previous_close"
+            ),
+        },
+    }
     if engine_mode == "event":
         return {
+            **execution,
             "commission_rate": req.commission_rate,
             "stamp_tax": req.stamp_tax,
             "slippage_rate": req.slippage_rate,
@@ -345,6 +367,7 @@ def _cost_meta(req: StrategyBacktestRequest, *, engine_mode: str) -> dict:
             },
         }
     return {
+        **execution,
         "commission_rate": req.commission_rate,
         "stamp_tax": req.stamp_tax,
         "slippage_rate": req.slippage_rate,
@@ -467,6 +490,7 @@ def _run_event_strategy_backtest(
                 min_commission=req.min_commission,
                 stamp_tax_rate=req.stamp_tax,
                 slippage_rate=req.slippage_rate,
+                execution_timing=req.execution_timing,
                 filter_st=req.filter_st and listed_status_available,
             ),
         ).run(strategy)

@@ -462,3 +462,20 @@ def test_read_only_http_queries_support_filters_and_history(monkeypatch, tmp_pat
         assert history.json()["history"][0]["as_of_date"] == "2026-08-19"
     finally:
         reset_runtime_settings()
+
+
+def test_batch_profile_carries_execution_timing():
+    """批量因子回测与单因子同口径：成交时点要进 profile 与批次身份。"""
+
+    profile = FactorBacktestBatchProfile(
+        as_of_date="2026-01-02", execution_timing="next_open"
+    )
+    payload = profile.to_dict()
+
+    assert payload["execution_timing"] == "next_open"
+    assert payload["commission_rate"] == profile.commission_rate
+
+
+def test_batch_profile_execution_timing_defaults_to_next_close():
+    profile = FactorBacktestBatchProfile(as_of_date="2026-01-02")
+    assert profile.to_dict()["execution_timing"] == "next_close"
