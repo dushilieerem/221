@@ -30,7 +30,7 @@ def test_technical_indicator_library_registers_first_batch():
     library = loader.load()
 
     factors = library_factors(library)
-    assert len(factors) == 432
+    assert len(factors) == 331
     assert {"boll_down", "boll_up", "expma", "simple_moving_average"}.issubset(factors)
 
 

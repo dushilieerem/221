@@ -23,7 +23,7 @@ def test_risk_indicator_library_registers_first_batch():
     loader = FactorLoader()
     library = loader.load()
 
-    assert len(library_factors(library)) == 432
+    assert len(library_factors(library)) == 331
     assert {"sharpe_ratio", "variance", "kurtosis"}.issubset(loader.factors)
 
 

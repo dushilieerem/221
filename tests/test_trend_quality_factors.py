@@ -10,11 +10,12 @@ from factor_test_support import BuiltinFactorLoader as FactorLoader
 from factor_test_support import builtin_factor_ids
 
 
+#: 因子库在 beebeb4 由 432 条裁剪到 331 条，本文件原有的
+#: kaufman_efficiency_ratio / normalized_linear_regression_slope / ulcer_index
+#: 已随该次裁剪从库中移除（实现只存在于 SQLite 的 factor_code 列，取回需
+#: 从 c2e9784 恢复整库）。这里只保留仍在库中的 regression_r_squared。
 FACTOR_NAMES = {
-    "kaufman_efficiency_ratio",
-    "normalized_linear_regression_slope",
     "regression_r_squared",
-    "ulcer_index",
 }
 
 
@@ -52,7 +53,7 @@ def test_trend_quality_factors_are_discoverable_and_indexed():
     library = loader.load()
     factors = library_factors(library)
 
-    assert len(factors) == 432
+    assert len(factors) == 331
     assert FACTOR_NAMES.issubset(factors)
     assert FACTOR_NAMES.issubset(builtin_factor_ids())
 
@@ -75,26 +76,9 @@ def test_trend_quality_factors_match_hand_calculated_values():
     loader = FactorLoader()
     library = loader.load()
 
-    efficiency = _compute(library, "kaufman_efficiency_ratio", panel, window=4)
-    assert efficiency.loc[dates[-1], "A"] == pytest.approx(1.0)
-
-    slope = _compute(
-        library,
-        "normalized_linear_regression_slope",
-        panel, window=5
-    )
-    assert slope.loc[dates[-1], "A"] == pytest.approx(1.0 / 3.0)
-
+    # 完全线性序列的 R² 必须为 1。
     r_squared = _compute(library, "regression_r_squared", panel, window=5)
     assert r_squared.loc[dates[-1], "A"] == pytest.approx(1.0)
-
-    drawdown = np.array([np.nan, np.nan, -100 / 12, -25.0, -100 / 11])
-    expected_ulcer = np.sqrt(np.mean(drawdown[-3:] ** 2))
-    ulcer_panel = _panel(
-        pd.DataFrame({"A": [10.0, 12.0, 11.0, 9.0, 10.0]}, index=dates)
-    )
-    ulcer = _compute(library, "ulcer_index", ulcer_panel, window=3)
-    assert ulcer.loc[dates[-1], "A"] == pytest.approx(expected_ulcer)
 
 
 def test_flat_prices_and_missing_values_are_safe():
@@ -122,26 +106,13 @@ def test_window_changes_warmup_and_invalid_windows_are_rejected():
     loader = FactorLoader()
     library = loader.load()
 
-    for name in (
-        "kaufman_efficiency_ratio",
-        "normalized_linear_regression_slope",
-        "regression_r_squared",
-    ):
+    for name in FACTOR_NAMES:
         short = _compute(library, name, panel, window=5)
         long = _compute(library, name, panel, window=8)
-        expected_short = 5 if name == "kaufman_efficiency_ratio" else 4
-        expected_long = 8 if name == "kaufman_efficiency_ratio" else 7
-        assert short.first_valid_index() == panel.close.index[expected_short]
-        assert long.first_valid_index() == panel.close.index[expected_long]
+        assert short.first_valid_index() == panel.close.index[4]
+        assert long.first_valid_index() == panel.close.index[7]
         with pytest.raises(ValueError):
             _compute(library, name, panel, window=1)
-
-    short_ulcer = _compute(library, "ulcer_index", panel, window=5)
-    long_ulcer = _compute(library, "ulcer_index", panel, window=8)
-    assert short_ulcer.first_valid_index() == panel.close.index[8]
-    assert long_ulcer.first_valid_index() == panel.close.index[14]
-    with pytest.raises(ValueError):
-        _compute(library, "ulcer_index", panel, window=1)
 
 
 def test_trend_quality_factors_do_not_use_future_prices():

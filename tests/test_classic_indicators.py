@@ -27,9 +27,6 @@ def test_classic_indicator_library_is_discoverable():
         "atr",
         "vroc",
         "wvad",
-        "channel_position",
-        "donchian_width",
-        "keltner_width",
     }.issubset(factors)
 
 
@@ -43,8 +40,6 @@ def test_factor_api_lists_classic_indicators():
         ids["macd"],
         ids["kdj"],
         ids["atr"],
-        ids["channel_position"],
-        ids["keltner_width"],
     }.issubset(names)
 
 
@@ -64,51 +59,13 @@ def test_classic_indicator_formulae_match_reference():
     d = tool.sma(k, 3)
     pd.testing.assert_frame_equal(loader.factors["kdj"].compute(panel), 3 * k - 2 * d)
 
-    middle = panel.close.rolling(20).mean()
-    std = panel.close.rolling(20).std()
-    upper, lower = middle + 2 * std, middle - 2 * std
-    pd.testing.assert_frame_equal(
-        loader.factors["channel_position"].compute(panel),
-        (panel.close - lower) / (upper - lower + 1e-10),
-    )
-    donchian_upper = panel.high.rolling(20).max()
-    donchian_lower = panel.low.rolling(20).min()
-    pd.testing.assert_frame_equal(
-        loader.factors["donchian_width"].compute(panel),
-        (donchian_upper - donchian_lower) / (panel.close.abs() + 1e-10),
-    )
-
-    previous_close = panel.close.shift()
-    true_range = panel.high - panel.low
-    true_range = true_range.where(
-        true_range >= (panel.high - previous_close).abs(),
-        (panel.high - previous_close).abs(),
-    )
-    true_range = true_range.where(
-        true_range >= (panel.low - previous_close).abs(),
-        (panel.low - previous_close).abs(),
-    )
-    middle = panel.close.ewm(span=20, adjust=False).mean()
-    offset = 2.0 * true_range.rolling(10).mean()
-    keltner_upper, keltner_lower = middle + offset, middle - offset
-    library._panel = panel
-    pd.testing.assert_frame_equal(
-        library.channel_position(
-            channel="keltner", window=20, atr_window=10, multiplier=2.0
-        ),
-        (panel.close - keltner_lower) / (keltner_upper - keltner_lower + 1e-10),
-    )
-    pd.testing.assert_frame_equal(
-        loader.factors["keltner_width"].compute(panel),
-        (keltner_upper - keltner_lower) / (middle.abs() + 1e-10),
-    )
+    # channel_position / donchian_width / keltner_width 已随 beebeb4 的因子库
+    # 裁剪（432→331）从库中移除；实现只存在于 SQLite 的 factor_code 列，
+    # 取回需从 c2e9784 恢复整库。这里不再断言它们。
 
 
 def test_classic_indicators_return_panel_shape():
     loader, panel = FactorLoader(), _panel()
     loader.load()
-    for name in (
-        "bbi", "macd", "kdj", "rsi", "atr", "vroc", "wvad",
-        "channel_position", "donchian_width", "keltner_width",
-    ):
+    for name in ("bbi", "macd", "kdj", "rsi", "atr", "vroc", "wvad"):
         assert loader.factors[name].compute(panel).shape == panel.close.shape

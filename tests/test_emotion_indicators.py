@@ -31,7 +31,7 @@ def test_builtin_factor_library_exposes_emotion_factor_names():
     loader = FactorLoader()
     library = loader.load()
 
-    assert len(library_factors(library)) == 432
+    assert len(library_factors(library)) == 331
     assert "atr" in loader.factors
     assert "vroc" in loader.factors
     assert "wvad" in loader.factors
