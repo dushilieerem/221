@@ -6,6 +6,7 @@ import math
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -679,3 +680,57 @@ def test_group_returns_rejects_non_positive_lag():
         calculate_group_returns(
             frame, assignments, pd.Series(True, index=dates), 2, lag=0
         )
+
+
+def test_ic_statistics_all_follow_execution_timing():
+    """IC / RankIC / 行业 IC 统一按成交时点平移配对用的收益。"""
+
+    dates = pd.bdate_range("2026-01-02", periods=60)
+    symbols = [f"S{index:02d}" for index in range(12)]
+    rng = np.random.default_rng(7)
+    close = pd.DataFrame(
+        100.0 * np.cumprod(1.0 + rng.normal(0, 0.02, (60, 12)), axis=0),
+        index=dates,
+        columns=symbols,
+    )
+    open_prices = close * 0.995
+    factor = pd.DataFrame(rng.normal(0, 1, (60, 12)), index=dates, columns=symbols)
+    industry_map = pd.Series(["银行"] * 6 + ["医药"] * 6, index=symbols)
+
+    def analyse(timing: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+        portfolio = PortfolioEngine().build(
+            factor,
+            close,
+            groups=3,
+            portfolio_type="long_only",
+            rebalance=1,
+            stock_num=3,
+            execution_timing=timing,
+        )
+        evaluation = MetricEngine().evaluate_factor_portfolio(
+            portfolio,
+            analysis_level="full",
+            execution_timing=timing,
+            open_prices=open_prices,
+            industry_map=industry_map,
+            benchmark_loader=lambda index: pd.Series(1.0, index=index),
+            groups=3,
+        )
+        return (
+            evaluation["factor_analysis"]["industry_ic_ir"],
+            evaluation["factor_analysis"]["ic_series"],
+        )
+
+    closed_ic, closed_series = analyse("same_close")
+    default_ic, default_series = analyse("next_close")
+    opened_ic, opened_series = analyse("next_open")
+
+    assert not closed_ic.empty
+    # 行业 IC 随成交时点变（配对的收益起点不同）。
+    assert not closed_ic.equals(default_ic)
+    assert not closed_ic.equals(opened_ic)
+    assert not default_ic.equals(opened_ic)
+
+    # 总体 IC 与行业 IC 用同一份矩阵，因此同样随成交时点变化。
+    assert not closed_series.equals(default_series)
+    assert not closed_series.equals(opened_series)

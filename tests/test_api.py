@@ -1995,8 +1995,8 @@ def test_factor_industry_curves_follow_execution_timing(market_data_dir):
     assert closed != opened
     assert default != opened
 
-    # IC 衡量因子的预测能力，与成交时点无关：三种口径的 IC 序列逐点一致。
+    # 全部基于远期收益的统计都跟随成交时点：IC / 行业 IC / 行业曲线一致变化。
     ic = analysis["same_close"]["ic_series"]
     assert ic
     for timing in ("next_close", "next_open"):
-        assert analysis[timing]["ic_series"] == ic
+        assert analysis[timing]["ic_series"] != ic

@@ -241,6 +241,11 @@ class BacktestEngine:
                         else "close_to_close_on_shifted_weights"
                     ),
                     "layered_and_long_short": "matches_main_portfolio_timing_gross",
+                    "industry_curves": "matches_main_portfolio_timing_gross",
+                    "ic_rank_ic_and_industry_ic": (
+                        "measured_on_execution_aligned_forward_returns"
+                    ),
+                    "ff3": "built_from_close_and_market_cap_unaffected",
                 },
                 "factor_preprocess": {
                     **preprocess,

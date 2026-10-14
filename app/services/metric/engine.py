@@ -188,21 +188,21 @@ class MetricEngine:
         }
 
     @staticmethod
-    def _industry_forward_returns(
+    def _execution_forward_returns(
         forward_returns: pd.DataFrame,
         close: pd.DataFrame,
         open_prices: pd.DataFrame | None,
         execution_timing: str,
     ) -> pd.DataFrame:
-        """行业净值曲线用的远期收益矩阵，按成交时点平移。
+        """远期收益矩阵，按成交时点平移，供行业曲线与行业 IC 使用。
 
-        行业曲线把「信号日的因子值」与「该信号持仓期的收益」配对：默认
-        （``same_close``）配对 ``(t, t+1]``，``next_close`` 换成 ``(t+1, t+2]``，
-        ``next_open`` 换成次日的开盘到收盘。远期收益的期数由
+        行业分析把「信号日的因子值」与「该信号实际能拿到的持仓期收益」配对：
+        默认（``same_close``）配对 ``(t, t+1]``，``next_close`` 换成
+        ``(t+1, t+2]``，``next_open`` 换成次日的开盘到收盘。远期收益的期数由
         ``forward_return_days`` 决定（当前固定为 1），因此三种口径的持仓期
         长度一致，只是起点随成交时点后移。
 
-        行业 IC 不用这个矩阵——它衡量因子的预测能力，与成交时点无关。
+        IC / RankIC、行业 IC 与行业曲线都用它，全链路保持同一成交口径。
         """
 
         if execution_timing == "same_close":
@@ -602,13 +602,11 @@ class MetricEngine:
         market_fields: Mapping[str, pd.DataFrame] | None = None,
         rebalance: str | int = 1,
         groups: int | None = 5,
-        industry_forward_returns: pd.DataFrame | None = None,
     ) -> dict[str, Any]:
         """计算因子回测的 core/full 分析，不读取市场数据。
 
-        ``industry_forward_returns`` 是**按成交时点平移过**的远期收益，只用于
-        行业净值曲线；行业 IC 与其它分析仍用原始 ``future``（衡量因子的预测
-        能力，与成交时点无关）。
+        ``future`` 是调用方传进来的**按成交时点平移过**的远期收益矩阵，
+        IC/行业 IC/行业曲线据此与本口径的一致。
         """
 
         if analysis_level not in {"core", "full"}:
@@ -647,14 +645,7 @@ class MetricEngine:
                     factor_values, future, industry_map
                 )
                 out["industry_equity"], out["industry_group_equity"] = _industry_equity(
-                    factor_values,
-                    (
-                        future
-                        if industry_forward_returns is None
-                        else industry_forward_returns
-                    ),
-                    industry_map,
-                    group_count,
+                    factor_values, future, industry_map, group_count
                 )
             except Exception as exc:  # noqa: BLE001 - 辅助分析失败不阻断主流程
                 _LOGGER.warning("行业因子分析失败，已跳过: %s", exc, exc_info=True)
@@ -727,6 +718,13 @@ class MetricEngine:
         positions = portfolio["positions"]
         factor_values = portfolio.get("factor_values")
         forward_returns = portfolio.get("forward_returns")
+        # 全部基于远期收益的统计（IC / RankIC、行业 IC、行业曲线）统一改用
+        # 「按成交时点平移」后的矩阵，保证口径与主组合一致。FF3 用的是收盘价
+        # 而非远期收益，不受影响。
+        if forward_returns is not None:
+            forward_returns = self._execution_forward_returns(
+                forward_returns, close, open_prices, execution_timing
+            )
         return_bundle: GrossReturnBundle = calculate_gross_returns(close, positions)
         # 主组合按请求的费率扣减交易成本：佣金与滑点按 |Δ权重| 换手计，
         # 印花税只对卖出部分计。净值、收益、指标因此都是净口径。
@@ -848,9 +846,6 @@ class MetricEngine:
                 market_fields=market_fields,
                 rebalance=rebalance,
                 groups=groups,
-                industry_forward_returns=self._industry_forward_returns(
-                    forward_returns, close, open_prices, execution_timing
-                ),
             )
             self._merge_ff3_metrics(metrics, factor_analysis)
             result.update({
