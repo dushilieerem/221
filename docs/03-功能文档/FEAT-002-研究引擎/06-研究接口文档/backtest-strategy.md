@@ -12,7 +12,8 @@ Web 端需要展示调仓或成交过程时，使用 `include_execution_timeline
   "start": null, "end": null,
   "benchmark": "CSI300",
   "commission_rate": 0.0, "stamp_tax": 0.001,
-  "slippage_rate": 0.0, "initial_capital": 1000000,
+  "slippage_rate": 0.0, "min_commission": 5.0,
+  "initial_capital": 1000000,
   "include_positions": false, "include_rebalance_logs": true,
   "include_execution_timeline": true,
   "filter_suspended": false, "filter_st": false,
@@ -31,8 +32,10 @@ Web 端需要展示调仓或成交过程时，使用 `include_execution_timeline
 | `start` / `end` | string/null | `null` | 回测区间，格式 `YYYY-MM-DD`。 |
 | `benchmark` | enum | `CSI300` | `CSI300`、`CSI500`、`CSI1000` 或 `SSE50`。 |
 | `benchmark_snapshot` | object/null | `null` | WebApp 已鉴权并解析的固定权重组合基准快照；仅向量化模式支持，且与 `benchmark` 至多传一个。 |
-| `commission_rate` / `slippage_rate` | number | `0.0` | 按成交额的费率与滑点率。 |
-| `stamp_tax` | number | `0.001` | 卖出印花税率。 |
+| `commission_rate` | number | `0.0` | 佣金率。向量化按换手率计提；事件按每笔成交额计提。 |
+| `slippage_rate` | number | `0.0` | 滑点率。向量化与佣金同项相加按换手计提；事件模式下**调整成交价**（买入向上、卖出向下）。 |
+| `stamp_tax` | number | `0.001` | 卖出印花税率，两种模式都只对卖出部分计提。 |
+| `min_commission` | number | `5.0` | 每笔最低手续费，**仅事件模式生效**；显式设 `0` 即取消最低收费。向量化按换手率建模、没有单笔概念，回显为 `null`。 |
 | `initial_capital` | number | `1000000` | 初始资金。 |
 | `include_positions` | boolean | `false` | 返回持仓权重快照。 |
 | `include_rebalance_logs` | boolean | `false` | 仅向量化模式返回目标权重变化日志；事件模式请使用 `include_execution_timeline`。 |
@@ -41,6 +44,31 @@ Web 端需要展示调仓或成交过程时，使用 `include_execution_timeline
 | `filter_st` | boolean | `false` | 是否过滤 ST、\*ST 标的。向量化模式按信号剔除；事件模式**只拒绝买入**（见下）。 |
 | `filter_limit_up` | boolean | `false` | 是否过滤涨停标的。向量化模式按信号剔除；事件模式由撮合层常开拒单覆盖，该参数不额外生效。 |
 | `filter_limit_down` | boolean | `false` | 是否过滤跌停标的。向量化模式按信号剔除；事件模式由撮合层常开拒单覆盖，该参数不额外生效。 |
+
+## 交易成本语义
+
+两种 `engine_mode` 对同一组参数的建模方式不同，`meta.cost_model` 会回显本次实际生效的口径。
+
+**向量化模式**（按换手率，没有单笔成交的概念）：
+
+```
+净收益 = 毛收益 − 换手率×(commission_rate + slippage_rate) − 卖出换手率×stamp_tax
+```
+
+- 佣金与滑点**同项相加**，因此单独设置其中一个得到的结果相同；
+- `min_commission` 不适用（回显 `not_applicable` 与 `null`），因为无法表达「按笔下限」；
+- 首个持有期的建仓成本不计入。
+
+**事件模式**（按笔成交，滑点体现在成交价上）：
+
+- 佣金：每笔 `max(成交额 × commission_rate, min_commission)`；
+- 印花税：每笔卖出 `成交额 × stamp_tax`；
+- 滑点：买入成交价 `参考价 × (1 + slippage_rate)`、卖出 `参考价 × (1 − slippage_rate)`。因此滑点**会体现在 `fills[].price`** 上，成交额、佣金与印花税都按调整后的价格计算；强平同样计滑点；
+- 注意：事件模式**每笔至少收 `min_commission`（默认 5 元）**，即使把三个费率都设为 0 也仍有最低收费。需要真正的零成本请显式传 `min_commission: 0`。
+
+滑点与佣金在经济上等价（都是成交额的固定比例），所以单独设 1% 佣金与单独设 1% 滑点在两种模式下都会得到相近的结果。
+
+`meta` 同时回显本次实际生效的成本参数 `commission_rate`、`stamp_tax`、`slippage_rate`、`min_commission`（向量化模式为 `null`）与建模口径字典 `cost_model`，使结果可以自证用了什么费率。
 
 ## 过滤语义
 

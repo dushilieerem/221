@@ -171,10 +171,14 @@ class StrategyBacktestRequest(BaseModel):
     #: 对比基准
     benchmark: Literal["CSI300", "CSI500"] = "CSI300"
     benchmark_snapshot: Optional[BenchmarkSnapshotInput] = None
-    commission_rate: float = 0.0
-    #: 印花税率（仅卖出时按成交额计提）
-    stamp_tax: float = 0.001
-    slippage_rate: float = 0.0
+    #: 佣金率（按成交额计提）；向量化与事件模式均生效
+    commission_rate: float = Field(0.0, ge=0)
+    #: 印花税率（仅卖出时按成交额计提）；向量化与事件模式均生效
+    stamp_tax: float = Field(0.001, ge=0)
+    #: 滑点率；向量化模式按换手计提，事件模式调整成交价（买入向上、卖出向下）
+    slippage_rate: float = Field(0.0, ge=0)
+    #: 每笔最低手续费；仅事件模式生效，显式设 0 即取消最低收费
+    min_commission: float = Field(5.0, ge=0)
     initial_capital: float = Field(1_000_000.0, gt=0)
     #: 返回持仓权重（前端画持仓图用）
     include_positions: bool = False
@@ -352,7 +356,13 @@ class FactorBacktestMeta(BaseModel):
     filter_st: bool = False
     filter_status: dict[str, str] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
-    execution_version: str = "factor-execution-v6"
+    #: 本次实际生效的交易成本参数回显。成本只作用于主组合（净值/收益/指标），
+    #: 分层曲线与多空价差保持毛收益，见 cost_model。
+    commission_rate: float = 0.0
+    stamp_tax: float = 0.0
+    slippage_rate: float = 0.0
+    cost_model: dict[str, str] = Field(default_factory=dict)
+    execution_version: str = "factor-execution-v7"
     metric_version: str = "factor-scorecard-v3"
     data_release_id: Optional[str] = None
     spec_hash: Optional[str] = None
@@ -385,6 +395,13 @@ class StrategyBacktestMeta(BaseModel):
     filter_limit_up: bool = False
     filter_limit_down: bool = False
     filter_status: dict[str, str] = Field(default_factory=dict)
+    #: 本次实际生效的交易成本参数回显，便于结果自证用了什么费率。
+    #: 向量化模式按换手率建模，min_commission 不适用（回显为 null）。
+    commission_rate: float = 0.0
+    stamp_tax: float = 0.0
+    slippage_rate: float = 0.0
+    min_commission: Optional[float] = None
+    cost_model: dict[str, str] = Field(default_factory=dict)
     trading_symbols: Optional[list[str]] = Field(None, exclude_if=lambda value: value is None)
     universe_asset: Optional[ResolvedAssetMeta] = Field(None, exclude_if=lambda value: value is None)
     benchmark_asset: Optional[ResolvedAssetMeta] = Field(None, exclude_if=lambda value: value is None)
@@ -848,6 +865,10 @@ class FactorBacktestBatchTriggerRequest(BaseModel):
     dry_run: bool = False
     filter_suspended: bool = False
     filter_limit_up: bool = False
+    #: 交易成本参数；不传时与扣成本前逐位一致。成本作用于主组合的净值与指标。
+    commission_rate: float = Field(0.0, ge=0)
+    stamp_tax: float = Field(0.0, ge=0)
+    slippage_rate: float = Field(0.0, ge=0)
     winsorize: int = Field(0, ge=0, le=3)
     standardize: int = Field(0, ge=0, le=3)
 
@@ -895,7 +916,7 @@ class FactorBacktestBatchResponse(BaseModel):
     profile_hash: str
     catalog_version: str
     metric_version: str
-    execution_version: str = "factor-execution-v6"
+    execution_version: str = "factor-execution-v7"
     data_release_id: Optional[str] = None
     spec_hash: str = ""
     status: str

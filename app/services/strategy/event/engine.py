@@ -137,6 +137,20 @@ class EventBacktestEngine:
             order, side=side, quantity=quantity, price=price, ledger=ledger, date=date
         )
 
+    def _execution_price(self, price: float, side: str) -> float:
+        """按滑点把参考价调整为成交价：买入向上、卖出向下。
+
+        滑点建模为「成交价比参考价更差」，因此它会体现在 ``EventFill.price``
+        上（审计可见），并参与成交额、佣金与印花税的计算。费率为 0 时原样返回。
+        """
+
+        rate = self.config.slippage_rate
+        if not rate:
+            return price
+        adjusted = price * (1.0 + rate) if side == "buy" else price * (1.0 - rate)
+        # 卖出滑点不得把价格压到 0 或负数。
+        return adjusted if adjusted > 0 else price
+
     def _settle(
         self,
         order: EventOrder,
@@ -157,6 +171,7 @@ class EventBacktestEngine:
         ``begin_session`` 为已清仓的标的复活出幽灵可卖数量。
         """
 
+        price = self._execution_price(price, side)
         value = quantity * price
         commission = max(value * self.config.commission_rate, self.config.min_commission)
         stamp_tax = value * self.config.stamp_tax_rate if side == "sell" else 0.0
@@ -227,7 +242,8 @@ class EventBacktestEngine:
         if side == "buy":
             if quantity % self.config.lot_size:
                 return "LOT_SIZE"
-            value = quantity * price
+            # 现金校验必须用含滑点的成交价，否则买入成交后现金可能为负。
+            value = quantity * self._execution_price(price, side)
             cost = value + max(value * self.config.commission_rate, self.config.min_commission)
             return "INSUFFICIENT_CASH" if cost > ledger.cash + 1e-9 else None
         return "T_PLUS_ONE" if quantity > ledger.sellable.get(symbol, 0) else None

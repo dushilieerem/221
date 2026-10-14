@@ -1,6 +1,7 @@
 """日频 EventEngine 的核心时序与 A 股规则测试。"""
 
 import pandas as pd
+import pytest
 
 from app.models.event import EventBacktestConfig
 from app.services.strategy.event.engine import EventBacktestEngine
@@ -434,3 +435,52 @@ def test_strategy_sell_on_transition_day_is_not_liquidated_twice():
     assert transition_fills[0].side == "sell"
     assert transition_fills[0].price == 11.0  # 开盘价，不是强平价 11.5
     assert result.position_snapshots[1].positions["A"] == 0
+
+
+# ---------------- 交易成本参数 ----------------
+
+def test_slippage_worsens_fill_price_on_both_sides():
+    """滑点建模为更差的成交价：买入向上、卖出向下，并体现在成交记录里。"""
+
+    panels = _panels()  # open 10/11/12，close 10.5/11.5/12.5
+
+    result = EventBacktestEngine(
+        panels,
+        EventBacktestConfig(initial_capital=10_000, slippage_rate=0.01),
+    ).run(_buy_once_then_hold(close_day="2024-01-04"))
+
+    buy, sell = result.fills[0], result.fills[1]
+    assert buy.side == "buy"
+    assert buy.price == pytest.approx(10.0 * 1.01)  # 开盘 10.0 上浮 1%
+    assert sell.side == "sell"
+    assert sell.price == pytest.approx(12.0 * 0.99)  # 开盘 12.0 下浮 1%
+    # 成交额、佣金、印花税都按调整后的成交价计算。
+    assert buy.commission == pytest.approx(max(buy.price * 100 * 0.0003, 5.0))
+    assert sell.stamp_tax == pytest.approx(sell.price * 100 * 0.0005)
+
+
+def test_slippage_defaults_to_zero_and_leaves_fills_unchanged():
+    panels = _panels()
+    result = EventBacktestEngine(
+        panels, EventBacktestConfig(initial_capital=10_000)
+    ).run(_buy_once_then_hold(close_day="2024-01-04"))
+
+    assert result.fills[0].price == 10.0
+    assert result.fills[1].price == 12.0
+
+
+def test_min_commission_can_be_disabled_but_defaults_to_five_yuan():
+    panels = _panels()
+
+    def commission_for(**config):
+        result = EventBacktestEngine(
+            panels, EventBacktestConfig(initial_capital=10_000, **config)
+        ).run(_buy_once_then_hold())
+        return result.fills[0].commission
+
+    # 默认每笔至少 5 元：成交额约 1000 元 × 0.03% = 0.3 元，被抬到 5 元。
+    assert commission_for() == pytest.approx(5.0)
+    # 显式设 0 即取消最低收费，只按费率计。
+    assert commission_for(min_commission=0.0) == pytest.approx(0.3, abs=1e-9)
+    # 费率与最低收费都为 0 时才是真正的零成本。
+    assert commission_for(min_commission=0.0, commission_rate=0.0) == 0.0

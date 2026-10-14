@@ -64,8 +64,11 @@ class EventBacktestResult:
 class EventBacktestConfig:
     initial_capital: float = 1_000_000.0
     commission_rate: float = 0.0003
+    #: 每笔最低手续费；显式设为 0 即取消最低收费。
     min_commission: float = 5.0
     stamp_tax_rate: float = 0.0005
+    #: 滑点率：买入向上、卖出向下调整成交价，模拟更差的执行价格。
+    slippage_rate: float = 0.0
     lot_size: int = 100
     #: 是否拒绝买入 ST/*ST 标的。停牌与涨跌停由撮合层无条件拦截，不受配置影响。
     filter_st: bool = False

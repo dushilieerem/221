@@ -517,11 +517,35 @@ def test_metric_engine_reports_weight_change_cost_summary():
     summary = evaluation["transaction_summary"]
     assert summary["trade_count"] == 1
     assert summary["total_turnover"] == 1.0
-    assert summary["commission_cost"] == pytest.approx(0.0)
+    # 成本真正参与主组合收益：换手 1.0，佣金 1%、滑点 0.3%、本次无卖出故无印花税。
+    assert summary["commission_cost"] == pytest.approx(0.01)
     assert summary["stamp_tax_cost"] == pytest.approx(0.0)
-    assert summary["slippage_cost"] == pytest.approx(0.0)
+    assert summary["slippage_cost"] == pytest.approx(0.003)
+    assert summary["total_cost"] == pytest.approx(0.013)
+    assert evaluation["metrics"]["total_cost"] == pytest.approx(0.013)
+
+    # 净收益 = 毛收益 − 当日成本：首个持有期承担 0.087（= 0.1 − 0.013）。
+    returns = evaluation["returns"]
+    assert returns.iloc[0] == pytest.approx(0.087)
+    assert returns.iloc[1] == pytest.approx(0.1)
+
+
+def test_metric_engine_costs_default_to_zero():
+    """不传费率时与扣成本前的毛收益逐位一致——不能给既有回测悄悄加成本。"""
+
+    dates = pd.date_range("2026-01-02", periods=3, freq="B")
+    close = pd.DataFrame({"A": [100.0, 110.0, 121.0]}, index=dates)
+    factor = pd.DataFrame({"A": [1.0, 1.0, 1.0]}, index=dates)
+    portfolio = PortfolioEngine().build(
+        factor, close, groups=None, portfolio_type="long_only", rebalance=1, stock_num=1
+    )
+
+    evaluation = MetricEngine().evaluate(portfolio)
+
+    summary = evaluation["transaction_summary"]
     assert summary["total_cost"] == pytest.approx(0.0)
-    assert evaluation["metrics"]["total_cost"] == pytest.approx(0.0)
+    assert evaluation["returns"].iloc[0] == pytest.approx(0.1)
+    assert evaluation["equity_curve"].iloc[-1] == pytest.approx(1.1)
 
 
 def test_factor_path_does_not_reference_legacy_signal_algorithm():

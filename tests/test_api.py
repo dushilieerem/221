@@ -962,7 +962,14 @@ def test_strategy_backtest_returns_equity_and_positions(market_data_dir):
     assert response.status_code == 200
     body = response.json()
     assert body["error"] is None
-    assert body["meta"] == {
+    meta = body["meta"]
+    # 交易成本参数由 _cost_meta 单独构造，拆出来断言以免精确字典过长。
+    cost_meta = {
+        key: meta.pop(key)
+        for key in ("commission_rate", "stamp_tax", "slippage_rate",
+                    "min_commission", "cost_model")
+    }
+    assert meta == {
         "strategy": "EqualWeightMomentum",
         "universe": "CSI500",
         "benchmark": "CSI300",
@@ -983,6 +990,14 @@ def test_strategy_backtest_returns_equity_and_positions(market_data_dir):
             "is_delisted": "enabled",
         },
     }
+    # 成本参数必须回显，否则结果无法自证用了什么费率。
+    assert cost_meta["commission_rate"] == 0.0
+    assert cost_meta["stamp_tax"] == 0.001
+    assert cost_meta["slippage_rate"] == 0.0
+    # 向量化模式按换手率建模，没有单笔成交，因此最低手续费不适用。
+    assert cost_meta["min_commission"] is None
+    assert cost_meta["cost_model"]["commission"] == "turnover_times_rate"
+    assert cost_meta["cost_model"]["min_commission"] == "not_applicable"
     assert body["metrics"]["total_return"] is not None
     assert len(body["equity_curve"]) > 0
     assert len(body["benchmark_curve"]) > 0
@@ -1789,3 +1804,87 @@ def test_experiment_task_routes_are_not_public():
     assert client.post("/api/experiments/strategy", json={}).status_code == 404
     assert client.get("/api/experiments/example-run-id").status_code == 404
     assert client.delete("/api/experiments/example-run-id").status_code == 404
+
+
+def test_factor_backtest_costs_apply_to_main_portfolio_only(market_data_dir):
+    """成本真正作用于主组合净值与指标；分层曲线与多空价差保持毛收益。"""
+
+    _write_structured_extra_fields(market_data_dir)
+    zero = _wait_factor_task(_request_payload()).json()["result"]
+    costly = _wait_factor_task({
+        **_request_payload(),
+        "commission_rate": 0.01,
+        "stamp_tax": 0.01,
+        "slippage_rate": 0.01,
+    }).json()["result"]
+
+    # 主组合：净值、指标、成本明细都反映成本。
+    assert costly["final_equity"] < zero["final_equity"]
+    assert zero["metrics"]["total_cost"] == pytest.approx(0.0)
+    assert costly["metrics"]["total_cost"] > 0.0
+    assert costly["metrics"]["commission_cost"] > 0.0
+    assert costly["metrics"]["stamp_tax_cost"] > 0.0
+    assert costly["metrics"]["slippage_cost"] > 0.0
+    # 换手率与费率无关，两次必须一致。
+    assert costly["metrics"]["total_turnover"] == pytest.approx(
+        zero["metrics"]["total_turnover"]
+    )
+
+    # 结果自证：成本参数与建模口径都回显在 meta 里。
+    assert zero["meta"]["commission_rate"] == 0.0
+    assert costly["meta"]["commission_rate"] == pytest.approx(0.01)
+    assert costly["meta"]["stamp_tax"] == pytest.approx(0.01)
+    assert costly["meta"]["slippage_rate"] == pytest.approx(0.01)
+    assert costly["meta"]["cost_model"]["main_portfolio"] == (
+        "net_of_commission_stamp_tax_and_slippage"
+    )
+    assert costly["meta"]["cost_model"]["layered_and_long_short"] == "gross"
+
+    # 分层曲线（多空价差也由它派生）是因子排序能力的诊断口径，扣成本前后一致。
+    assert zero["factor_analysis"]["layered_returns"] == (
+        costly["factor_analysis"]["layered_returns"]
+    )
+
+
+def test_event_strategy_echoes_cost_parameters(market_data_dir):
+    """事件模式回显四个成本参数；向量化模式的 min_commission 不适用。"""
+
+    _write_structured_extra_fields(market_data_dir)
+
+    def run(engine_mode: str, **extra) -> dict:
+        response = client.post(
+            "/api/backtest/strategy",
+            json={
+                "strategy_code": STRATEGY_CODE if engine_mode == "vectorized" else '''class EventHold:
+    fixed_symbols = ("S000",)
+
+    def initialize(self, context):
+        context.schedule.daily(self.rebalance)
+
+    def rebalance(self, context):
+        if context.current_dt.date().isoformat() == "2022-01-05":
+            context.orders.target_value("S000", 500_000)
+''',
+                "engine_mode": engine_mode,
+                "universe": "CSI300",
+                **extra,
+            },
+        )
+        body = response.json()
+        assert body["error"] is None, body["error"]
+        return body["meta"]
+
+    event_meta = run(
+        "event", commission_rate=0.002, stamp_tax=0.001,
+        slippage_rate=0.003, min_commission=3.0,
+    )
+    assert event_meta["commission_rate"] == pytest.approx(0.002)
+    assert event_meta["stamp_tax"] == pytest.approx(0.001)
+    assert event_meta["slippage_rate"] == pytest.approx(0.003)
+    assert event_meta["min_commission"] == pytest.approx(3.0)
+    assert event_meta["cost_model"]["slippage"] == "price_adjusted_buy_up_sell_down"
+
+    vectorized_meta = run("vectorized")
+    assert vectorized_meta["stamp_tax"] == pytest.approx(0.001)
+    assert vectorized_meta["min_commission"] is None
+    assert vectorized_meta["cost_model"]["min_commission"] == "not_applicable"

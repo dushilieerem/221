@@ -81,7 +81,7 @@ class FactorBacktestSpec:
     data_dir: str | None = field(default=None, compare=False, repr=False)
     output_path: str | None = field(default=None, compare=False, repr=False)
     storage: str = field(default="csv", compare=False, repr=False)
-    execution_version: str = "factor-execution-v6"
+    execution_version: str = "factor-execution-v7"
     metric_version: str = "factor-scorecard-v3"
 
     def computation_payload(self) -> dict[str, Any]:
@@ -103,11 +103,12 @@ class FactorBacktestSpec:
             "groups": self.groups,
             "stock_num": self.stock_num,
             "forward_return_days": self.forward_return_days,
-            # 因子回测固定为毛收益；保留 Spec 字段接收旧请求，但费用
-            # 参数不再是实际计算身份，避免同一结果因无效成本参数重复缓存。
-            "commission_rate": 0.0,
-            "stamp_tax": 0.0,
-            "slippage_rate": 0.0,
+            # 成本参数参与主组合的净收益计算，因此必须是计算身份的一部分：
+            # 曾经这里被固定为 0，是因为当时因子回测恒用毛收益；成本真正
+            # 生效后若仍写 0，不同费率的请求会共用缓存键并互相返回错误结果。
+            "commission_rate": self.commission_rate,
+            "stamp_tax": self.stamp_tax,
+            "slippage_rate": self.slippage_rate,
             "filter_suspended": self.filter_suspended,
             "filter_st": self.filter_st,
             "filter_limit_up": self.filter_limit_up,
