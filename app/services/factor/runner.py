@@ -714,6 +714,7 @@ def _serialize_factor_execution(
             cumulative_series=_layered_equity_to_points(layered_equity),
             definition={
                 "ic_type": "pearson",
+                "ic_std_ddof": 1,
                 # IC 不可用时的原因；可用为 None。取值为
                 # missing_inputs / no_common_axis /
                 # insufficient_cross_section / zero_cross_sectional_variance。
@@ -738,7 +739,7 @@ def _serialize_factor_execution(
                 "relative_annual_excess_return": "annualized_cumulative_simple_excess",
                 "relative_excess_volatility_ddof": 1,
                 "relative_information_ratio": "annual_excess_divided_by_excess_volatility",
-                "benchmark_win_rate": "common_daily_group_return_vs_cumulative_benchmark_return",
+                "benchmark_win_rate": "common_daily_group_return_vs_daily_benchmark_return",
                 **({
                     "industry_return_method": "equal_weight_fixed_capital",
                     "industry_grouping_method": "daily_cross_sectional_equal_weight_fixed_capital",

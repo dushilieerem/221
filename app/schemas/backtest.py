@@ -380,7 +380,7 @@ class FactorBacktestMeta(BaseModel):
     execution_timing: Literal["same_close", "next_close", "next_open"] = "next_close"
     execution_model: dict[str, str] = Field(default_factory=dict)
     execution_version: str = "factor-execution-v8"
-    metric_version: str = "factor-scorecard-v3"
+    metric_version: str = "factor-scorecard-v4"
     data_release_id: Optional[str] = None
     spec_hash: Optional[str] = None
     factor_source_hash: Optional[str] = None

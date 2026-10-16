@@ -84,7 +84,7 @@ class FactorBacktestSpec:
     output_path: str | None = field(default=None, compare=False, repr=False)
     storage: str = field(default="csv", compare=False, repr=False)
     execution_version: str = "factor-execution-v8"
-    metric_version: str = "factor-scorecard-v3"
+    metric_version: str = "factor-scorecard-v4"
 
     def computation_payload(self) -> dict[str, Any]:
         """返回不含入口/持久化策略的规范化计算身份。"""

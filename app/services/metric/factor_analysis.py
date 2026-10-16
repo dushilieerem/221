@@ -195,15 +195,6 @@ def _compute_quantile_metrics(
     if first_benchmark_date is not None:
         benchmark_price_returns.loc[first_benchmark_date] = 0.0
     benchmark_price_returns = _finite_series(benchmark_price_returns)
-    benchmark_cumulative_returns = pd.Series(
-        dtype=float, name="benchmark_cumulative"
-    )
-    if first_benchmark_date is not None:
-        benchmark_cumulative_returns = _finite_series(
-            benchmark_equity.div(
-                float(benchmark_equity.loc[first_benchmark_date])
-            ) - 1.0
-        ).rename("benchmark_cumulative")
     benchmark_observations = (
         len(layered_returns)
         if not layered_returns.empty
@@ -266,16 +257,10 @@ def _compute_quantile_metrics(
                 0.0 if excess_std == 0
                 else annual_excess_return / (excess_std * annualization)
             )
-        win_aligned = pd.concat(
-            [returns.rename("group"), benchmark_cumulative_returns],
-            axis=1,
-            join="inner",
-        ).dropna()
+        # 与其他相对指标使用同一份共同日期日收益，平局不计为胜。
         benchmark_win_rate = (
-            _safe_metric(
-                (win_aligned["group"] > win_aligned["benchmark_cumulative"]).mean()
-            )
-            if not win_aligned.empty else None
+            _safe_metric((aligned["group"] > aligned["benchmark"]).mean())
+            if not aligned.empty else None
         )
 
         column_name = str(column)

@@ -28,7 +28,7 @@ from app.database.factor_backtest import FactorBacktestRepository
 from app.services.experiment.manager import ExperimentManager, ExperimentQueueFullError
 
 
-METRIC_VERSION = "factor-scorecard-v3"
+METRIC_VERSION = "factor-scorecard-v4"
 EXECUTION_VERSION = "factor-execution-v8"
 
 

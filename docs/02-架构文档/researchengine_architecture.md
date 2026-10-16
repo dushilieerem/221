@@ -306,7 +306,7 @@ ExperimentManager
 - 缺过滤状态时跳过并告警，保留在当次结果、缓存及日志，不增加批量历史字段。
 - 保留现有收益、净值基点、公式和展示时序；批量解除强制过滤，API/CLI 开放四项配置。
 - 新因子执行版本为 factor-execution-v5，缓存为 factor-backtest-v11，指标版本为
-  factor-scorecard-v3；因子分组使用向量化 rank，核心回测固定计算毛收益。
+  factor-scorecard-v4；因子分组使用向量化 rank，核心回测固定计算毛收益。
 - 第 9 节策略链路继续使用旧 Native/Event；第 11 节因子批量已调整任务内部委托，
   不改变 Manager、两槽窗口、重试或历史 schema。
 

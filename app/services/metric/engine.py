@@ -538,6 +538,8 @@ class MetricEngine:
                 float(summary["rank_ic_mean"])
                 if summary["rank_ic_mean"] is not None else nan
             )
+        ic_std = factor_statistics["summary"]["ic_std"]
+        metrics["ic_std"] = float(ic_std) if ic_std is not None else nan
         return metrics
 
     @staticmethod
@@ -834,13 +836,13 @@ class MetricEngine:
             # 逐分位单边换手，与分层曲线共用同一份「持有分组」映射（含 lag），
             # 口径对齐主组合 metrics.turnover：逐日 Σ|Δw|/2 后取均值。
             group_turnover = calculate_group_turnover(
-                returns.index,
-                layered_returns.columns,
+                return_bundle.asset_returns.index,
+                return_bundle.asset_returns.columns,
                 portfolio["group_assignments"],
                 portfolio["rebalance_mask"],
                 int(group_count),
                 lag=2 if execution_timing == "next_close" else 1,
-            )
+            ).reindex(returns.index)
         layered_equity = layered_returns.copy()
         if not layered_equity.empty:
             layered_equity.iloc[0] = 0.0
