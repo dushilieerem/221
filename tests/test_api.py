@@ -393,6 +393,9 @@ def test_factor_backtest_groups_and_benchmark(market_data_dir):
     assert len(body["factor_analysis"]["cumulative_series"]) > 0
     assert "layer3" in body["factor_analysis"]["cumulative_series"][-1]
     assert len(body["factor_analysis"]["ic_series"]) > 0
+    values = pd.Series([point["value"] for point in body["factor_analysis"]["ic_series"]])
+    assert body["factor_analysis"]["ic_std"] == pytest.approx(values.std(ddof=1))
+    assert body["factor_analysis"]["definition"]["ic_std_ddof"] == 1
     assert len(body["factor_analysis"]["cumulative_ic_series"]) == len(
         body["factor_analysis"]["ic_series"]
     )
@@ -631,9 +634,8 @@ def test_quantile_metrics_return_absolute_and_relative_benchmark_metrics():
     assert q1.information_ratio == pytest.approx(
         q1.annual_excess_return / q1.excess_volatility
     )
-    benchmark_cumulative_returns = benchmark_equity / benchmark_equity.iloc[0] - 1.0
     assert q1.benchmark_win_rate == pytest.approx(
-        (group_returns > benchmark_cumulative_returns).mean()
+        (aligned["group"] > aligned["benchmark"]).mean()
     )
 
     drawdown_metrics = _compute_quantile_metrics(

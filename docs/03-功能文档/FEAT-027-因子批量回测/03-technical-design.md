@@ -83,7 +83,7 @@ batch_key = hash(as_of_date, profile_hash, catalog_version, data_release_id, exe
 分组指标复用 `QuantileMetric` 和 `_compute_quantile_metrics`，Q1 是因子值最高组，Q5 是最低组。
 年化收益为几何 CAGR，波动率为日收益样本标准差乘 `sqrt(252)`，最大回撤为负值；相对基准
 指标保持现有实现语义。IC/RankIC 是每日截面 Pearson/Spearman 均值，ICIR 为
-`IC均值 / IC标准差 × sqrt(252)`。当前指标版本为 `factor-scorecard-v3`，文件缓存版本为
+`IC均值 / IC标准差 × sqrt(252)`。当前指标版本为 `factor-scorecard-v4`，文件缓存版本为
 `factor-backtest-v11`。批次行保存 `execution_version`、`data_release_id`、`spec_hash`，
 因子行保存对应的规格身份。
 
