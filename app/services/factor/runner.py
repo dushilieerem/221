@@ -351,7 +351,14 @@ def _factor_standard_report(
     execution: FactorBacktestResult,
     response: FactorBacktestResponse,
 ) -> dict:
-    """生成 API 与批量任务共享的标准报告缓存载荷。"""
+    """生成 API 与批量任务共享的标准报告缓存载荷。
+
+    只写缓存命中路径真正用得到的东西：交互式入口读 ``http_response``，
+    批量入口从 ``equity_curve`` / ``quantile_metrics`` / ``predictive_metrics``
+    / ``meta`` 取标量。``factor_values`` 与 ``positions`` 是日期×标的的完整
+    宽表（全 A 十年约 2×1200 万格），既没有消费者，又会让 ``_cache_value``
+    逐格编码再 gzip 数百 MB 文本，长历史上比回测本身还慢，因此不再写入。
+    """
     result = execution.result_manager
     return {
         "cache_format": "factor-standard-report-v2",
@@ -361,10 +368,8 @@ def _factor_standard_report(
             "data_release_id": execution.data_release_id,
             "actual_end": execution.actual_end,
             "metrics": _cache_value(result.metrics),
-            "factor_values": _cache_value(getattr(result, "factor_values", None)),
             "equity_curve": _cache_value(execution.equity_curve),
             "returns": _cache_value(execution.returns),
-            "positions": _cache_value(execution.positions),
             "benchmark_equity": _cache_value(execution.benchmark_equity),
             "factor_analysis": _cache_value(execution.factor_analysis),
             "quantile_metrics": _cache_value(list(execution.quantile_metrics)),

@@ -191,14 +191,21 @@ def test_api_and_batch_share_standard_report_cache_payload():
     payload = _factor_standard_report(execution, FactorBacktestResponse())
     restored = _factor_execution_from_standard_report(spec, payload)
 
+    # 缓存载荷写的是「命中路径真正读到的字段」：交互式入口读 http_response，
+    # 批量入口读 equity_curve / quantile_metrics / predictive_metrics / meta。
+    # factor_values 与 positions 是日期×标的的完整宽表，没有消费者，且逐格
+    # 编码再 gzip 会在长历史上比回测本身更慢，因此不得再写进去。
+    standard = payload["standard"]
+    assert "factor_values" not in standard
+    assert "positions" not in standard
+    assert payload["http_response"] is not None
+
     assert restored is not None
     pd.testing.assert_series_equal(restored.equity_curve, equity, check_freq=False)
     pd.testing.assert_series_equal(restored.benchmark_equity, benchmark, check_freq=False)
-    pd.testing.assert_frame_equal(
-        restored.positions,
-        positions,
-        check_freq=False,
-    )
+    # 旧缓存文件仍带着这两张表，读取端保持兼容；新缓存不再写入。
+    assert restored.positions is None
+    assert restored.result_manager.factor_values is None
     pd.testing.assert_frame_equal(
         restored.factor_analysis["layered_equity"],
         layered,
