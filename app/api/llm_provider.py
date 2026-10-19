@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import os
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -26,6 +27,18 @@ class ProviderUnavailable(Exception):
     """供应商不可用或返回内容不符合 Provider 协议。"""
 
 
+def generation_provider_settings(config: Any) -> ProviderSettings:
+    """因子生成与帖子摘要共享现有服务端配置，不向调用方暴露凭据。"""
+    key = os.environ.get("AI_FACTOR_API_KEY") or os.environ.get("ARK_API_KEY") or config.ai_api_key
+    if not key:
+        raise ProviderUnavailable("模型服务尚未配置")
+    return ProviderSettings(
+        base_url=os.environ.get("AI_FACTOR_BASE_URL", config.ai_base_url).rstrip("/"),
+        api_key=key,
+        model=os.environ.get("AI_FACTOR_MODEL_ALIAS", config.ai_model),
+    )
+
+
 def complete(
     settings: ProviderSettings,
     messages: list[dict[str, str]],
@@ -33,6 +46,16 @@ def complete(
     response_format: dict[str, Any] | None = None,
     temperature: float = 0.1,
 ) -> str:
+    return complete_result(settings, messages, response_format=response_format, temperature=temperature)["content"]
+
+
+def complete_result(
+    settings: ProviderSettings,
+    messages: list[dict[str, str]],
+    *,
+    response_format: dict[str, Any] | None = None,
+    temperature: float = 0.1,
+) -> dict[str, Any]:
     """调用 Chat Completions，并返回消息内容。
 
     当供应商不支持 ``json_schema`` 时，自动重试一次无结构化输出格式的请求；
@@ -74,8 +97,17 @@ def complete(
         raise ProviderUnavailable from exc
 
     try:
-        return body["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError) as exc:
+        content = body["choices"][0]["message"]["content"]
+        if not isinstance(content, str) or not content.strip():
+            raise ProviderUnavailable
+        usage = body.get("usage") or {}
+        return {
+            "content": content,
+            "model": body.get("model") or settings.model,
+            "tokens_in": max(0, int(usage.get("prompt_tokens") or 0)),
+            "tokens_out": max(0, int(usage.get("completion_tokens") or 0)),
+        }
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
         raise ProviderUnavailable from exc
 
 
@@ -105,4 +137,4 @@ def response_format_is_unsupported(error: urllib.error.HTTPError) -> bool:
     return "response_format.type" in message and "not supported" in message
 
 
-__all__ = ["ProviderSettings", "ProviderUnavailable", "complete"]
+__all__ = ["ProviderSettings", "ProviderUnavailable", "generation_provider_settings", "complete", "complete_result"]
