@@ -9,7 +9,6 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
-import os
 import time
 import urllib.request
 from threading import Lock
@@ -124,19 +123,10 @@ def generate_factor(req: FactorGenerationRequest) -> FactorGenerationResponse:
 
 def _settings_from_env() -> ProviderSettings:
     # 环境变量优先，未设置时使用 config.yaml 中的共享 AI 配置。
-    config = get_runtime_settings()
-    api_key = (
-        os.environ.get("AI_FACTOR_API_KEY")
-        or os.environ.get("ARK_API_KEY")
-        or config.ai_api_key
-    )
-    if not api_key:
-        raise HTTPException(503, "AI 因子生成服务尚未配置")
-    return ProviderSettings(
-        base_url=os.environ.get("AI_FACTOR_BASE_URL", config.ai_base_url).rstrip("/"),
-        api_key=api_key,
-        model=os.environ.get("AI_FACTOR_MODEL_ALIAS", config.ai_model),
-    )
+    try:
+        return llm_provider.generation_provider_settings(get_runtime_settings())
+    except ProviderUnavailable as exc:
+        raise HTTPException(503, "AI 因子生成服务尚未配置") from exc
 
 
 def _messages(req: FactorGenerationRequest) -> list[dict[str, str]]:

@@ -5,6 +5,8 @@ from fastapi import APIRouter
 from app.api.ai_factor import generate_factor
 from app.api.ai_interpretation import interpret_backtest
 from app.api.ai_strategy import generate_strategy
+from app.api.ai_post_summary import summarize_post
+from app.schemas.post_summary import PostSummaryRequest, PostSummaryResponse
 from app.schemas.backtest import (
     BacktestInterpretationRequest,
     BacktestInterpretationResponse,
@@ -16,6 +18,11 @@ from app.schemas.backtest import (
 
 
 router = APIRouter()
+
+
+@router.post("/ai/post-summaries", response_model=PostSummaryResponse)
+def generate_post_summary(req: PostSummaryRequest) -> PostSummaryResponse:
+    return summarize_post(req)
 
 
 @router.post("/ai/factor-generations", response_model=FactorGenerationResponse)
