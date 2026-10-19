@@ -30,6 +30,8 @@ def _payload(key=None):
 
 def _provider_output(code):
     return __import__("json").dumps({
+        "outcome": "factor",
+        "reason": "",
         "factor_name": "volume_momentum",
         "factor_code": code,
         "description": "20 日动量乘以相对成交量。",
@@ -37,6 +39,8 @@ def _provider_output(code):
         "used_library_methods": [],
         "assumptions": [],
         "warnings": ["这是研究草稿，需经回测验证。"],
+        "minimum_history": "至少21个收盘价",
+        "missing_value_handling": "窗口内数据不足时保持空值",
     })
 
 
