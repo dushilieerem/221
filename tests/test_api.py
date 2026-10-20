@@ -284,8 +284,56 @@ def test_daily_bars_returns_filtered_ohlc(market_data_dir):
     assert body["name"] == "股票000"
     assert len(body["bars"]) == 3
     assert body["date_range"] == {"start": "2022-01-05", "end": "2022-01-07"}
-    assert set(body["bars"][0]) == {"date", "open", "high", "low", "close"}
+    assert set(body["bars"][0]) == {"date", "open", "high", "low", "close", "is_show"}
+    assert all(bar["is_show"] is True for bar in body["bars"])
     assert body["bars"][0]["open"] == pytest.approx(body["bars"][0]["close"] - 1.0)
+
+
+def test_daily_bars_is_show_only_uses_volume(market_data_dir):
+    display = pd.read_parquet(market_data_dir / "display" / "unadjusted_price.parquet")
+    dates = display.index
+    symbols = [f"S{i:03d}" for i in range(12)]
+
+    volume = pd.DataFrame(1_000_000.0, index=dates, columns=symbols)
+    volume.loc[dates[1], "S000"] = 0.0
+    volume.loc[dates[2], "S000"] = np.nan
+    volume.loc[dates[3], "S000"] = 1_234_567.0
+    volume.index.name = "datetime"
+    volume.reset_index().to_parquet(market_data_dir / "volume.parquet", index=False)
+
+    # is_show 只看成交量：即使状态为停牌/终止上市，只要有成交仍应为 True。
+    up_and_down = pd.DataFrame("非涨跌停", index=dates, columns=symbols)
+    up_and_down.loc[dates[3], "S000"] = "停牌"
+    up_and_down.index.name = "datetime"
+    up_and_down.reset_index().to_parquet(
+        market_data_dir / "up_and_down_status.parquet", index=False
+    )
+
+    listed = pd.DataFrame("在市", index=dates, columns=symbols)
+    listed.loc[dates[3], "S000"] = "终止上市"
+    listed.index.name = "datetime"
+    listed.reset_index().to_parquet(
+        market_data_dir / "listed_status.parquet", index=False
+    )
+
+    response = client.get(
+        "/api/market-data/daily/S000",
+        params={
+            "start": dates[0].date().isoformat(),
+            "end": dates[6].date().isoformat(),
+        },
+    )
+
+    assert response.status_code == 200
+    assert [bar["is_show"] for bar in response.json()["bars"]] == [
+        True,   # 成交量 > 0
+        False,  # 成交量为 0
+        False,  # 成交量缺失
+        True,   # 状态为停牌/终止上市，但成交量 > 0
+        True,
+        True,
+        True,
+    ]
 
 
 def test_market_data_symbols_returns_sorted_stock_codes(market_data_dir):
@@ -365,6 +413,12 @@ def test_daily_bars_returns_service_unavailable_when_field_missing(market_data_d
     display = pd.read_parquet(path)
     display = display.loc[:, display.columns.get_level_values(1) != "high"]
     display.to_parquet(path)
+    response = client.get("/api/market-data/daily/S000")
+    assert response.status_code == 503
+
+
+def test_daily_bars_returns_service_unavailable_when_volume_missing(market_data_dir):
+    (market_data_dir / "volume.parquet").unlink()
     response = client.get("/api/market-data/daily/S000")
     assert response.status_code == 503
 

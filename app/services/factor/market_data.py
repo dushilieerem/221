@@ -26,6 +26,8 @@ class MarketBar:
     high: float
     low: float
     close: float
+    #: 当日成交量大于 0 时为 True；成交量为 0 或缺失时为 False。
+    is_show: bool
 
 
 @dataclass(frozen=True)
@@ -69,7 +71,13 @@ class MarketIndexConstituents:
 _DATA_ENGINES: dict[Path, DataEngine] = {}
 _DISPLAY_DATA_ENGINES: dict[Path, DataEngine] = {}
 _STOCK_NAMES: dict[Path, dict[str, str]] = {}
+#: 单个标的的成交量按 (数据目录, 代码) 缓存。is_show 只判断当日是否有成交，
+#: 每次日线请求都重读行情宽表会带来数秒延迟；release 切换时由
+#: :func:`reset_market_data_caches` 清空。
+_VOLUME_SERIES: dict[tuple[Path, str], pd.Series] = {}
+_VOLUME_CACHE_LIMIT = 128
 _OHLC_FIELDS = ("open", "high", "low", "close")
+_VOLUME_FIELD = "volume"
 _INDEXES = {
     "CSI300": MarketIndex(code="000300.SH", name="沪深300"),
     "CSI500": MarketIndex(code="000905.SH", name="中证500"),
@@ -176,6 +184,53 @@ def reset_market_data_caches() -> None:
     _DATA_ENGINES.clear()
     _DISPLAY_DATA_ENGINES.clear()
     _STOCK_NAMES.clear()
+    _VOLUME_SERIES.clear()
+
+
+def _shared_data_engine() -> DataEngine:
+    """优先复用应用装配的共享 DataEngine，独立调用时回退到按目录构建的实例。"""
+
+    engine = DataEngine.get_instance()
+    if engine.provider is not None:
+        return engine
+    return _get_data_engine()
+
+
+def _get_symbol_volume(panel_symbol: str) -> pd.Series:
+    """读取一个标的的完整成交量序列，并按数据目录缓存。"""
+
+    data_dir = Path(_resolve_data_dir(None)).resolve()
+    key = (data_dir, panel_symbol)
+    cached = _VOLUME_SERIES.get(key)
+    if cached is not None:
+        return cached
+    panels = _shared_data_engine().get_task_panels(
+        fields=[_VOLUME_FIELD],
+        symbols=[panel_symbol],
+    )
+    volume = panels[_VOLUME_FIELD][panel_symbol].rename(_VOLUME_FIELD)
+    if len(_VOLUME_SERIES) >= _VOLUME_CACHE_LIMIT:
+        _VOLUME_SERIES.pop(next(iter(_VOLUME_SERIES)))
+    _VOLUME_SERIES[key] = volume
+    return volume
+
+
+def _daily_visibility(panel_symbol: str, index: pd.Index) -> pd.Series:
+    """按当日成交量判定该日线数据点是否可展示。
+
+    未复权行情在停牌和退市后会继续按前值填充，不能凭价格是否存在判断。
+    ``is_show`` 只表示当日是否有成交：成交量大于 0 为 ``True``，为 0 或
+    缺失为 ``False``。成交量来自同一 release 的研究行情面板。
+    """
+
+    try:
+        volume = _get_symbol_volume(panel_symbol).reindex(index=index)
+    except (FileNotFoundError, NotADirectoryError, KeyError) as exc:
+        raise MarketDataError(f"成交量数据不可用: {exc}") from exc
+    except Exception as exc:  # noqa: BLE001 - 成交量读取失败不可伪造 is_show
+        raise MarketDataError(f"成交量数据读取失败: {exc}") from exc
+
+    return volume.gt(0).fillna(False).astype(bool).rename("is_show")
 
 
 def get_daily_bars(
@@ -208,6 +263,7 @@ def get_daily_bars(
     if bars.empty:
         raise MarketDataNotFoundError(f"未找到 {symbol} 的完整日线数据")
 
+    visibility = _daily_visibility(panel_symbol, bars.index)
     points = [
         MarketBar(
             date=pd.Timestamp(index).date().isoformat(),
@@ -215,6 +271,7 @@ def get_daily_bars(
             high=float(row["high"]),
             low=float(row["low"]),
             close=float(row["close"]),
+            is_show=bool(visibility.loc[index]),
         )
         for index, row in bars.iterrows()
     ]

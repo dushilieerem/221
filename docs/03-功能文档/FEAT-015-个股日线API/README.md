@@ -52,7 +52,7 @@ Web 应用需要以指定股票代码渲染日线图，但当前 HTTP 服务仅�
 
 ### 实现设计
 
-新增 `researchengine.api.market_data`：进程内按当前数据目录复用 `DataEngine`。股票列表调用 `get_symbols()`，它从已发布面板 schema 获取可查询代码、从 `stock_info.parquet` 获取名称后去重排序；日线查询读取同一证券主数据的名称与 `open`、`high`、`low`、`close`，再以请求代码切出单标的序列，内连接、日期过滤、丢弃缺失值并序列化。路由和 Pydantic 响应模型保持薄层。
+新增 `researchengine.api.market_data`：进程内按当前数据目录复用 `DataEngine`。股票列表调用 `get_symbols()`，它从已发布面板 schema 获取可查询代码、从 `stock_info.parquet` 获取名称后去重排序；日线查询读取同一证券主数据的名称与 `open`、`high`、`low`、`close`，再以请求代码切出单标的序列，内连接、日期过滤、丢弃缺失值并序列化。新增的 `is_show` 读取同一 release 研究行情面板的 `volume`，成交量大于 0 为 `true`，为 0 或缺失为 `false`，只表示当日是否有成交。路由和 Pydantic 响应模型保持薄层。
 
 ```text
 Web → GET /api/market-data/symbols

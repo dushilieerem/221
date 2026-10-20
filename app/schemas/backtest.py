@@ -628,6 +628,8 @@ class DailyBar(BaseModel):
     high: float
     low: float
     close: float
+    #: 当日成交量大于 0 时为 True；成交量为 0 或缺失时为 False。
+    is_show: bool
 
 
 class DailyBarsResponse(BaseModel):
