@@ -53,10 +53,11 @@ class Scheduler:
 
 
 class OrderService:
-    def __init__(self) -> None:
+    def __init__(self, prefix: str = "EVT") -> None:
         self._orders: list[EventOrder] = []
         self._sequence = 0
         self._current_dt: datetime | None = None
+        self._prefix = prefix or "EVT"
 
     @property
     def pending(self) -> list[EventOrder]:
@@ -76,7 +77,7 @@ class OrderService:
 
     def _submit(self, order: EventOrder) -> EventOrder:
         self._sequence += 1
-        order.order_id = f"EVT-{self._sequence:06d}"
+        order.order_id = f"{self._prefix}-{self._sequence:06d}"
         order.submitted_at = self._current_dt
         self._orders.append(order)
         return order

@@ -73,6 +73,26 @@ http://<host>:<server.port>/api
 | GET | `/api/factor-backtest-batches/{batch_id}/factors` | 查询批次中的因子运行 | [FEAT-027 批量回测](../../03-功能文档/FEAT-027-因子批量回测/README.md) |
 | GET | `/api/factor-backtest-batches/factors/{library_name}/{factor_name}/history` | 查询单因子历史 | [FEAT-027 批量回测](../../03-功能文档/FEAT-027-因子批量回测/README.md) |
 
+### 模拟盘结算（内部）
+
+| 方法 | 路径 | 功能 | 详细契约 |
+|---|---|---|---|
+| GET | `/api/internal/paper-trading/status?date=YYYY-MM-DD` | 判断 D 日数据是否就绪、返回 signal_date/latest_ready_trading_day | 本页 |
+| GET | `/api/internal/paper-trading/trading-days?start=&end=` | 返回区间内已发布的交易日 | 本页 |
+| POST | `/api/internal/paper-trading/settle` | 单日同步结算：D-1 信号 + D 日 VWAP 成交 + 未复权估值 | 本页 |
+
+- 请求字段：`settlement_date`、`engine_mode`、`strategy_code`、
+  `expected_code_hash`、`expected_data_release_id`、`universe`、`benchmark`、
+  `account.cash/positions`、`strategy_state`、`strategy_state_code_hash`、
+  `expected_state_hash`、`execution`。
+- 响应字段：`status/settlement_date/signal_date/next_trading_day/
+  data_release_id/data_release_signature/code_hash/state_hash/orders/fills/
+  next_account/strategy_state/fees/warnings/assumptions`。
+- 错误：409 `DATA_NOT_READY`/`NOT_A_TRADING_DAY`/`CODE_HASH_MISMATCH`/
+  `STRATEGY_STATE_VERSION_MISMATCH`/`STRATEGY_STATE_HASH_MISMATCH`/
+  `DATA_RELEASE_MISMATCH`；422 请求或组合非法；500 内部错误。
+- 该接口只依赖内网信任边界，未实现服务间认证；不得暴露公网。
+
 ### AI 辅助 API
 
 | 方法 | 路径 | 功能 | 详细契约 |

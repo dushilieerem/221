@@ -7,9 +7,11 @@ import re
 from app.models.event import EventBacktestConfig, _Ledger
 from datetime import datetime
 
+import numpy as np
 import pandas as pd
 
 from app.models.event import EventBacktestResult, EventFill, EventOrder, PositionSnapshot
+from app.models.paper_trading import PaperPositionState, SettlementDayResult
 from app.models.market_data import is_delisted_status
 from app.models.data import DataView
 from app.services.strategy.event.strategy import OrderService, StrategyContext
@@ -35,6 +37,11 @@ class EventBacktestEngine:
         self.symbols = list(self.panels["close"].columns)
         if self.dates.empty:
             raise ValueError("事件回测没有可用交易日")
+        # 模拟盘单日结算模式：成交价改读 VWAP，估值改读未复权 close。
+        # 默认关闭，现有区间回测行为不变。
+        self._settlement_mode = False
+        self._settlement_vwap: pd.DataFrame | None = None
+        self._settlement_mark: pd.DataFrame | None = None
         # 状态面板真正覆盖到的标的；整列为空说明只是股票池列投影的产物。
         _listed = self.panels.get("listed_status")
         self._status_covered = (
@@ -73,13 +80,9 @@ class EventBacktestEngine:
             batch = list(orders.pending)
             orders.pending.clear()
             all_orders.extend(batch)
-            for order in self._sort_orders(batch, ledger, timestamp):
-                fill = self._execute(order, ledger, timestamp)
-                if fill is None:
-                    events.append({"type": "ORDER_REJECTED", "timestamp": context.current_dt, "order_id": order.order_id, "reason_code": order.reason_code})
-                else:
-                    fills.append(fill)
-                    events.append({"type": "FILL", "timestamp": context.current_dt, "order_id": order.order_id})
+            day_fills, day_events = self._execute_pending(batch, ledger, timestamp)
+            fills.extend(day_fills)
+            events.extend(day_events)
 
             # 日终强平：放在策略回调与撮合之后，策略当日开盘的卖单先成交，
             # 这里只处置残余持仓；放在权益计算之前，使当日净值即反映退出。
@@ -120,17 +123,224 @@ class EventBacktestEngine:
             },
         )
 
+    def _execute_pending(
+        self,
+        orders: list[EventOrder],
+        ledger: _Ledger,
+        date: pd.Timestamp,
+    ) -> tuple[list[EventFill], list[dict[str, object]]]:
+        """按卖先买顺序执行一批订单；回测与单日结算共用。"""
+
+        fills: list[EventFill] = []
+        events: list[dict[str, object]] = []
+        for order in self._sort_orders(orders, ledger, date):
+            fill = self._execute(order, ledger, date)
+            if fill is None:
+                events.append({
+                    "type": "ORDER_REJECTED",
+                    "timestamp": date.to_pydatetime(),
+                    "order_id": order.order_id,
+                    "reason_code": order.reason_code,
+                })
+            else:
+                fills.append(fill)
+                events.append({
+                    "type": "FILL",
+                    "timestamp": date.to_pydatetime(),
+                    "order_id": order.order_id,
+                })
+        return fills, events
+
+    def settle_day(
+        self,
+        strategy,
+        *,
+        settlement_date: pd.Timestamp,
+        ledger: _Ledger,
+        signal_date: pd.Timestamp | None = None,
+        persisted_state: dict | None = None,
+        mark_prices: pd.DataFrame | None = None,
+        order_prefix: str = "PAPER",
+    ) -> SettlementDayResult:
+        """结算一个交易日：D-1 可见数据出信号，D 日 VWAP 全量成交。
+
+        与区间回测的差异：
+        - 不调用 ``begin_session``，可卖数量直接来自账户输入；
+        - 不做退市强平，持仓只能由策略主动卖出；
+        - 成交价统一取 ``vwap`` 面板，缺失时记 ``NO_VWAP``；
+        - 权益用未复权 close 估值。
+        """
+
+        timestamp = pd.Timestamp(settlement_date).normalize()
+        if timestamp not in self.dates:
+            raise ValueError(f"结算日 {timestamp.date()} 不在行情面板中")
+        loc = int(self.dates.get_loc(timestamp))
+        if signal_date is None:
+            if loc <= 0:
+                raise ValueError("缺少前一交易日，无法生成信号")
+            signal_timestamp = pd.Timestamp(self.dates[loc - 1])
+        else:
+            signal_timestamp = pd.Timestamp(signal_date).normalize()
+        vwap = self.panels.get("vwap")
+        if vwap is None:
+            raise ValueError("单日结算缺少 vwap 面板")
+
+        from app.services.paper_trading.state_codec import export_state, merge_state
+
+        data = DataView(self.panels)
+        orders = OrderService(prefix=order_prefix)
+        context = StrategyContext(data, orders, PortfolioView(ledger))
+        # 与区间回测一致：initialize 时尚未开放任何行情。
+        strategy.initialize(context)
+        merge_state(context.state, persisted_state)
+
+        data.set_as_of(signal_timestamp)
+        context.current_dt = timestamp.to_pydatetime()
+        orders.set_current_dt(context.current_dt)
+        for callback in context.schedule.due(timestamp, self.dates):
+            callback(context)
+
+        batch = list(orders.pending)
+        orders.pending.clear()
+
+        self._settlement_mode = True
+        self._settlement_vwap = vwap
+        self._settlement_mark = mark_prices
+        try:
+            fills, _events = self._execute_pending(batch, ledger, timestamp)
+            positions, positions_value, total_equity, warnings = self._settlement_snapshot(
+                ledger, timestamp, mark_prices
+            )
+        finally:
+            self._settlement_mode = False
+            self._settlement_vwap = None
+            self._settlement_mark = None
+
+        for order in batch:
+            if order.reason_code == "NO_VWAP":
+                warnings.append(f"NO_VWAP:{order.symbol}")
+        state_payload, state_hash = export_state(context.state)
+        commission = sum(fill.commission for fill in fills)
+        stamp_tax = sum(fill.stamp_tax for fill in fills)
+        return SettlementDayResult(
+            settlement_date=timestamp.date(),
+            signal_date=signal_timestamp.date(),
+            orders=batch,
+            fills=fills,
+            next_cash=float(ledger.cash),
+            next_positions=positions,
+            commission=float(commission),
+            stamp_tax=float(stamp_tax),
+            strategy_state=state_payload,
+            state_hash=state_hash,
+            positions_value=float(positions_value),
+            total_equity=float(total_equity),
+            warnings=sorted(set(warnings)),
+            assumptions={
+                "frequency": "1d",
+                "execution": "daily_vwap_full_fill",
+                "signal_visibility": "through_previous_trading_day",
+                "fill_price_source": "daily_amount_volume_vwap",
+                "mark_price_source": "unadjusted_close",
+                "lot_size": str(self.config.lot_size),
+                "slippage": "not_modeled",
+                "delisted_handling": "no_forced_liquidation",
+                "company_actions": "not_modeled",
+            },
+        )
+
+    def execute_orders(
+        self,
+        orders: list[EventOrder],
+        *,
+        settlement_date: pd.Timestamp,
+        ledger: _Ledger,
+        vwap: pd.DataFrame,
+        mark_prices: pd.DataFrame | None = None,
+    ) -> tuple[list[EventFill], list[PaperPositionState], float, float, list[str]]:
+        """按结算模式执行一批已生成的订单（向量化策略复用）。"""
+
+        timestamp = pd.Timestamp(settlement_date).normalize()
+        self._settlement_mode = True
+        self._settlement_vwap = vwap
+        self._settlement_mark = mark_prices
+        try:
+            fills, _events = self._execute_pending(orders, ledger, timestamp)
+            positions, positions_value, total_equity, warnings = self._settlement_snapshot(
+                ledger, timestamp, mark_prices
+            )
+        finally:
+            self._settlement_mode = False
+            self._settlement_vwap = None
+            self._settlement_mark = None
+        return fills, positions, positions_value, total_equity, warnings
+
+    def _settlement_snapshot(
+        self,
+        ledger: _Ledger,
+        date: pd.Timestamp,
+        mark_prices: pd.DataFrame | None,
+    ) -> tuple[list[PaperPositionState], float, float, list[str]]:
+        positions: list[PaperPositionState] = []
+        warnings: list[str] = []
+        positions_value = 0.0
+        for item in ledger.export_positions():
+            symbol = str(item["symbol"])
+            quantity = int(item["quantity"])
+            mark, used_fallback = self._mark_price(symbol, date)
+            if mark is None:
+                mark = float(item["average_cost"])
+                warnings.append(f"MARK_PRICE_FALLBACK:{symbol}")
+            elif used_fallback:
+                warnings.append(f"MARK_PRICE_FALLBACK:{symbol}")
+            positions_value += quantity * mark
+            positions.append(PaperPositionState(
+                symbol=symbol,
+                quantity=quantity,
+                available_quantity=int(item["available_quantity"]),
+                average_cost=float(item["average_cost"]),
+                mark_price=float(mark),
+                market_value=float(quantity * mark),
+            ))
+        return positions, positions_value, float(ledger.cash + positions_value), warnings
+
+    def _mark_price(self, symbol: str, date: pd.Timestamp) -> tuple[float | None, bool]:
+        """D 日未复权 close；缺失时回退到 ``<=D`` 最后有效值。"""
+
+        frame = self._settlement_mark
+        if frame is not None and symbol in frame.columns:
+            if date in frame.index:
+                value = frame.at[date, symbol]
+                if pd.notna(value) and np.isfinite(value) and value > 0:
+                    return float(value), False
+            earlier = frame[symbol].loc[:date].dropna()
+            for candidate in reversed(earlier.tolist()):
+                if np.isfinite(candidate) and candidate > 0:
+                    return float(candidate), True
+        # 未复权文件缺失时退回研究 close，只作为防御性回退并记录警告。
+        close = self.panels.get("close")
+        if close is not None and symbol in close.columns:
+            if date in close.index:
+                value = close.at[date, symbol]
+                if pd.notna(value) and np.isfinite(value) and value > 0:
+                    return float(value), True
+        return None, True
+
     def _sort_orders(self, orders: list[EventOrder], ledger: _Ledger, date: pd.Timestamp) -> list[EventOrder]:
         return sorted(orders, key=lambda order: 0 if self._resolved_quantity(order, ledger, date) < 0 else 1)
 
     def _execute(self, order: EventOrder, ledger: _Ledger, date: pd.Timestamp) -> EventFill | None:
+        price = self._price(order.symbol, date)
+        if self._settlement_mode and price is None:
+            # 模拟盘不提供 close/典型价回退；没有有效 VWAP 直接拒单。
+            order.status, order.reason_code = "rejected", "NO_VWAP"
+            return None
         quantity = self._resolved_quantity(order, ledger, date)
         if quantity == 0:
             order.status, order.reason_code = "rejected", "NO_POSITION"
             return None
         side = "buy" if quantity > 0 else "sell"
         quantity = abs(quantity)
-        price = self._price(order.symbol, date)
         if price is None:
             order.status, order.reason_code = "rejected", "NO_PRICE"
             return None
@@ -150,6 +360,9 @@ class EventBacktestEngine:
         上（审计可见），并参与成交额、佣金与印花税的计算。费率为 0 时原样返回。
         """
 
+        if self._settlement_mode:
+            # FEAT-032 首期按 VWAP 全量成交，不模拟滑点。
+            return price
         rate = self.config.slippage_rate
         if not rate:
             return price
@@ -242,6 +455,16 @@ class EventBacktestEngine:
 
         if symbol not in self.symbols:
             return None
+        if self._settlement_mode:
+            frame = self._settlement_vwap
+            if frame is None or symbol not in frame.columns or date not in frame.index:
+                return None
+            value = frame.at[date, symbol]
+            return (
+                float(value)
+                if pd.notna(value) and np.isfinite(value) and value > 0
+                else None
+            )
         value = self.panels[self._fill_field()].at[date, symbol]
         return float(value) if pd.notna(value) and value > 0 else None
 
