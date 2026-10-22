@@ -4,9 +4,19 @@ from __future__ import annotations
 
 from fastapi import Request
 
+from app.services.data.engine import DataEngine
 from app.services.factor_backtest_batch.coordinator import FactorBacktestBatchCoordinator
 from app.services.factor_backtest_batch.task_registry import FactorBacktestBatchTaskRegistry
 from app.services.experiment.manager import ExperimentManager
+
+
+def get_data_engine(request: Request) -> DataEngine:
+    """返回 lifespan 装配的行情引擎；模拟盘结算不经过回测队列。"""
+
+    engine = getattr(request.app.state, "data_engine", None)
+    if not isinstance(engine, DataEngine):
+        raise RuntimeError("DataEngine 尚未由 FastAPI lifespan 初始化")
+    return engine
 
 
 def get_experiment_manager(request: Request) -> ExperimentManager:
@@ -38,6 +48,7 @@ def get_factor_backtest_batch_task_registry(
 
 
 __all__ = [
+    "get_data_engine",
     "get_experiment_manager",
     "get_factor_backtest_batch_coordinator",
     "get_factor_backtest_batch_task_registry",

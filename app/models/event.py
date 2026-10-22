@@ -86,6 +86,58 @@ class _Ledger:
     sellable: dict[str, int] = field(default_factory=dict)
     bought_today: dict[str, int] = field(default_factory=dict)
 
+    @classmethod
+    def from_account(cls, cash: float, positions: list[dict]) -> "_Ledger":
+        """用模拟盘账户的持久化持仓恢复账本。
+
+        ``available_quantity`` 是 D 日开盘时可卖数量，直接作为 ``sellable``；
+        ``bought_today`` 为空，避免结算开始时把上一交易日的买入重复解禁。
+        """
+
+        quantities: dict[str, int] = {}
+        average_cost: dict[str, float] = {}
+        sellable: dict[str, int] = {}
+        for item in positions:
+            symbol = str(item.get("symbol") or "").strip()
+            quantity = int(item.get("quantity") or 0)
+            if not symbol or quantity <= 0:
+                continue
+            quantities[symbol] = quantity
+            average_cost[symbol] = float(item.get("average_cost") or 0.0)
+            available = int(item.get("available_quantity") or 0)
+            sellable[symbol] = max(0, min(quantity, available))
+        return cls(
+            cash=float(cash),
+            positions=quantities,
+            average_cost=average_cost,
+            sellable=sellable,
+        )
+
+    def export_positions(self) -> list[dict[str, float | int | str]]:
+        """导出下一结算日的持仓状态。
+
+        当日买入在 T+1 后才能卖出，因此下一日可卖数量是
+        ``sellable + bought_today``；不要在这里调用 ``begin_session``。
+        """
+
+        result: list[dict[str, float | int | str]] = []
+        for symbol in sorted(self.positions):
+            quantity = int(self.positions.get(symbol, 0))
+            if quantity <= 0:
+                continue
+            available = int(self.sellable.get(symbol, 0)) + int(
+                self.bought_today.get(symbol, 0)
+            )
+            result.append(
+                {
+                    "symbol": symbol,
+                    "quantity": quantity,
+                    "available_quantity": max(0, min(quantity, available)),
+                    "average_cost": float(self.average_cost.get(symbol, 0.0)),
+                }
+            )
+        return result
+
     def begin_session(self) -> None:
         for symbol, quantity in self.bought_today.items():
             self.sellable[symbol] = self.sellable.get(symbol, 0) + quantity
