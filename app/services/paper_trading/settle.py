@@ -18,7 +18,12 @@ from app.schemas.paper_trading import (
 )
 from app.services.factor.backtest_support import _resolve_strategy_symbols
 from app.services.factor.market_data import _market_symbol, _panel_symbol
-from app.services.paper_trading.errors import conflict, data_not_ready, invalid
+from app.services.paper_trading.errors import (
+    PaperTradingError,
+    conflict,
+    data_not_ready,
+    invalid,
+)
 from app.services.paper_trading.price_view import (
     build_vwap_panel,
     load_unadjusted_close,
@@ -62,6 +67,24 @@ def _load_strategy_class(strategy_code: str, engine_mode: str):
             f"策略代码必须且只能定义一个包含 {method} 方法的类",
         )
     return classes[0]
+
+
+def _run_user_strategy(call, /, *args, **kwargs):
+    """执行用户策略代码，把其运行时异常映射为可阻塞的 422。
+
+    策略源码里的 AttributeError/TypeError 等属于策略自身缺陷，调用方重试
+    不会自愈；若继续以 500 返回，SVQuant 会按可重试错误反复轮询。
+    """
+
+    try:
+        return call(*args, **kwargs)
+    except PaperTradingError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - 用户代码可抛任意异常
+        raise invalid(
+            "STRATEGY_CODE_INVALID",
+            f"策略代码执行失败: {type(exc).__name__}: {exc}",
+        ) from exc
 
 
 def _history_start(
@@ -303,7 +326,7 @@ def settle_paper_day(req: PaperSettlementRequest, data_engine) -> PaperSettlemen
         warnings.append("RELEASE_SIGNATURE_CHANGED")
 
     if req.engine_mode == "event":
-        strategy = strategy_class()
+        strategy = _run_user_strategy(strategy_class)
         raw_symbols, mapping, _declared = _resolve_strategy_symbols(
             data_engine.provider, req.universe, strategy, as_of=signal_date
         )
@@ -347,7 +370,8 @@ def settle_paper_day(req: PaperSettlementRequest, data_engine) -> PaperSettlemen
                 filter_st=req.execution.filter_st,
             ),
         )
-        result = engine.settle_day(
+        result = _run_user_strategy(
+            engine.settle_day,
             strategy,
             settlement_date=settlement_date,
             ledger=ledger,
@@ -393,7 +417,8 @@ def settle_paper_day(req: PaperSettlementRequest, data_engine) -> PaperSettlemen
         signal_date=signal_date,
         held_symbols=held_symbols,
     )
-    weights = generate_target_weights(
+    weights = _run_user_strategy(
+        generate_target_weights,
         strategy_class,
         data_engine,
         universe=req.universe,

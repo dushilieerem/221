@@ -207,6 +207,26 @@ def test_event_settlement_round_trips_state_and_sells_after_t_plus_one(paper_dat
     assert second.next_account.positions == []
 
 
+def test_user_strategy_runtime_error_maps_to_blocking_422(paper_data_dir):
+    """策略运行期异常必须转成 422 STRATEGY_CODE_INVALID，不能落成 500 让调用方重试。"""
+
+    code = """
+import pandas as pd
+
+class Broken:
+    def __init__(self, close):
+        self.close = close
+
+    def generate_signals(self):
+        return -self.total_mv
+"""
+    with pytest.raises(PaperTradingError) as excinfo:
+        settle_paper_day(_request(strategy_code=code), paper_data_dir)
+    assert excinfo.value.code == "STRATEGY_CODE_INVALID"
+    assert excinfo.value.http_status == 422
+    assert "AttributeError" in excinfo.value.message
+
+
 def test_no_vwap_rejects_sell_and_keeps_position(paper_data_dir):
     code = """
 import pandas as pd
