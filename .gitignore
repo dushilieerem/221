@@ -20,6 +20,10 @@ __pycache__/
 dist/
 build/
 
-# SQLite WAL 模式运行时附属文件（如 factor_backtest.db-wal/-shm）。
+# SQLite 运行时数据库（服务启动时按 schema 自动创建）及 WAL 附属文件。
+app/assets/factors/factor_backtest.db
 *.db-wal
 *.db-shm
+
+# 本机 AI 协作说明，与 SVQuant 仓库保持一致：只保留在工作区。
+CLAUDE.md
