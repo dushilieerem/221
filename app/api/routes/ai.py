@@ -5,8 +5,13 @@ from fastapi import APIRouter
 from app.api.ai_factor import generate_factor
 from app.api.ai_interpretation import interpret_backtest
 from app.api.ai_strategy import generate_strategy
+from app.api.ai_strategy_transcription import transcribe_strategy
 from app.api.ai_post_summary import summarize_post
 from app.schemas.post_summary import PostSummaryRequest, PostSummaryResponse
+from app.schemas.strategy_transcription import (
+    StrategyTranscriptionRequest,
+    StrategyTranscriptionResponse,
+)
 from app.schemas.backtest import (
     BacktestInterpretationRequest,
     BacktestInterpretationResponse,
@@ -33,6 +38,13 @@ def generate_factor_draft(req: FactorGenerationRequest) -> FactorGenerationRespo
 @router.post("/ai/strategy-generations", response_model=StrategyGenerationResponse)
 def generate_strategy_draft(req: StrategyGenerationRequest) -> StrategyGenerationResponse:
     return generate_strategy(req)
+
+
+@router.post("/ai/strategy-transcriptions", response_model=StrategyTranscriptionResponse)
+def transcribe_joinquant_strategy(
+    req: StrategyTranscriptionRequest,
+) -> StrategyTranscriptionResponse:
+    return transcribe_strategy(req)
 
 
 @router.post("/ai/backtest-interpretations", response_model=BacktestInterpretationResponse)
