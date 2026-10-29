@@ -92,4 +92,13 @@ pytest tests/test_ai_strategy_transcription.py -q
 - 事件 AST 白名单偏保守：`while`、`try`、`from ... import` 等会被拒绝。
 - 向量化只支持自由目标权重策略，不支持结构化 `FactorPortfolioStrategy` 生成。
 - 幂等记录仅在当前进程内，未接鉴权和持久化。
-- 未接入 SVQuant 前端；入口与交互以产品需求包中的原型为准。
+- 转写档案存在 SVQuant 本机（按登录用户隔离，最多 30 条），RE 不保存历史；换设备/清缓存后档案不可恢复。
+
+## 8. SVQuant 交互
+
+- 页面：`frontend/src/pages/StrategyConvertPage.tsx`，入口「策略 → 代码转换」。
+- 布局：左侧「档案」记录每次转写，右侧「对话」展示用户代码气泡、助手结论/差异/代码气泡。
+- 输入框上方 4 个快捷示例（每日定投/RSI 轮动/动量 Top10/分钟+ROE）；支持上传 `.py`、回测配置、仅报告。
+- 每次成功响应（`ready` / `needs_input` / `report_only` / `rejected`）都会写入本机档案；点击档案可回看当时的代码与报告。
+- 「对话」只是交互壳：一次发送对应一次完整 `POST /api/ai/strategy-transcriptions`，不把历史对话拼进模型上下文；接受降级后会带 `accepted_degradations` 重新请求，产生新的 `transcription_id`。
+- RE 侧无需新增历史接口，仍保持无状态。
