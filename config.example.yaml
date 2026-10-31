@@ -4,6 +4,11 @@
 server:
   host: 0.0.0.0
   port: 9527
+  # 服务间认证：SVQuant backend/.env 的 RE_SERVICE_TOKEN 必须与这里一致。
+  # 生产必须设置；留空仅用于本地开发。
+  service_token: ""
+  # 浏览器直连 RE 的跨域白名单；默认空 = 不允许跨域（推荐经 SVQuant BFF）。
+  cors_origins: []
 
 runtime:
   max_workers: 2

@@ -6,7 +6,8 @@ import asyncio
 from contextlib import asynccontextmanager, suppress
 import logging
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import router
@@ -126,11 +127,27 @@ def create_app(*, testing: bool = False) -> FastAPI:
     application.state.factor_backtest_batch_task_registry = FactorBacktestBatchTaskRegistry()
     application.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_origins=list(settings.cors_origins),
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Content-Type", "Authorization", "X-Service-Token"],
         allow_credentials=False,
     )
+
+    @application.middleware("http")
+    async def service_auth(request: Request, call_next):
+        token = settings.service_token
+        path = request.url.path
+        if token and path.startswith("/api/") and path != "/api/health":
+            import hmac
+
+            supplied = request.headers.get("x-service-token") or ""
+            if not supplied:
+                auth = request.headers.get("authorization") or ""
+                if auth.lower().startswith("bearer "):
+                    supplied = auth.split(None, 1)[1].strip()
+            if not hmac.compare_digest(str(supplied), str(token)):
+                return JSONResponse(status_code=401, content={"error": "service token required"})
+        return await call_next(request)
     application.include_router(router)
     return application
 
