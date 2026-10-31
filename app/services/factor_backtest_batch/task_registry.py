@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import threading
 import time
 import uuid
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
@@ -68,10 +70,15 @@ class FactorBacktestBatchTaskRegistry:
         self,
         *,
         retention_seconds: float = RETENTION_SECONDS,
+        snapshot_db: str | Path | None = None,
+        snapshot_retention_days: int = 7,
     ) -> None:
         if retention_seconds <= 0:
             raise ValueError("retention_seconds 必须大于 0")
         self.retention_seconds = float(retention_seconds)
+        self.snapshot_db = Path(snapshot_db) if snapshot_db else None
+        self.snapshot_retention_days = max(1, int(snapshot_retention_days))
+        self._snapshot_ready = False
         self._executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="svquant-factor-backtest-coordinator",
@@ -99,6 +106,57 @@ class FactorBacktestBatchTaskRegistry:
             separators=(",", ":"),
         ).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
+
+    def _ensure_snapshot_db(self) -> sqlite3.Connection | None:
+        if self.snapshot_db is None:
+            return None
+        self.snapshot_db.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(self.snapshot_db, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS async_task_snapshots (
+              task_id TEXT PRIMARY KEY,
+              payload TEXT NOT NULL,
+              finished_at REAL NOT NULL
+            )
+            """
+        )
+        cutoff = time.time() - self.snapshot_retention_days * 86400
+        conn.execute("DELETE FROM async_task_snapshots WHERE finished_at < ?", (cutoff,))
+        conn.commit()
+        return conn
+
+    def _persist_snapshot(self, snapshot: dict[str, Any]) -> None:
+        conn = None
+        try:
+            conn = self._ensure_snapshot_db()
+            if conn is None:
+                return
+            conn.execute(
+                "INSERT OR REPLACE INTO async_task_snapshots (task_id, payload, finished_at) VALUES (?,?,?)",
+                (snapshot["task_id"], json.dumps(snapshot, ensure_ascii=False), float(snapshot.get("finished_at") or time.time())),
+            )
+            conn.commit()
+        except Exception:
+            return
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def _load_snapshot(self, task_id: str) -> dict[str, Any] | None:
+        conn = None
+        try:
+            conn = self._ensure_snapshot_db()
+            if conn is None:
+                return None
+            row = conn.execute("SELECT payload FROM async_task_snapshots WHERE task_id = ?", (task_id,)).fetchone()
+            return json.loads(row["payload"]) if row else None
+        except Exception:
+            return None
+        finally:
+            if conn is not None:
+                conn.close()
 
     def _prune_locked(self, now: float | None = None) -> None:
         cutoff = (time.time() if now is None else now) - self.retention_seconds
@@ -220,6 +278,22 @@ class FactorBacktestBatchTaskRegistry:
                         or "批量回测失败"
                     )
                 current.result = dict(result)
+        self._persist_from_task(task_id)
+
+    def _persist_from_task(self, task_id: str) -> None:
+        # 在锁外落盘，避免 SQLite 写阻塞调度线程。
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None or task.status not in {"succeeded", "failed"}:
+                return
+            snap = {
+                "task_id": task.task_id, "status": task.status,
+                "created_at": task.created_at, "started_at": task.started_at,
+                "finished_at": task.finished_at, "batch_id": task.batch_id,
+                "batch_url": task.batch_url, "error": task.error,
+                "result": dict(task.result) if task.result is not None else None,
+            }
+        self._persist_snapshot(snap)
 
     def snapshot(self, task_id: str) -> dict[str, Any] | None:
         """返回任务快照；过期或未知 task ID 返回 ``None``。"""
@@ -228,7 +302,7 @@ class FactorBacktestBatchTaskRegistry:
             self._prune_locked()
             task = self._tasks.get(task_id)
             if task is None:
-                return None
+                return self._load_snapshot(task_id)
             return {
                 "task_id": task.task_id,
                 "status": task.status,

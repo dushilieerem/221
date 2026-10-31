@@ -124,7 +124,10 @@ def create_app(*, testing: bool = False) -> FastAPI:
     application.state.testing = testing
     application.state.data_engine = data_engine
     application.state.experiment_manager = manager
-    application.state.factor_backtest_batch_task_registry = FactorBacktestBatchTaskRegistry()
+    application.state.factor_backtest_batch_task_registry = FactorBacktestBatchTaskRegistry(
+        snapshot_db=settings.factor_backtest_database,
+        snapshot_retention_days=7,
+    )
     application.add_middleware(
         CORSMiddleware,
         allow_origins=list(settings.cors_origins),

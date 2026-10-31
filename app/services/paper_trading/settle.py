@@ -48,6 +48,9 @@ from app.services.strategy.event.engine import EventBacktestEngine
 def _load_strategy_class(strategy_code: str, engine_mode: str):
     namespace: dict[str, Any] = {"__name__": "user_strategy"}
     try:
+        from app.services.security.code_guard import assert_safe_user_code
+
+        assert_safe_user_code(strategy_code, kind="策略")
         exec(compile(strategy_code, "<strategy>", "exec"), namespace)
     except Exception as exc:  # noqa: BLE001 - 策略源码由受信任调用方提供
         raise invalid(
