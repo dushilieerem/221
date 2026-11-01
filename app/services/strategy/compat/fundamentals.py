@@ -92,10 +92,19 @@ class FundamentalStore:
 
         financial = [
             field for field in needed
-            if (field.table, field.name) in FINANCIAL_MAP
-            or (field.table, field.name) in FINANCIAL_EXPRESSIONS
+            if field.name != "code"
+            and (
+                (field.table, field.name) in FINANCIAL_MAP
+                or (field.table, field.name) in FINANCIAL_EXPRESSIONS
+            )
         ]
         valuation = [field for field in needed if field.table == "valuation"]
+        # 任一表的 ``code`` 都映射到证券代码，不要求财务字段映射。
+        code_tables = {
+            field.table
+            for field in needed
+            if field.name == "code" and field.table != "valuation"
+        }
 
         if financial:
             frame = self._financial_frame(financial, as_of_key)
@@ -105,6 +114,9 @@ class FundamentalStore:
 
         if frame.empty:
             return pd.DataFrame(columns=["code", *[f.name for f in q.fields]])
+
+        for table in code_tables:
+            frame[f"{table}.code"] = frame["symbol"]
 
         if q.where is not None:
             frame = frame[evaluate(frame, q.where)]
@@ -123,7 +135,7 @@ class FundamentalStore:
 
         output = pd.DataFrame({"code": frame["symbol"]})
         for field in q.fields:
-            if field.table == "valuation" and field.name == "code":
+            if field.name == "code":
                 continue
             output[field.name] = frame[f"{field.table}.{field.name}"].values
         return output.reset_index(drop=True)
@@ -214,6 +226,14 @@ class FundamentalStore:
             if name != "code" and column in frame.columns
         }
         frame = frame.rename(columns=rename)
+        # 聚宽的 valuation.market_cap / circulating_market_cap 单位是亿元，
+        # 供应商总市值/流通市值是元；统一换算，避免选股阈值失真。
+        for name in ("market_cap", "circulating_market_cap"):
+            column = f"valuation.{name}"
+            if column in frame.columns:
+                frame[column] = pd.to_numeric(
+                    frame[column], errors="coerce"
+                ) / 1e8
         # 保留 symbol 作为合并键，同时提供 valuation.code 供条件/排序使用。
         frame["valuation.code"] = frame["symbol"]
         self._valuation_cache[cache_key] = frame

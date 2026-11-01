@@ -23,8 +23,14 @@ def normalize_time(value: str) -> str:
     """把聚宽风格的时点统一成 ``HH:MM``；``open`` 视为 09:30。"""
 
     text = str(value).strip()
-    if text.lower() == "open":
-        return "09:30"
+    aliases = {
+        "open": "09:30",
+        "before_open": "09:00",
+        "after_close": "15:10",
+        "close": "15:00",
+    }
+    if text.lower() in aliases:
+        return aliases[text.lower()]
     if ":" in text:
         hour, minute = text.split(":", 1)
         return f"{int(hour):02d}:{int(minute[:2]):02d}"
@@ -147,6 +153,16 @@ class OrderService:
 
     def close(self, symbol: str) -> EventOrder:
         return self.target_value(symbol, 0.0)
+
+    def cancel(self, order_id: str) -> bool:
+        """撤销尚未撮合的订单；已处理订单返回 False。"""
+
+        for index, order in enumerate(self._orders):
+            if order.order_id == order_id:
+                order.status = "canceled"
+                del self._orders[index]
+                return True
+        return False
 
     def _submit(self, order: EventOrder) -> EventOrder:
         self._sequence += 1

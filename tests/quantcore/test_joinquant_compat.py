@@ -315,6 +315,94 @@ def test_run_weekly_uses_nth_trading_day_of_week():
     assert strategy.runtime.g.days == ["2024-01-02", "2024-01-08", "2024-01-15"]
 
 
+ORDERS_PROBE = """
+def initialize(context):
+    g.filled = None
+    g.open_count = None
+    g.cancel_after = None
+    run_daily(buy, time='09:31')
+    run_daily(inspect_orders, time='14:50')
+    run_daily(cancel_late, time='15:10')
+
+def buy(context):
+    if g.filled is not None:
+        return
+    order_target_value('000001.SZ', 10000)
+
+def inspect_orders(context):
+    if g.filled is not None:
+        return
+    orders = get_orders()
+    g.open_count = len(get_open_orders())
+    g.filled = sum(order.filled for order in orders.values())
+
+def cancel_late(context):
+    if g.cancel_after is not None:
+        return
+    target = order_target('000001.SZ', 200)
+    before = len(get_open_orders())
+    cancel_order(target)
+    g.cancel_after = (before, len(get_open_orders()))
+"""
+
+
+def test_order_queries_and_cancel():
+    strategy = load_joinquant_strategy(ORDERS_PROBE)
+    _engine().run(strategy)
+
+    assert strategy.runtime.g.filled == 900
+    assert strategy.runtime.g.open_count == 0
+    assert strategy.runtime.g.cancel_after == (1, 0)
+
+
+LIMIT_PROBE = """
+def initialize(context):
+    g.row = None
+    run_daily(probe, time='09:31')
+
+def probe(context):
+    if g.row is not None or context.previous_date is None:
+        return
+    frame = get_price('000001.SZ', count=1, fields=['close', 'high_limit'],
+                      panel=False, fq=None)
+    g.row = frame.iloc[-1].to_dict()
+"""
+
+
+def test_get_price_long_format_with_high_limit():
+    from app.models.event import EventBacktestConfig
+
+    dates = pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"])
+    adjusted = {
+        field: pd.DataFrame({SYMBOL: [10.0, 10.0, 10.0]}, index=dates)
+        for field in ("open", "high", "low", "close")
+    }
+    unadjusted = {
+        "open": pd.DataFrame({SYMBOL: [10.0, 10.0, 10.0]}, index=dates),
+        "close": pd.DataFrame({SYMBOL: [10.5, 10.5, 10.5]}, index=dates),
+    }
+    engine = EventBacktestEngine(
+        adjusted,
+        EventBacktestConfig(
+            initial_capital=100_000.0,
+            commission_rate=0.0,
+            min_commission=0.0,
+            stamp_tax_rate=0.0,
+            slippage_rate=0.0,
+            execution_price_source="unadjusted",
+            timed_execution=True,
+        ),
+        execution_panels=unadjusted,
+    )
+    strategy = load_joinquant_strategy(LIMIT_PROBE)
+    engine.run(strategy)
+
+    row = strategy.runtime.g.row
+    assert row["code"] == SYMBOL
+    assert row["close"] == pytest.approx(10.5)
+    assert row["high_limit"] == pytest.approx(11.55)
+
+
 def test_get_index_stocks_delegates_to_membership():
     strategy = load_joinquant_strategy(
         "def initialize(context):\n    g.stocks = get_index_stocks('000300.XSHG')\n",

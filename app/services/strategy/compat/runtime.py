@@ -20,6 +20,7 @@ from typing import Any
 import pandas as pd
 
 from app.services.strategy.compat.factors import FactorStore
+from app.services.strategy.compat.finance import FinanceNamespace
 from app.services.strategy.compat.fundamentals import FundamentalStore
 from app.services.strategy.compat.index import IndexMembership
 from app.services.strategy.compat.industry import IndustryStore
@@ -87,6 +88,7 @@ class JoinQuantRuntime:
         self.index = index
         self.industry = industry
         self.index_prices = index_prices
+        self.finance = FinanceNamespace()
 
     def bind(self, context) -> None:
         self.context = context
@@ -121,13 +123,13 @@ class JoinQuantRuntime:
     def set_option(self, key: str, value: Any) -> None:
         self.settings[f"option.{key}"] = value
 
-    def set_benchmark(self, benchmark: str) -> None:
+    def set_benchmark(self, benchmark: str, **kwargs: Any) -> None:
         self.settings["benchmark"] = benchmark
 
-    def set_order_cost(self, cost, type: str = "stock") -> None:
+    def set_order_cost(self, cost, type: str = "stock", **kwargs: Any) -> None:
         self.settings["order_cost"] = cost
 
-    def set_slippage(self, slippage) -> None:
+    def set_slippage(self, slippage, type: str = "stock", **kwargs: Any) -> None:
         self.settings["slippage"] = slippage
 
     def set_universe(self, universe) -> None:
@@ -219,26 +221,69 @@ class JoinQuantRuntime:
                 f"兼容层暂不支持 get_price(frequency={frequency!r})；"
                 "当前仅支持日线，分钟数据请走 timed_execution"
             )
-        fields = list(fields) if fields else ["open", "close", "high", "low", "volume", "amount"]
+        requested = (
+            list(fields)
+            if fields
+            else ["open", "close", "high", "low", "volume", "amount"]
+        )
         single = isinstance(security, str)
         symbols = [security] if single else list(security)
         end = end_date if end_date is not None else self._current_date()
+
         if (
             single
             and self.index_prices is not None
             and self.index_prices.has(symbols[0])
         ):
-            return self.index_prices.history(
-                symbols[0], fields, count=count, start=start_date, end=end
+            frame = self.index_prices.history(
+                symbols[0], requested, count=count, start=start_date, end=end
             )
-        frames = self.context.market.history(
-            symbols, fields, count=count, start=start_date, end=end
+            if panel:
+                return frame[[field for field in requested if field in frame.columns]]
+            time_name = frame.index.name or "index"
+            frame = frame.reset_index().rename(columns={time_name: "time"})
+            frame["code"] = symbols[0]
+            ordered = ["time", "code", *[field for field in requested if field in frame.columns]]
+            return frame[ordered]
+
+        aliases = {"money": "amount"}
+        source_fields = [
+            aliases.get(field, field)
+            for field in requested
+            if field not in {"high_limit", "low_limit"}
+        ]
+        raw = self.context.market.history(
+            symbols,
+            source_fields,
+            count=count,
+            start=start_date,
+            end=end,
+            fq=fq,
         )
+        frames: dict[str, pd.DataFrame] = {}
+        for field in requested:
+            if field in {"high_limit", "low_limit"}:
+                frames[field] = self.context.market.limit_panel(
+                    field, symbols, count=count, start=start_date, end=end
+                )
+                continue
+            source = aliases.get(field, field)
+            if source in raw:
+                frames[field] = raw[source]
+
+        if not panel:
+            pieces = [
+                _long_frame(frames, symbol, requested, skip_paused=skip_paused)
+                for symbol in symbols
+            ]
+            pieces = [piece for piece in pieces if not piece.empty]
+            if not pieces:
+                return pd.DataFrame(columns=["time", "code", *requested])
+            return pd.concat(pieces, ignore_index=True)
+
         if single:
-            return _frame_for(frames, symbols[0], fields)
-        return {
-            symbol: _frame_for(frames, symbol, fields) for symbol in symbols
-        }
+            return _frame_for(frames, symbols[0], requested)
+        return {symbol: _frame_for(frames, symbol, requested) for symbol in symbols}
 
     def attribute_history(
         self,
@@ -252,7 +297,12 @@ class JoinQuantRuntime:
         **kwargs: Any,
     ):
         return self.get_price(
-            security, count=count, fields=fields, fq=fq, frequency=unit
+            security,
+            count=count,
+            fields=fields,
+            fq=fq,
+            frequency=unit,
+            panel=True,
         )
 
     def history(
@@ -274,8 +324,14 @@ class JoinQuantRuntime:
         )
         if str(unit).lower() in {"1m", "minute"}:
             # 日频回测的 1m 请求：用当前时点价格构造一行，供涨跌停过滤使用。
+            # 无有效价格时写 NaN，聚宽里的比较结果是 False 而不是异常。
             prices = {
-                symbol: self.context.market.current_price(symbol) for symbol in symbols
+                symbol: (
+                    price
+                    if (price := self.context.market.current_price(symbol)) is not None
+                    else float("nan")
+                )
+                for symbol in symbols
             }
             frames = {name: pd.DataFrame([prices], index=[-1]) for name in fields}
         else:
@@ -299,17 +355,35 @@ class JoinQuantRuntime:
     # ------------------------------------------------------------ 元数据
 
     def get_all_securities(self, types=None, date=None) -> pd.DataFrame:
+        symbols = list(self.context.market.symbols)
+        as_of = pd.Timestamp(date) if date is not None else None
         rows = []
-        for symbol in self.context.market.symbols:
+        index = []
+        for symbol in symbols:
             start, end = self.context.market.listing_dates(symbol)
+            master_start = self.master.start_date(symbol) if self.master else None
+            start_value = master_start or start
+            if isinstance(start_value, pd.Timestamp):
+                start_value = start_value.date()
+            if as_of is not None:
+                if start_value is not None and pd.Timestamp(start_value) > as_of:
+                    continue
+                if end is not None and pd.Timestamp(end) < as_of:
+                    continue
+            name = (
+                self.master.name(symbol)
+                if self.master is not None
+                else self.context.market.name(symbol)
+            )
             rows.append({
-                "display_name": self.context.market.name(symbol),
-                "name": self.context.market.name(symbol),
-                "start_date": start,
+                "display_name": name,
+                "name": name,
+                "start_date": start_value,
                 "end_date": end,
                 "type": "stock",
             })
-        return pd.DataFrame(rows, index=pd.Index(self.context.market.symbols))
+            index.append(symbol)
+        return pd.DataFrame(rows, index=pd.Index(index))
 
     def get_all_trade_days(self):
         return self.get_trade_days()
@@ -402,11 +476,84 @@ class JoinQuantRuntime:
     def get_extras(self, *args: Any, **kwargs: Any):
         raise NotImplementedError("get_extras 暂未实现")
 
-    def cancel_order(self, *args: Any, **kwargs: Any):
-        raise NotImplementedError("兼容层不支持撤单")
+    def _engine_orders(self) -> list[Any]:
+        engine = getattr(getattr(self.context, "market", None), "_engine", None)
+        return list(getattr(engine, "_all_orders", ())) if engine else []
 
-    def get_open_orders(self, *args: Any, **kwargs: Any):
-        raise NotImplementedError("兼容层不支持查询未完成订单")
+    def _order_amount(self, order: Any) -> int:
+        """聚宽订单数量：正为买、负为卖；目标价委托按当前价折算。"""
+
+        if order.quantity is not None:
+            current = int(self.context.portfolio.quantity(order.symbol))
+            return int(order.quantity) - current
+        price = self.context.market.current_price(order.symbol)
+        if not price or price <= 0:
+            return 0
+        current_value = int(self.context.portfolio.quantity(order.symbol)) * float(price)
+        value = float(order.target_value) - current_value
+        return int(value / float(price) / 100.0) * 100
+
+    def _jq_order_from_event(self, order: Any, *, pending: bool) -> "JQOrder":
+        engine = getattr(getattr(self.context, "market", None), "_engine", None)
+        filled = int(getattr(engine, "_fill_quantities", {}).get(order.order_id, 0))
+        if pending:
+            amount = self._order_amount(order)
+            status = OrderStatus.open
+            filled = 0
+        elif order.status == "rejected":
+            amount = self._order_amount(order)
+            status = OrderStatus.rejected
+            filled = 0
+        else:
+            amount = filled if order.side == "buy" else -filled
+            status = OrderStatus.held
+        price = self.context.market.current_price(order.symbol)
+        return JQOrder(
+            security=order.symbol,
+            order_id=order.order_id,
+            amount=amount,
+            filled=filled,
+            price=price,
+            status=status,
+        )
+
+    def get_orders(self, *args: Any, **kwargs: Any) -> dict[str, "JQOrder"]:
+        """当日已提交订单（含挂单）；按 order_id 索引。"""
+
+        pending = list(getattr(self.context.orders, "pending", ()))
+        pending_ids = {order.order_id for order in pending}
+        result: dict[str, JQOrder] = {}
+        for order in self._engine_orders() + pending:
+            if order.order_id in result:
+                continue
+            result[order.order_id] = self._jq_order_from_event(
+                order, pending=order.order_id in pending_ids
+            )
+        return result
+
+    def get_open_orders(self, *args: Any, **kwargs: Any) -> dict[str, "JQOrder"]:
+        """未完成订单（尚未撮合或跨日挂单）。"""
+
+        pending = list(getattr(self.context.orders, "pending", ()))
+        return {
+            order.order_id: self._jq_order_from_event(order, pending=True)
+            for order in pending
+        }
+
+    def cancel_order(self, order: Any, **kwargs: Any) -> "JQOrder | None":
+        order_id = getattr(order, "order_id", None)
+        if not order_id:
+            return None
+        if not self.context.orders.cancel(str(order_id)):
+            return None
+        return JQOrder(
+            security=getattr(order, "security", getattr(order, "symbol", "")),
+            order_id=str(order_id),
+            amount=int(getattr(order, "amount", 0) or 0),
+            filled=0,
+            price=getattr(order, "price", None),
+            status=OrderStatus.canceled,
+        )
 
     def inout_cash(self, *args: Any, **kwargs: Any):
         raise NotImplementedError("兼容层不支持资金划转")
@@ -458,13 +605,11 @@ class JoinQuantRuntime:
             "get_industry": self.get_industry,
             "get_extras": self.get_extras,
             "cancel_order": self.cancel_order,
+            "get_orders": self.get_orders,
             "get_open_orders": self.get_open_orders,
             "get_trades": self.get_trades,
             "inout_cash": self.inout_cash,
-            "finance": SimpleNamespace(
-                run_query=self.get_fundamentals,
-                STK_CAPITAL_CHANGE=None,
-            ),
+            "finance": self.finance,
             "query": query,
             "valuation": valuation,
             "indicator": indicator,
@@ -646,6 +791,33 @@ def _is_nth_trading_day(context, nth: int, *, period: str = "week") -> bool:
         end = start + pd.offsets.MonthEnd(1)
     days = market.trade_days(start, end)
     return len(days) >= nth and pd.Timestamp(days[nth - 1]).normalize() == day
+
+
+def _long_frame(
+    frames: dict[str, pd.DataFrame],
+    symbol: str,
+    fields: list[str],
+    *,
+    skip_paused: bool = False,
+) -> pd.DataFrame:
+    """聚宽 ``panel=False`` 的长表：time / code / 字段。"""
+
+    columns = {}
+    for field in fields:
+        frame = frames.get(field)
+        if frame is None or symbol not in frame.columns:
+            continue
+        columns[field] = frame[symbol]
+    if not columns:
+        return pd.DataFrame(columns=["time", "code", *fields])
+    frame = pd.DataFrame(columns)
+    if skip_paused:
+        frame = frame.dropna(how="all")
+    time_name = frame.index.name or "index"
+    frame = frame.reset_index().rename(columns={time_name: "time"})
+    frame["code"] = symbol
+    ordered = ["time", "code", *[field for field in fields if field in frame.columns]]
+    return frame[ordered]
 
 
 def _frame_for(frames: dict[str, pd.DataFrame], symbol: str, fields: list[str]) -> pd.DataFrame:

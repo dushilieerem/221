@@ -2,17 +2,35 @@
 
 from __future__ import annotations
 
+import bisect
+import builtins
 import re
+import traceback
+import warnings
 from typing import Any
 
 from app.services.strategy.compat.runtime import JoinQuantRuntime
+
+#: 聚宽策略会用到的标准库；由兼容层注入，导入行在静态护栏前移除。
+_AUX_MODULES = {
+    "builtins": builtins,
+    "traceback": traceback,
+    "bisect": bisect,
+    "warnings": warnings,
+}
 
 #: 聚宽/因子库的导入行由兼容层提供同名全局，执行前移除。
 _IMPORT_PATTERN = re.compile(
     r"^\s*(?:"
     r"from\s+(?:jqdata|jqfactor|jqlib\.[\w.]+)\s+import\s+.*"
     r"|import\s+(?:jqdata|jqfactor)\b.*"
+    r"|import\s+(?:builtins|traceback|bisect|warnings)(?:\s+as\s+\w+)?\s*"
     r")$",
+    re.MULTILINE,
+)
+
+_COMPAT_IMPORT = re.compile(
+    r"^\s*import\s+(builtins|traceback|bisect|warnings)(?:\s+as\s+(\w+))?\s*$",
     re.MULTILINE,
 )
 
@@ -75,6 +93,10 @@ def load_joinquant_strategy(
         index_prices=index_prices,
     )
     namespace: dict[str, Any] = {"__name__": name, **runtime.globals()}
+    # 聚宽策略常用 ``import builtins as bi`` 等；导入行已移除，这里补回别名。
+    for match in _COMPAT_IMPORT.finditer(source):
+        module = _AUX_MODULES[match.group(1)]
+        namespace[match.group(2) or match.group(1)] = module
     exec(compile(cleaned, f"<{name}>", "exec"), namespace)
     if not callable(namespace.get("initialize")):
         raise ValueError("聚宽策略必须定义模块级 initialize(context)")

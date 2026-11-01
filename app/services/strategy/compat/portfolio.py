@@ -53,6 +53,19 @@ class JQPortfolioView:
         return float(self._view.cash)
 
     @property
+    def available_cash(self) -> float:
+        # 兼容层不做冻结资金建模；未成交订单不占用现金。
+        return self.cash
+
+    @property
+    def returns(self) -> float:
+        engine = getattr(self._market, "_engine", None)
+        initial = getattr(getattr(engine, "config", None), "initial_capital", None)
+        if not initial:
+            return 0.0
+        return float(self.total_value) / float(initial) - 1.0
+
+    @property
     def positions(self) -> "_PositionsView":
         return _PositionsView(self._view, self._market)
 

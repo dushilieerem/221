@@ -14,6 +14,7 @@ from pathlib import Path
 
 import duckdb
 import pandas as pd
+import pyarrow.parquet as pq
 
 _CACHE: dict[tuple[str, str, tuple[str, ...]], pd.DataFrame] = {}
 
@@ -37,10 +38,11 @@ def load_statement(
     if cached is not None:
         return cached
 
-    fields = list(_BASE_COLUMNS) + [
-        column for column in requested if column not in _BASE_COLUMNS
-    ]
-    select = "*" if not requested else ", ".join(f'"{column}"' for column in fields)
+    first_file = next(iter(directory.glob("*.parquet")))
+    available = set(pq.ParquetFile(first_file).schema_arrow.names)
+    base = [column for column in _BASE_COLUMNS if column in available]
+    fields = base + [column for column in requested if column not in base]
+    select = "*" if not fields else ", ".join(f'"{column}"' for column in fields)
     sql = (
         f"SELECT {select} FROM read_parquet("
         f"'{directory / '*.parquet'}', union_by_name=true)"
@@ -51,7 +53,8 @@ def load_statement(
     finally:
         con.close()
 
-    frame["_anntime_int"] = pd.to_numeric(frame["m_anntime"], errors="coerce")
+    if "m_anntime" in frame.columns:
+        frame["_anntime_int"] = pd.to_numeric(frame["m_anntime"], errors="coerce")
     _CACHE[key] = frame
     return frame
 

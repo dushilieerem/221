@@ -477,6 +477,10 @@ def _run_event_strategy_backtest(
             | set(getattr(strategy, "required_market_state", ()))
             | {"open", "high", "low", "close"}
         )
+        if req.strategy_dialect == "joinquant":
+            # 聚宽源码会直接 get_price(fields=['money'/'volume'])，
+            # 事件策略自身不一定声明这些字段。
+            required_fields |= {"volume", "amount", "turnover"}
         from app.utils.data import first_panel_date
 
         date_probe = data_engine.get_task_panels(
@@ -491,12 +495,20 @@ def _run_event_strategy_backtest(
             strategy,
             as_of=first_panel_date(date_probe),
         )
+        # 聚宽策略首日就要看上一交易日数据（选股、涨跌停、历史窗口），
+        # 多加载一段预热期；权益曲线仍从 req.start 开始。
+        panel_start = req.start
+        warmup = req.strategy_dialect == "joinquant"
+        if warmup:
+            panel_start = (
+                pd.Timestamp(req.start) - pd.Timedelta(days=400)
+            ).strftime("%Y-%m-%d")
         # 无条件加载 listed_status：退市剔除恒开启，不依赖 filter_st 开关。
         listed_status_available = True
         required_fields.add("listed_status")
         try:
             panels = data_engine.get_task_panels(
-                req.start,
+                panel_start,
                 req.end,
                 fields=sorted(required_fields),
                 symbols=raw_symbols,
@@ -509,7 +521,7 @@ def _run_event_strategy_backtest(
             listed_status_available = False
             required_fields.discard("listed_status")
             panels = data_engine.get_task_panels(
-                req.start,
+                panel_start,
                 req.end,
                 fields=sorted(required_fields),
                 symbols=raw_symbols,
@@ -540,7 +552,7 @@ def _run_event_strategy_backtest(
             try:
                 raw_execution = load_unadjusted_panels(
                     data_engine,
-                    start=req.start,
+                    start=panel_start,
                     end=req.end,
                     symbols=raw_symbols,
                     fields=("open", "close"),
@@ -568,12 +580,9 @@ def _run_event_strategy_backtest(
 
             intraday_price = _intraday_price
 
-        # 聚宽首日也有 previous_date（上一自然日近似）；原生事件策略保持 None。
-        first_previous_date = (
-            (pd.Timestamp(req.start) - pd.Timedelta(days=1)).date()
-            if req.strategy_dialect == "joinquant"
-            else None
-        )
+        # 聚宽首日也有 previous_date；引擎从预热面板取真实上一交易日。
+        first_previous_date = None
+        active_start = req.start if warmup else None
 
         result = EventBacktestEngine(
             event_panels,
@@ -591,6 +600,7 @@ def _run_event_strategy_backtest(
             execution_panels=execution_panels,
             intraday_price=intraday_price,
             first_previous_date=first_previous_date,
+            active_start=active_start,
         ).run(strategy)
         equity = result.equity_curve
         metrics = metrics_to_dict(MetricEngine().calculate_all(MetricContext(

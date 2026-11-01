@@ -238,7 +238,8 @@ class FactorStore:
         return cost.where(total.notna() & (total != 0), 0.0)
 
     def _factor_market_cap(self, symbols, as_of):
-        return self._valuation_series("total_mv", as_of)
+        # 聚宽 market_cap 单位为亿元；供应商 total_mv 为元。
+        return self._valuation_series("total_mv", as_of) / 1e8
 
     # ------------------------------------------------------------ 价格类
 

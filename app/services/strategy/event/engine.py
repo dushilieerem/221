@@ -35,13 +35,22 @@ class EventBacktestEngine:
         execution_panels: dict[str, pd.DataFrame] | None = None,
         intraday_price=None,
         first_previous_date: object | None = None,
+        active_start: object | None = None,
     ) -> None:
         missing = self.required_fields - panels.keys()
         if missing:
             raise ValueError(f"事件回测缺少行情字段: {sorted(missing)}")
         self.panels = {name: frame.sort_index() for name, frame in panels.items()}
         self.config = config or EventBacktestConfig()
-        self.dates = self.panels["close"].index
+        # panels 可以带预热区间：回测只从 active_start 开始，但首日之前的
+        # 行情仍可被 get_price/history/涨跌停读取。
+        self._full_dates = self.panels["close"].index
+        if active_start is not None:
+            self.dates = self._full_dates[
+                self._full_dates >= pd.Timestamp(active_start)
+            ]
+        else:
+            self.dates = self._full_dates
         self.symbols = list(self.panels["close"].columns)
         if self.dates.empty:
             raise ValueError("事件回测没有可用交易日")
@@ -50,6 +59,10 @@ class EventBacktestEngine:
         self._listing_bounds: (
             dict[str, tuple[pd.Timestamp | None, pd.Timestamp | None]] | None
         ) = None
+        # 聚宽 get_orders/get_open_orders 需要回看已处理订单与成交量。
+        self._all_orders: list[EventOrder] = []
+        self._all_fills: list[EventFill] = []
+        self._fill_quantities: dict[str, int] = {}
 
         # 成交/估值价格来源。adjusted 保持原有行为；unadjusted 用未复权面板
         # 成交与估值，信号和上下文历史仍读 self.panels（复权）。
@@ -68,12 +81,12 @@ class EventBacktestEngine:
                     "同时提供 open 与 close"
                 )
             self._price_panels = {
-                name: frame.reindex(index=self.dates, columns=self.symbols)
+                name: frame.reindex(index=self._full_dates, columns=self.symbols)
                 for name, frame in execution_panels.items()
             }
             self._mark_close = self._price_panels["close"].ffill()
             adjusted_close = self.panels["close"].reindex(
-                index=self.dates, columns=self.symbols
+                index=self._full_dates, columns=self.symbols
             )
             factor = (adjusted_close / self._price_panels["close"]).replace(
                 [np.inf, -np.inf], np.nan
@@ -89,9 +102,17 @@ class EventBacktestEngine:
         self._current_time: str | None = None
         self._current_date: pd.Timestamp | None = None
         # 聚宽兼容层在回测首日也有 previous_date；原生事件策略保持 None。
-        self._first_previous_date = (
-            pd.Timestamp(first_previous_date) if first_previous_date is not None else None
-        )
+        if first_previous_date is not None:
+            self._first_previous_date = pd.Timestamp(first_previous_date)
+        elif len(self.dates) < len(self._full_dates):
+            location = int(self._full_dates.get_loc(self.dates[0]))
+            self._first_previous_date = (
+                pd.Timestamp(self._full_dates[location - 1])
+                if location > 0
+                else None
+            )
+        else:
+            self._first_previous_date = None
         self._settlement_mode = False
         self._settlement_vwap: pd.DataFrame | None = None
         self._settlement_mark: pd.DataFrame | None = None
@@ -112,8 +133,9 @@ class EventBacktestEngine:
         context = StrategyContext(data, orders, PortfolioView(ledger))
         context.market = _MarketView(self)
         strategy.initialize(context)
-        all_orders: list[EventOrder] = []
-        fills: list[EventFill] = []
+        self._reset_order_history()
+        all_orders = self._all_orders
+        fills = self._all_fills
         events: list[dict[str, object]] = []
         snapshots: list[PositionSnapshot] = []
         equity: list[float] = []
@@ -218,8 +240,9 @@ class EventBacktestEngine:
             raise ValueError(f"时点引擎不支持的调度时点: {unsupported}")
         times = sorted({"09:30"} | registered)
 
-        all_orders: list[EventOrder] = []
-        fills: list[EventFill] = []
+        self._reset_order_history()
+        all_orders = self._all_orders
+        fills = self._all_fills
         events: list[dict[str, object]] = []
         snapshots: list[PositionSnapshot] = []
         equity: list[float] = []
@@ -421,6 +444,9 @@ class EventBacktestEngine:
                 })
             else:
                 fills.append(fill)
+                self._fill_quantities[order.order_id] = (
+                    self._fill_quantities.get(order.order_id, 0) + int(fill.quantity)
+                )
                 events.append({
                     "type": "FILL",
                     "timestamp": date.to_pydatetime(),
@@ -926,6 +952,11 @@ class EventBacktestEngine:
             return False
         return str(value).strip() in {"ST", "*ST"}
 
+    def _reset_order_history(self) -> None:
+        self._all_orders.clear()
+        self._all_fills.clear()
+        self._fill_quantities.clear()
+
     def _listing_bounds_for(
         self, symbol: str
     ) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
@@ -957,12 +988,12 @@ class EventBacktestEngine:
         """当前交易日的上一交易日收盘价，用于涨跌停价计算。"""
 
         date = self._current_date
-        if date is None or date not in self.dates:
+        if date is None or date not in self._full_dates:
             return None
-        location = int(self.dates.get_loc(date))
+        location = int(self._full_dates.get_loc(date))
         if location <= 0:
             return None
-        previous = self.dates[location - 1]
+        previous = self._full_dates[location - 1]
         frame = self._price_panels.get("close")
         if frame is None or symbol not in frame.columns or previous not in frame.index:
             return None
@@ -1071,12 +1102,24 @@ class _MarketView:
         count: int | None = None,
         start: object | None = None,
         end: object | None = None,
+        fq: object = "pre",
     ) -> dict[str, pd.DataFrame]:
-        """读取复权面板切片，供 ``get_price`` / ``history`` 兼容层使用。"""
+        """读取面板切片，供 ``get_price`` / ``history`` 兼容层使用。
 
+        ``fq=None`` 且引擎使用未复权成交时读取未复权面板；其余口径沿用
+        研究面板（后复权），与事件引擎的信号口径一致。
+        """
+
+        panels = self._engine.panels
+        if fq is None or str(fq).lower() in {"none", ""}:
+            if self._engine._execution_price_source == "unadjusted":
+                panels = self._engine._price_panels
         result: dict[str, pd.DataFrame] = {}
         for field in fields:
-            frame = self._engine.panels.get(field)
+            frame = panels.get(field)
+            if frame is None and panels is not self._engine.panels:
+                # 未复权文件只有 OHLC；成交额/成交量等仍用研究面板。
+                frame = self._engine.panels.get(field)
             if frame is None:
                 continue
             subset = frame.reindex(columns=pd.Index(symbols))
@@ -1088,6 +1131,49 @@ class _MarketView:
                 subset = subset.iloc[-int(count):]
             result[field] = subset
         return result
+
+    def limit_panel(
+        self,
+        field: str,
+        symbols: list[str],
+        *,
+        count: int | None = None,
+        start: object | None = None,
+        end: object | None = None,
+    ) -> pd.DataFrame:
+        """按昨收与板块规则生成涨跌停价面板（未复权口径）。"""
+
+        close = self._engine._mark_close.reindex(columns=pd.Index(symbols))
+        if start is not None:
+            close = close.loc[close.index >= pd.Timestamp(start)]
+        if end is not None:
+            close = close.loc[close.index <= pd.Timestamp(end)]
+        # 先取昨收再做 count 截断，否则 count=1 时窗口内没有前一行。
+        previous = close.shift(1)
+        codes = pd.Series(
+            [str(symbol).split(".")[0] for symbol in previous.columns],
+            index=previous.columns,
+        )
+        ratio = pd.Series(0.10, index=previous.columns)
+        ratio[codes.str.startswith(("300", "301", "688"))] = 0.20
+        ratio[codes.str.startswith(("4", "8", "920"))] = 0.30
+        ratios = pd.DataFrame(
+            np.repeat(ratio.to_numpy()[None, :], len(previous), axis=0),
+            index=previous.index,
+            columns=previous.columns,
+        )
+        status = self._engine.panels.get("listed_status")
+        if status is not None:
+            st = status.reindex(index=previous.index, columns=previous.columns)
+            ratios = ratios.mask(st.isin(["ST", "*ST"]), 0.05)
+        values = (
+            previous * (1.0 + ratios)
+            if field == "high_limit"
+            else previous * (1.0 - ratios)
+        )
+        if count is not None:
+            values = values.iloc[-int(count):]
+        return values.round(2)
 
     def limit_prices(self, symbol: str) -> tuple[float | None, float | None]:
         previous = self.previous_close(symbol)

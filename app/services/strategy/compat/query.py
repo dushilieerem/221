@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+import pandas as pd
+
 
 class Field:
     __slots__ = ("table", "name")
@@ -130,18 +132,25 @@ def evaluate(frame, condition: Condition | None):
         raise KeyError(f"查询字段不存在: {column}")
     series = frame[column]
     op = condition.op
+    right = condition.right
+    if pd.api.types.is_datetime64_any_dtype(series) and op not in {"in", "not in"}:
+        # 聚宽里日期条件常传 datetime.date；pandas 3 不再跨类型比较。
+        try:
+            right = pd.Timestamp(right)
+        except (TypeError, ValueError):
+            pass
     if op == "==":
-        return series == condition.right
+        return series == right
     if op == "!=":
-        return series != condition.right
+        return series != right
     if op == ">":
-        return series > condition.right
+        return series > right
     if op == ">=":
-        return series >= condition.right
+        return series >= right
     if op == "<":
-        return series < condition.right
+        return series < right
     if op == "<=":
-        return series <= condition.right
+        return series <= right
     if op == "in":
         return series.isin(list(condition.right))
     if op == "not in":
