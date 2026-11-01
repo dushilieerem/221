@@ -77,6 +77,12 @@ python -m app.cli.joinquant_parity compare --case fixed_basket_hold
 
 其余 11 个策略的阻塞数据缺口与解锁顺序见 [04-13策略对齐路线](04-13策略对齐路线.md)。
 
+**数据侧待授权/待补**（由 `svquant-data` 登记）：
+
+- 2014–2015 财务历史：ModelScope 起点是 2016-03-31，`earnings_growth` 需要 5 年年报；补齐需 iFinD 财务报表历史导出，当前 `blocked_by: data-source`。
+- 指数覆盖：`399317/399101/399303/000015` 历史成分与日线不在现有 iFinD 采集配置中，需修改 ifind `index_codes` 并回填；当前 `blocked_by: ifind-config`，等待授权。
+- 历史涨跌停价、退市/停复牌：P1-3。
+
 ## 首个真实结论（2024-01-02 ~ 2024-06-28，固定 4 只银行股）
 
 | 用例 | 资金 | 累计收益 聚宽 / SVQuant | 差异 | 结论 |

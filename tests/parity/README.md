@@ -33,6 +33,12 @@ python -m app.cli.joinquant_parity compare --case <case>
 | `fixed_basket_hold` | 100 万 | strict | 不复权成交 + 复权比例缩放；验证整手与现金拖累 |
 | `fixed_basket_hold_large` | 1 亿 | strict | 大资金回归门禁，整手误差可忽略 |
 | `fixed_basket_hold_real` | 1 亿 | strict | 聚宽 `use_real_price=True` 对 SVQuant `unadjusted`；股数、成交价、现金、费用逐笔严格一致（区间避开除息日） |
+| `company/growth_multifactor` | 20 万 | diagnostic | 公司策略成长多因子；兼容层原样执行，验证财务/jqfactor/周频调度 |
+| `company/dividend_lowvol_growth` | 10 万 | diagnostic | 红利低波+红利成长；验证分红、行业、涨跌停与委托查询 |
+| `company/three_positive_smallcap` | 100 万 | diagnostic | 三正小市值；等待 399317 指数成分（P1-1） |
+
+公司策略按 `cases/company/<strategy>/` 分组，`--case` 传相对路径，例如
+`--case company/growth_multifactor`；`company/registry.yaml` 记录 13 个策略的数据依赖与状态。
 
 ## 验收口径
 

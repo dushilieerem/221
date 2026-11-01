@@ -44,12 +44,13 @@ class FinanceNamespace:
 
     def __init__(self, root: str | Path = DEFAULT_ROOT) -> None:
         self.root = Path(root)
+        self._prepared: pd.DataFrame | None = None
 
-    def run_query(self, q: Query) -> pd.DataFrame:
-        table = q.fields[0].table if q.fields else _TABLE
-        if table != _TABLE:
-            raise NotImplementedError(f"兼容层暂不支持 finance 表: {table}")
+    def _prepared_frame(self) -> pd.DataFrame:
+        """全量分红 + PIT 股本；与查询日期无关，进程内只算一次。"""
 
+        if self._prepared is not None:
+            return self._prepared
         dividends = load_statement(
             self.root, "dividend_factors", ["time", "interest", "stockBonus"]
         )
@@ -76,7 +77,6 @@ class FinanceNamespace:
             by="Symbol",
             direction="backward",
         )
-        # merge_asof 要求两侧按连接键排序；上面已分别排序。
         cash_per_share = pd.to_numeric(
             merged["interest"], errors="coerce"
         ).fillna(0.0) / 10.0
@@ -85,7 +85,15 @@ class FinanceNamespace:
         merged["bonus_amount_rmb"] = merged["bonus_amount_rmb"].replace(
             [np.inf, -np.inf], np.nan
         )
+        self._prepared = merged
+        return merged
 
+    def run_query(self, q: Query) -> pd.DataFrame:
+        table = q.fields[0].table if q.fields else _TABLE
+        if table != _TABLE:
+            raise NotImplementedError(f"兼容层暂不支持 finance 表: {table}")
+
+        merged = self._prepared_frame()
         output = pd.DataFrame({
             f"{_TABLE}.code": merged["Symbol"].to_numpy(),
             f"{_TABLE}.a_registration_date": merged["time"].to_numpy(),
