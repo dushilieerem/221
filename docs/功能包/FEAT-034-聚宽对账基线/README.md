@@ -82,7 +82,7 @@ python -m app.cli.joinquant_parity compare --case fixed_basket_hold
 **数据侧待授权/待补**（由 `svquant-data` 登记）：
 
 - 2014–2015 财务历史：ModelScope 起点是 2016-03-31，`earnings_growth` 需要 5 年年报；补齐需 iFinD 财务报表历史导出，当前 `blocked_by: data-source`。
-- 指数覆盖：`399317/399101/399303/000015` 历史成分与日线不在现有 iFinD 采集配置中，需修改 ifind `index_codes` 并回填；当前 `blocked_by: ifind-config`，等待授权。
+- 指数覆盖：`399317/399101/399303` 已由免费源交付（2016-11-01 起，规则重建、`confidence=medium`）；`000015` 只有 2026-09-30 起的官方锚点段，历史 unresolved。
 - 历史涨跌停价、退市/停复牌：P1-3。
 
 ## 首个真实结论（2024-01-02 ~ 2024-06-28，固定 4 只银行股）
