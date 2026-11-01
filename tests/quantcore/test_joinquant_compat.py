@@ -579,3 +579,17 @@ def test_get_index_stocks_delegates_to_membership():
     )
     _engine().run(strategy)
     assert strategy.runtime.g.stocks == ["000001.SZ", "600000.SH"]
+
+
+def test_compat_log_handles_message_without_placeholders(caplog):
+    """聚宽策略常见 ``log.warn("文本", a, b)``，不能让 logging 抛格式错误。"""
+    import logging
+
+    from app.services.strategy.compat.runtime import _Log
+
+    logger = _Log()
+    with caplog.at_level(logging.WARNING, logger="joinquant_compat"):
+        logger.warn("skip sell at low limit", "002921.SZ", "联诚精密")
+        logger.warn("仓位 %.1f%%", 19.8)
+    assert "skip sell at low limit 002921.SZ 联诚精密" in caplog.text
+    assert "仓位 19.8%" in caplog.text

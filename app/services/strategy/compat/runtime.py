@@ -51,19 +51,34 @@ class _Log:
     def set_level(self, *args: Any, **kwargs: Any) -> None:  # noqa: D401
         """聚宽日志级别设置；兼容层统一交给 Python logging。"""
 
+    @staticmethod
+    def _render(message: object, args: tuple[Any, ...]) -> str:
+        """按聚宽习惯格式化；没有 ``%s`` 占位符时把参数追加到末尾。"""
+
+        text = str(message)
+        if not args:
+            return text
+        try:
+            return text % args
+        except (TypeError, ValueError):
+            return " ".join([text, *(str(arg) for arg in args)])
+
+    def _emit(self, level: int, message: object, args: tuple[Any, ...]) -> None:
+        self._logger.log(level, self._render(message, args))
+
     def debug(self, message: object, *args: Any) -> None:
-        self._logger.debug(str(message), *args)
+        self._emit(logging.DEBUG, message, args)
 
     def info(self, message: object, *args: Any) -> None:
-        self._logger.info(str(message), *args)
+        self._emit(logging.INFO, message, args)
 
     def warn(self, message: object, *args: Any) -> None:
-        self._logger.warning(str(message), *args)
+        self._emit(logging.WARNING, message, args)
 
     warning = warn
 
     def error(self, message: object, *args: Any) -> None:
-        self._logger.error(str(message), *args)
+        self._emit(logging.ERROR, message, args)
 
 
 class JoinQuantRuntime:
