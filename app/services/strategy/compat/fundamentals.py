@@ -114,6 +114,7 @@ def _derive_income_fields(frame: pd.DataFrame) -> pd.DataFrame:
     out["inc_net_profit_year_on_year"] = growth
     return out
 
+
 VALUATION_MAP: dict[str, str] = {
     "code": "symbol",
     "market_cap": "total_mv",
@@ -226,8 +227,13 @@ class FundamentalStore:
             )
             if frame.empty:
                 continue
+            needs_derived = any(
+                (field.table, field.name) in FINANCIAL_EXPRESSIONS for field in items
+            )
             derived = (
-                _derive_income_fields(frame) if statement == "income" else None
+                _derive_income_fields(frame)
+                if statement == "income" and needs_derived
+                else None
             )
             latest = (
                 frame.sort_values(
