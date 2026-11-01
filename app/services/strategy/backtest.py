@@ -121,7 +121,11 @@ def run_strategy_backtest(
             code_hash = asset.code_hash
             expected_entrypoint = asset.entrypoint
 
-        # 编译策略代码
+        # 编译策略代码（P0-11 静态护栏；容器隔离后续）
+        from app.services.security.code_guard import assert_safe_user_code
+
+        if req.strategy_id is None:
+            assert_safe_user_code(strategy_code, kind="策略")
         namespace = {"__name__": "user_strategy"}
         exec(compile(strategy_code, '<strategy>', 'exec'), namespace)
         strategy_classes = [

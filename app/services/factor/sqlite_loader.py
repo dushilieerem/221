@@ -593,9 +593,13 @@ class SQLiteFactorLoader:
             "tool": self._tool_module(),
         }
         try:
+            from app.services.security.code_guard import assert_safe_user_code
+
+            adapted = _adapt_factor_code(record.factor_code, source_name=source_name)
+            assert_safe_user_code(adapted, kind="因子")
             exec(
                 compile(
-                    _adapt_factor_code(record.factor_code, source_name=source_name),
+                    adapted,
                     source_name,
                     "exec",
                 ),

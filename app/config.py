@@ -151,6 +151,8 @@ class RuntimeSettings:
     log_level: str
     host: str
     port: int
+    service_token: str | None = field(repr=False)
+    cors_origins: tuple[str, ...]
     cache_enabled: bool
     cache_dir: Path
     cache_ttl_days: int
@@ -281,6 +283,14 @@ def _from_manager(manager: ConfigManager, config_path: Path) -> RuntimeSettings:
     if not isinstance(host, str) or not host.strip():
         raise ValueError("配置项 'server.host' 必须是非空字符串")
 
+    service_token = _optional_string(server.get("service_token"), "server.service_token")
+    raw_origins = server.get("cors_origins") or []
+    if isinstance(raw_origins, str):
+        raw_origins = [raw_origins]
+    if not isinstance(raw_origins, list) or not all(isinstance(x, str) for x in raw_origins):
+        raise ValueError("配置项 'server.cors_origins' 必须是字符串列表")
+    cors_origins = tuple(x.strip().rstrip("/") for x in raw_origins if x.strip())
+
     log_level = str(runtime.get("log_level", "INFO")).upper()
     if log_level not in {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}:
         raise ValueError(
@@ -308,6 +318,8 @@ def _from_manager(manager: ConfigManager, config_path: Path) -> RuntimeSettings:
         log_level=log_level,
         host=host.strip(),
         port=port,
+        service_token=service_token,
+        cors_origins=cors_origins,
         cache_enabled=_bool(cache.get("enabled"), "cache.enabled", True),
         cache_dir=_path(
             cache.get("dir"),
