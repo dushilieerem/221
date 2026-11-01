@@ -1,0 +1,92 @@
+"""聚宽兼容层的组合视图：Position 对象语义。
+
+原生 ``PortfolioView.positions`` 是 ``{symbol: int}``；聚宽策略需要
+``{symbol: Position}``，并访问 ``total_amount`` / ``avg_cost`` / ``price`` 等属性。
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+
+class JQPosition:
+    def __init__(self, symbol: str, quantity: int, average_cost: float, price: float | None) -> None:
+        self.security = symbol
+        self._quantity = int(quantity)
+        self.avg_cost = float(average_cost or 0.0)
+        self.price = float(price) if price is not None else float("nan")
+
+    @property
+    def total_amount(self) -> int:
+        return self._quantity
+
+    @property
+    def amount(self) -> int:
+        return self._quantity
+
+    @property
+    def quantity(self) -> int:
+        return self._quantity
+
+    @property
+    def closeable_amount(self) -> int:
+        return self._quantity
+
+    @property
+    def value(self) -> float:
+        return self._quantity * self.price
+
+    @property
+    def acc_avg_cost(self) -> float:
+        return self.avg_cost
+
+
+class JQPortfolioView:
+    """包一层原生 PortfolioView，向策略暴露聚宽 Position 对象。"""
+
+    def __init__(self, view: Any, market: Any) -> None:
+        self._view = view
+        self._market = market
+
+    @property
+    def cash(self) -> float:
+        return float(self._view.cash)
+
+    @property
+    def positions(self) -> "_PositionsView":
+        return _PositionsView(self._view, self._market)
+
+    def quantity(self, symbol: str) -> int:
+        return int(self._view.quantity(symbol))
+
+    @property
+    def total_value(self) -> float:
+        total = self.cash
+        for position in self.positions.values():
+            if position.price == position.price:  # not NaN
+                total += position.value
+        return total
+
+
+class _PositionsView(dict):
+    """聚宽 positions 语义：索引任意标的都返回 Position（未持有为 0）。"""
+
+    def __init__(self, view: Any, market: Any) -> None:
+        super().__init__()
+        self._market = market
+        for symbol, quantity in view.positions.items():
+            if int(quantity) <= 0:
+                continue
+            self[str(symbol)] = JQPosition(
+                str(symbol),
+                int(quantity),
+                view.average_cost(str(symbol)) or 0.0,
+                market.current_price(str(symbol)),
+            )
+
+    def __missing__(self, symbol: str) -> JQPosition:
+        return JQPosition(str(symbol), 0, 0.0, self._market.current_price(str(symbol)))
+
+
+def wrap_portfolio(view: Any, market: Any) -> JQPortfolioView:
+    return JQPortfolioView(view, market)

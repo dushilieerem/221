@@ -1,0 +1,53 @@
+schema_version: 1
+name: fixed_basket_hold
+description: 第二个交易日开盘等权买入固定 4 只并持有到期；用于隔离撮合、费用与估值口径
+
+jq:
+  # 在聚宽平台创建回测后把 ID 填到这里；导出时 jq_export.py 也会写入 expected/meta.json
+  backtest_id: "<在此填写聚宽回测 ID>"
+  frequency: day
+  run_time: "09:30"
+  start: "2024-01-02"
+  end: "2024-06-28"
+  initial_cash: 1000000
+  benchmark: "000300.XSHG"
+  options:
+    # 关闭聚宽默认的前复权撮合；与 SVQuant 后复权面板一样只比较收益率
+    use_real_price: false
+    # 关闭聚宽默认的 PriceRelatedSlippage(0.00246)
+    slippage_rate: 0.0
+    commission: 0.0003
+    stamp_tax: 0.0005
+    min_commission: 5
+
+svquant:
+  engine_mode: event
+  strategy_source: svquant_strategy.py
+  execution_timing: next_open
+  # 成交/估值用未复权价；信号仍用后复权，持仓按复权比例缩放
+  execution_price_source: unadjusted
+  universe: CSI300
+  benchmark: CSI300
+  initial_capital: 1000000
+  commission_rate: 0.0003
+  stamp_tax: 0.0005
+  min_commission: 5
+  slippage_rate: 0.0
+
+comparison:
+  # 聚宽 use_real_price=false 与 SVQuant hfq 都是复权价，收益率可比，
+  # 但绝对价格/股数/现金不可比，因此 L2/L3 的数值差异只作参考。
+  price_basis: hfq
+  strict_layers: [L0, L1, L2, L3, L4, L5]
+  # diagnostic：该用例用于定位差异，pytest 只要求比对可执行，不要求零分歧；
+  # strict：要求所有严格层通过，用于回归门禁。
+  acceptance: strict
+
+tolerances:
+  quantity: 0
+  price_abs: 0.005
+  cash_abs: 0.01
+  equity_rel: 1.0e-6
+  # 整手取整造成现金拖累，收益差异容忍 0.1%
+  return_abs: 1.0e-3
+  metric_rel: 1.0e-3

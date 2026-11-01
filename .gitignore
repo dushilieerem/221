@@ -27,3 +27,6 @@ app/assets/factors/factor_backtest.db
 
 # 本机 AI 协作说明，与 SVQuant 仓库保持一致：只保留在工作区。
 CLAUDE.md
+
+# 聚宽对账金标：由合法账号本地导出，含聚宽数据衍生的价格/持仓，不入库。
+tests/parity/cases/**/expected/

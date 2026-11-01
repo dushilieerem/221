@@ -117,6 +117,32 @@ def load_unadjusted_close(
     return frame.reindex(columns=pd.Index(symbols))
 
 
+def load_unadjusted_panels(
+    data_engine,
+    *,
+    start: str | pd.Timestamp | None,
+    end: str | pd.Timestamp | None,
+    symbols: list[str],
+    fields: tuple[str, ...] = ("open", "close"),
+) -> dict[str, pd.DataFrame]:
+    """读取未复权 OHLC 面板，返回 ``{field: 日期×标的}``。
+
+    回测的成交/估值使用；未复权文件缺失时抛错，由调用方决定是否降级。
+    列名与传入的 ``symbols`` 一致，便于调用方按同一映射重命名。
+    """
+
+    provider = _display_provider(data_engine)
+    if provider is None:
+        raise FileNotFoundError("当前数据版本缺少未复权行情 unadjusted_price")
+    panels = provider.get_task_panels(
+        str(start) if start is not None else None,
+        str(end) if end is not None else None,
+        fields=list(fields),
+        symbols=list(symbols),
+    )
+    return {field: panels[field].reindex(columns=pd.Index(symbols)) for field in fields}
+
+
 def mark_price_on(
     mark_panel: pd.DataFrame,
     *,
@@ -144,6 +170,7 @@ def mark_price_on(
 __all__ = [
     "build_vwap_panel",
     "load_unadjusted_close",
+    "load_unadjusted_panels",
     "mark_price_on",
     "release_trading_days",
 ]

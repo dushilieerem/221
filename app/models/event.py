@@ -76,6 +76,14 @@ class EventBacktestConfig:
     lot_size: int = 100
     #: 是否拒绝买入 ST/*ST 标的。停牌与涨跌停由撮合层无条件拦截，不受配置影响。
     filter_st: bool = False
+    #: 成交/估值价格来源。
+    #: - adjusted：使用复权面板（现状，默认）；
+    #: - unadjusted：成交、估值、整手与费用使用未复权价格，信号仍用复权面板；
+    #:   持仓按 ``hfq_close / unadjusted_close`` 的每日比例缩放，等价于分红送转再投资。
+    execution_price_source: str = "adjusted"
+    #: 是否按时点调度。开启后策略可用 ``schedule.daily(cb, time="14:50")``
+    #: 注册盘中回调；成交价取下单时点的盘中价，15:00 之后的订单挂到次日。
+    timed_execution: bool = False
 
 
 @dataclass

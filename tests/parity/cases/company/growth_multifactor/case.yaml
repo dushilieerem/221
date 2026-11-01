@@ -1,0 +1,48 @@
+schema_version: 1
+name: growth_multifactor
+description: 公司策略「成长多因子」：全市场成长三因子 + eps 质量门 + 流通市值小盘倾斜，周频等权 5 只，4 月空仓
+
+jq:
+  backtest_id: "company-growth-multifactor"
+  frequency: day
+  run_time: "09:30"
+  start: "2019-01-02"
+  end: "2026-08-12"
+  initial_cash: 200000
+  benchmark: "000905.XSHG"
+  options:
+    use_real_price: true
+    slippage_rate: 0.0
+    commission: 0.0003
+    stamp_tax: 0.001
+    min_commission: 5
+
+svquant:
+  engine_mode: event
+  strategy_source: jq_strategy.py
+  strategy_dialect: joinquant
+  timed_execution: true
+  execution_timing: next_open
+  execution_price_source: unadjusted
+  # 全市场 A 股；策略自带 ST/停牌/次新/科创板过滤
+  universe: CSI_ALL
+  benchmark: CSI500
+  initial_capital: 200000
+  commission_rate: 0.0003
+  stamp_tax: 0.001
+  min_commission: 5
+  slippage_rate: 0.0
+
+comparison:
+  price_basis: real
+  strict_layers: [L0, L1, L2, L3, L4, L5]
+  # 兼容层与财务数据未就绪；先保证比对可执行
+  acceptance: diagnostic
+
+tolerances:
+  quantity: 0
+  price_abs: 0.005
+  cash_abs: 0.01
+  equity_rel: 1.0e-6
+  return_abs: 1.0e-3
+  metric_rel: 1.0e-3

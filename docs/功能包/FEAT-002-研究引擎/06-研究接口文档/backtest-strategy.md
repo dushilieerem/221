@@ -38,6 +38,8 @@ Web 端需要展示调仓或成交过程时，使用 `include_execution_timeline
 | `stamp_tax` | number | `0.001` | 卖出印花税率，两种模式都只对卖出部分计提。 |
 | `min_commission` | number | `5.0` | 每笔最低手续费，**仅事件模式生效**；显式设 `0` 即取消最低收费。向量化按换手率建模、没有单笔概念，回显为 `null`。 |
 | `execution_timing` | enum | `next_close` | `same_close` \| `next_close` \| `next_open`；信号恒在 T 日收盘产生，控制何时、以什么价成交。详见「成交时点语义」。 |
+| `execution_price_source` | enum | `adjusted` | 仅事件模式：`adjusted` 用复权价成交与估值；`unadjusted` 用未复权价成交、估值、整手与费用，信号历史仍用复权价，持仓按复权比例每日缩放。详见「成交价来源」。 |
+| `timed_execution` | boolean | `false` | 仅事件模式：按时点调度。策略用 `schedule.daily(cb, time="14:50")` 注册盘中回调，成交价取下单时点的盘中价；15:00 之后的订单挂到次日开盘。详见「时点调度」。 |
 | `initial_capital` | number | `1000000` | 初始资金。 |
 | `include_positions` | boolean | `false` | 返回持仓权重快照。 |
 | `include_rebalance_logs` | boolean | `false` | 仅向量化模式返回目标权重变化日志；事件模式请使用 `include_execution_timeline`。 |
@@ -68,6 +70,32 @@ Web 端需要展示调仓或成交过程时，使用 `include_execution_timeline
 **成交价同时用于定量**：事件模式的目标金额换算成股数时用同一个价格，保证自洽；滑点仍然作用在这个价格之上。
 
 `meta.execution_model` 会回显 `signal`、`fill_price`、`fill_session` 与 `fill_field`；事件模式的 `assumptions.execution` 取值为 `next_close` 或 `next_open`。
+
+## 成交价来源
+
+事件模式的 `execution_price_source` 决定成交、估值、整手和费用使用哪套价格：
+
+| 取值 | 信号/`context.data.history` | 成交价、估值、整手、费用 |
+|---|---|---|
+| `adjusted`（默认） | 复权面板 | 复权面板 |
+| `unadjusted` | 复权面板 | `unadjusted_price` 未复权面板 |
+
+`unadjusted` 适用于需要真实股数、真实现金和真实整手取整的回测。由于未复权价格在除权日会跳空，引擎在除权日开盘前按 `hfq_close / unadjusted_close` 的每日比例缩放持仓股数，取整余数折算现金；这等价于“分红送转全部再投资”，不需要额外的公司行为数据。该模式仅支持 `engine_mode="event"`，响应 `meta.execution_price_source` 与 `assumptions.price_source` 会回显实际口径。
+
+## 时点调度
+
+`timed_execution=true` 时，事件引擎按策略注册的时点顺序执行：
+
+| 时点 | 行为 |
+|---|---|
+| 09:00 等开盘前 | 只运行回调、收集订单，不成交 |
+| 09:30 | 执行挂起订单与 09:30 回调产生的订单，按开盘价成交 |
+| 09:31–14:59 | 每个时点先跑回调，再按该时点的盘中价成交 |
+| 15:00 及之后 | 只运行回调，订单挂起到次日 09:30，现金冻结 |
+
+盘中成交价优先读 `high_frequency/1min`（按日文件、`(date, "HH:MM", symbol)`）；该日期没有分钟数据时，上午时点回退到日线开盘价、下午时点回退到日线收盘价。`assumptions.execution` 为 `timed`，`assumptions.intraday_price` 为 `1m` 或 `daily_open_close_fallback`。
+
+该语义来自聚宽日频回测实测：09:31 与 14:50 的市价单按当时的 `last_price` 成交，15:10 的订单状态为 `new`、当日不成交。仅支持 `engine_mode="event"`。
 
 ## 交易成本语义
 
