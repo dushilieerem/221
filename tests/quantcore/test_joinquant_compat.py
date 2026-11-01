@@ -206,6 +206,29 @@ def test_index_membership_uses_point_in_time_snapshot(tmp_path):
     assert store.members("000300.XSHG", "2024-01-05") == ["600000.SH"]
 
 
+def test_index_membership_falls_back_to_derived_long_table(tmp_path):
+    """iFinD 未覆盖的指数读发布视图的 derived/index_membership 长表。"""
+    from app.services.strategy.compat.index import IndexMembership
+
+    data_dir = tmp_path / "ifind"
+    data_dir.mkdir()
+    derived = tmp_path / "derived" / "index_membership" / "year=2024"
+    derived.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "date": ["2024-01-02", "2024-01-02", "2024-01-03", "2024-01-02"],
+            "index_code": ["399317.SZ", "399317.SZ", "399317.SZ", "000300.SH"],
+            "symbol": ["000001.SZ", "600000.SH", "000001.SZ", "600000.SH"],
+            # 权重为空也是成分，不能按权重过滤。
+            "weight": [None, None, None, 0.5],
+        }
+    ).to_parquet(derived / "part.parquet")
+
+    store = IndexMembership(data_dir)
+    assert store.members("399317.XSHE", "2024-01-02") == ["000001.SZ", "600000.SH"]
+    assert store.members("399317.SZ", "2024-01-03") == ["000001.SZ"]
+
+
 def test_industry_store_reads_ths_field_by_date(tmp_path):
     from app.services.strategy.compat.industry import IndustryStore
 

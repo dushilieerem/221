@@ -27,7 +27,9 @@ def data_root(tmp_path):
             "revenue": [100.0, 60.0, 120.0],
             "tot_profit": [20.0, 12.0, 24.0],
             "net_profit_incl_min_int_inc": [10.0, 6.0, 12.0],
+            # 单季度扣非与年内累计净利润不同期，不能直接相除。
             "deducted_net_profit": [8.0, 5.0, 10.0],
+            "net_profit_incl_min_int_inc_after": [9.0, 5.4, 9.6],
         }
     ).to_parquet(income_dir / f"{SYMBOL}.parquet")
 
@@ -69,7 +71,7 @@ def test_fundamentals_expression_and_valuation_merge(data_root):
 
     assert frame.loc[0, "code"] == SYMBOL
     assert frame.loc[0, "operating_revenue"] == 100.0
-    assert frame.loc[0, "adjusted_profit_to_profit"] == pytest.approx(80.0)
+    assert frame.loc[0, "adjusted_profit_to_profit"] == pytest.approx(90.0)
     assert frame.loc[0, "pb_ratio"] == pytest.approx(1.2)
 
 

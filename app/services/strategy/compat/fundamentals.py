@@ -42,23 +42,24 @@ FINANCIAL_MAP: dict[tuple[str, str], tuple[str, str]] = {
 FINANCIAL_EXPRESSIONS: dict[tuple[str, str], tuple[str, str]] = {
     ("income", "adjusted_profit_to_profit"): (
         "income",
-        "deducted_net_profit / NULLIF(net_profit_incl_min_int_inc, 0)",
+        "net_profit_incl_min_int_inc_after / NULLIF(net_profit_incl_min_int_inc, 0)",
     ),
     # 聚宽把该指标挂在 indicator 下，实际由利润表两列计算。
     ("indicator", "adjusted_profit_to_profit"): (
         "income",
-        "deducted_net_profit / NULLIF(net_profit_incl_min_int_inc, 0)",
+        "net_profit_incl_min_int_inc_after / NULLIF(net_profit_incl_min_int_inc, 0)",
     ),
 }
 
 #: 表达式字段依赖的原始列；在 pandas 侧计算，避免每次查询都扫 Parquet。
+#: ``deducted_net_profit`` 是单季度口径，与年内累计的净利润不同期，不能直接相除。
 EXPRESSION_COLUMNS: dict[tuple[str, str], tuple[str, ...]] = {
     ("income", "adjusted_profit_to_profit"): (
-        "deducted_net_profit",
+        "net_profit_incl_min_int_inc_after",
         "net_profit_incl_min_int_inc",
     ),
     ("indicator", "adjusted_profit_to_profit"): (
-        "deducted_net_profit",
+        "net_profit_incl_min_int_inc_after",
         "net_profit_incl_min_int_inc",
     ),
 }
@@ -191,7 +192,7 @@ class FundamentalStore:
                     output[alias] = latest[mapped[1]].to_numpy()
                     continue
                 deducted = pd.to_numeric(
-                    latest["deducted_net_profit"], errors="coerce"
+                    latest["net_profit_incl_min_int_inc_after"], errors="coerce"
                 ).to_numpy(dtype=float)
                 net = pd.to_numeric(
                     latest["net_profit_incl_min_int_inc"], errors="coerce"
