@@ -44,11 +44,20 @@ FINANCIAL_EXPRESSIONS: dict[tuple[str, str], tuple[str, str]] = {
         "income",
         "deducted_net_profit / NULLIF(net_profit_incl_min_int_inc, 0)",
     ),
+    # 聚宽把该指标挂在 indicator 下，实际由利润表两列计算。
+    ("indicator", "adjusted_profit_to_profit"): (
+        "income",
+        "deducted_net_profit / NULLIF(net_profit_incl_min_int_inc, 0)",
+    ),
 }
 
 #: 表达式字段依赖的原始列；在 pandas 侧计算，避免每次查询都扫 Parquet。
 EXPRESSION_COLUMNS: dict[tuple[str, str], tuple[str, ...]] = {
     ("income", "adjusted_profit_to_profit"): (
+        "deducted_net_profit",
+        "net_profit_incl_min_int_inc",
+    ),
+    ("indicator", "adjusted_profit_to_profit"): (
         "deducted_net_profit",
         "net_profit_incl_min_int_inc",
     ),
@@ -187,7 +196,9 @@ class FundamentalStore:
                 net = pd.to_numeric(
                     latest["net_profit_incl_min_int_inc"], errors="coerce"
                 ).to_numpy(dtype=float)
-                output[alias] = deducted / np.where(net == 0, np.nan, net)
+                ratio = deducted / np.where(net == 0, np.nan, net)
+                # 聚宽 indicator.adjusted_profit_to_profit 是百分数。
+                output[alias] = ratio * 100.0
             merged = (
                 output
                 if merged is None

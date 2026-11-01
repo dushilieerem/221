@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 import numpy as np
@@ -274,6 +275,48 @@ class FactorStore:
         )
         frame = panels[field]
         return frame.reindex(columns=pd.Index(symbols))
+
+    # ------------------------------------------------------------ jqfactor 依赖
+
+    #: jqfactor 依赖名 -> (财务表, 列名)。``_N`` 后缀表示往前第 N 个报告期。
+    _DEPENDENCY_SOURCES: dict[str, tuple[str, str]] = {
+        "roe": ("pershare_index", "equity_roe"),
+        "roa": ("pershare_index", "roa"),
+        "gross_profit_margin": ("pershare_index", "gross_margin"),
+        "total_profit": ("income", "tot_profit"),
+        "financial_expense": ("income", "financial_expense"),
+        "operating_revenue": ("income", "revenue"),
+        "total_current_assets": ("balance", "total_current_assets"),
+        "total_non_current_assets": ("balance", "total_non_current_assets"),
+        "total_current_liability": ("balance", "total_current_liability"),
+        "total_non_current_liability": ("balance", "non_current_liabilities"),
+    }
+
+    def dependency_series(
+        self, dependency: str, symbols: list[str], as_of: str
+    ) -> pd.Series:
+        """聚宽 ``Factor.dependencies`` 的 PIT 取值。"""
+
+        base = dependency
+        offset = 0
+        match = re.fullmatch(r"(.+?)_(\d+)", dependency)
+        if match is not None:
+            base, offset = match.group(1), int(match.group(2))
+        source = self._DEPENDENCY_SOURCES.get(base)
+        if source is None:
+            raise NotImplementedError(f"jqfactor 依赖暂未实现: {dependency}")
+        statement, column = source
+        frame = visible(load_statement(self.root, statement, [column]), as_of)
+        if frame.empty:
+            return pd.Series(dtype=float)
+        frame = (
+            frame.drop_duplicates(["Symbol", "m_timetag"], keep="last")
+            .sort_values(["Symbol", "m_timetag"])
+            .copy()
+        )
+        frame["_rank"] = frame.groupby("Symbol").cumcount(ascending=False)
+        picks = frame.loc[frame["_rank"] == offset]
+        return picks.set_index("Symbol")[column].astype(float).reindex(symbols)
 
     # ------------------------------------------------------------ 数据访问
 

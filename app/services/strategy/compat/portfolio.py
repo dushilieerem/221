@@ -58,6 +58,12 @@ class JQPortfolioView:
         return self.cash
 
     @property
+    def portfolio_value(self) -> float:
+        """聚宽 ``portfolio.portfolio_value`` 与 ``total_value`` 同义。"""
+
+        return self.total_value
+
+    @property
     def returns(self) -> float:
         engine = getattr(self._market, "_engine", None)
         initial = getattr(getattr(engine, "config", None), "initial_capital", None)

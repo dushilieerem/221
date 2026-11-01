@@ -292,6 +292,42 @@ def test_industry_store_prefers_derived_industry_daily(tmp_path):
     }
 
 
+def test_calc_factors_runs_factor_with_pit_dependencies(tmp_path):
+    from app.services.strategy.compat.factors import FactorStore
+    from app.services.strategy.compat.financial_cache import clear_cache
+    from app.services.strategy.compat.runtime import Factor, JoinQuantRuntime
+
+    clear_cache()
+    directory = tmp_path / "3_financial_data" / "pershare_index"
+    directory.mkdir(parents=True)
+    periods = ["20231231", "20240331", "20240630", "20240930", "20241231"]
+    pd.DataFrame(
+        {
+            "Symbol": [SYMBOL] * len(periods),
+            "m_timetag": periods,
+            "m_anntime": ["20240401", "20240430", "20240830", "20241030", "20250401"],
+            "equity_roe": [10.0, 11.0, 12.0, 13.0, 14.0],
+        }
+    ).to_parquet(directory / f"{SYMBOL}.parquet")
+
+    class RoeChange(Factor):
+        name = "RoeChange"
+        dependencies = ("roe", "roe_4")
+
+        def calc(self, data):
+            return data["roe"].iloc[-1] - data["roe_4"].iloc[-1]
+
+    runtime = JoinQuantRuntime(
+        factors=FactorStore(root=tmp_path, data_engine=object())
+    )
+    result = runtime.calc_factors([SYMBOL], [RoeChange()], end_date="2025-06-01")
+    clear_cache()
+
+    frame = result["RoeChange"]
+    assert frame.shape == (1, 1)
+    assert frame.iloc[0, 0] == pytest.approx(4.0)
+
+
 class _StubIndex:
     def members(self, code, date):
         return ["000001.SZ", "600000.SH"]

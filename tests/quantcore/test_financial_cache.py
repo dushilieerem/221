@@ -69,7 +69,7 @@ def test_fundamentals_expression_and_valuation_merge(data_root):
 
     assert frame.loc[0, "code"] == SYMBOL
     assert frame.loc[0, "operating_revenue"] == 100.0
-    assert frame.loc[0, "adjusted_profit_to_profit"] == pytest.approx(0.8)
+    assert frame.loc[0, "adjusted_profit_to_profit"] == pytest.approx(80.0)
     assert frame.loc[0, "pb_ratio"] == pytest.approx(1.2)
 
 

@@ -459,8 +459,49 @@ class JoinQuantRuntime:
             )
         return result
 
-    def calc_factors(self, *args: Any, **kwargs: Any):
-        raise NotImplementedError("calc_factors 需要 jqfactor 因子兼容层")
+    def calc_factors(
+        self,
+        securities,
+        factors,
+        start_date=None,
+        end_date=None,
+        **kwargs: Any,
+    ):
+        """执行聚宽自定义 ``Factor`` 子类。
+
+        策略通常只用单日（start=end）；兼容层按 ``end_date`` 取 PIT 依赖，
+        返回 ``{factor.name: DataFrame[date × code]}``。
+        """
+
+        if self.factors is None:
+            raise NotImplementedError("jqfactor 数据目录未配置")
+        symbols = [securities] if isinstance(securities, str) else list(securities)
+        as_of = end_date if end_date is not None else start_date
+        as_of = as_of if as_of is not None else self._current_date()
+        timestamp = pd.Timestamp(as_of).normalize()
+        as_of_text = timestamp.strftime("%Y-%m-%d")
+        result: dict[str, pd.DataFrame] = {}
+        for factor in factors:
+            data: dict[str, pd.DataFrame] = {}
+            for dependency in getattr(factor, "dependencies", ()) or ():
+                series = self.factors.dependency_series(
+                    dependency, symbols, as_of_text
+                )
+                data[dependency] = pd.DataFrame(
+                    [series.reindex(symbols).to_numpy()],
+                    index=[timestamp],
+                    columns=symbols,
+                )
+            values = factor.calc(data)
+            if isinstance(values, pd.Series):
+                frame = values.reindex(symbols).to_frame().T
+                frame.index = [timestamp]
+                frame.columns = symbols
+            else:
+                frame = pd.DataFrame(values)
+                frame = frame.reindex(columns=symbols)
+            result[str(getattr(factor, "name", "factor"))] = frame
+        return result
 
     def get_index_stocks(self, index_symbol, date=None, **kwargs: Any):
         if self.index is None:
@@ -632,7 +673,7 @@ class JoinQuantRuntime:
             "balance": balance,
             "income": income,
             "cash_flow": cash_flow,
-            "Factor": _Unsupported("Factor"),
+            "Factor": Factor,
         }
 
     def _current_date(self):
@@ -756,6 +797,17 @@ class JQOrder:
         self.status = status
         self.side = "buy" if amount > 0 else ("sell" if amount < 0 else None)
         self.is_buy = amount > 0
+
+
+class Factor:
+    """聚宽 jqfactor ``Factor`` 基类的最小实现。"""
+
+    name: str = ""
+    max_window: int = 1
+    dependencies: tuple[str, ...] = ()
+
+    def calc(self, data: dict[str, pd.DataFrame]):
+        raise NotImplementedError("Factor 子类必须实现 calc(data)")
 
 
 class MarketOrderStyle:
