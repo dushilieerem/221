@@ -465,6 +465,46 @@ def test_get_price_long_format_with_high_limit():
     assert row["high_limit"] == pytest.approx(11.55)
 
 
+MONTH_END_PROBE = """
+def initialize(context):
+    g.days = []
+    run_monthly(mark, -1, time='14:55')
+
+def mark(context):
+    g.days.append(str(context.current_dt.date()))
+"""
+
+
+def test_run_monthly_negative_monthday_uses_last_trading_day():
+    from app.models.event import EventBacktestConfig
+
+    dates = pd.to_datetime(["2024-01-29", "2024-01-30", "2024-01-31"])
+    adjusted = {
+        field: pd.DataFrame({SYMBOL: [10.0] * len(dates)}, index=dates)
+        for field in ("open", "high", "low", "close")
+    }
+    unadjusted = {
+        "open": pd.DataFrame({SYMBOL: [10.0] * len(dates)}, index=dates),
+        "close": pd.DataFrame({SYMBOL: [10.0] * len(dates)}, index=dates),
+    }
+    strategy = load_joinquant_strategy(MONTH_END_PROBE)
+    EventBacktestEngine(
+        adjusted,
+        EventBacktestConfig(
+            initial_capital=100_000.0,
+            commission_rate=0.0,
+            min_commission=0.0,
+            stamp_tax_rate=0.0,
+            slippage_rate=0.0,
+            execution_price_source="unadjusted",
+            timed_execution=True,
+        ),
+        execution_panels=unadjusted,
+    ).run(strategy)
+
+    assert strategy.runtime.g.days == ["2024-01-31"]
+
+
 def test_get_index_stocks_delegates_to_membership():
     strategy = load_joinquant_strategy(
         "def initialize(context):\n    g.stocks = get_index_stocks('000300.XSHG')\n",

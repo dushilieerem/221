@@ -117,7 +117,21 @@ class JoinQuantRuntime:
     def run_monthly(
         self, func, monthday: int = 1, time: str = "09:30", **kwargs: Any
     ) -> None:
-        self.context.schedule.monthly(func, trading_day=max(1, int(monthday)), time=time)
+        monthday = int(monthday)
+        if monthday < 0:
+            # 聚宽负数表示月末倒数第 N 个交易日（-1 = 最后一个交易日）。
+            nth = abs(monthday)
+
+            def scheduled(context) -> None:
+                if _is_nth_last_trading_day(context, nth, period="month"):
+                    func(context)
+
+            scheduled.__name__ = getattr(func, "__name__", "run_monthly")
+            self.context.schedule.daily(scheduled, time=time)
+            return
+        self.context.schedule.monthly(
+            func, trading_day=max(1, monthday), time=time
+        )
 
     # ------------------------------------------------------------ 设置
 
@@ -856,6 +870,25 @@ class _Unsupported:
 
     def __call__(self, *args: Any, **kwargs: Any):
         raise NotImplementedError(f"{self._name} 在聚宽兼容层中暂未实现")
+
+
+def _is_nth_last_trading_day(
+    context, nth: int, *, period: str = "month"
+) -> bool:
+    """``date`` 是否为本月倒数第 ``nth`` 个交易日。"""
+
+    market = getattr(context, "market", None)
+    if market is None:
+        return False
+    day = pd.Timestamp(context.current_dt).normalize()
+    if period == "month":
+        start = day.replace(day=1)
+        end = start + pd.offsets.MonthEnd(1)
+    else:
+        start = day - pd.Timedelta(days=int(day.weekday()))
+        end = start + pd.Timedelta(days=6)
+    days = market.trade_days(start, end)
+    return len(days) >= nth and pd.Timestamp(days[-nth]).normalize() == day
 
 
 def _is_nth_trading_day(context, nth: int, *, period: str = "week") -> bool:
