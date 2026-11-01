@@ -1166,7 +1166,10 @@ class _MarketView:
         )
         status = self._engine.panels.get("listed_status")
         if status is not None:
-            st = status.reindex(index=previous.index, columns=previous.columns)
+            # 先投影列再取行；对 2600×5900 的状态面板一次性双轴 reindex 很慢。
+            st = status.reindex(columns=previous.columns).reindex(
+                index=previous.index
+            )
             ratios = ratios.mask(st.isin(["ST", "*ST"]), 0.05)
         values = (
             previous * (1.0 + ratios)

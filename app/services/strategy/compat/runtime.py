@@ -273,14 +273,9 @@ class JoinQuantRuntime:
                 frames[field] = raw[source]
 
         if not panel:
-            pieces = [
-                _long_frame(frames, symbol, requested, skip_paused=skip_paused)
-                for symbol in symbols
-            ]
-            pieces = [piece for piece in pieces if not piece.empty]
-            if not pieces:
-                return pd.DataFrame(columns=["time", "code", *requested])
-            return pd.concat(pieces, ignore_index=True)
+            return _long_frames(
+                frames, symbols, requested, skip_paused=skip_paused
+            )
 
         if single:
             return _frame_for(frames, symbols[0], requested)
@@ -826,6 +821,42 @@ def _is_nth_trading_day(context, nth: int, *, period: str = "week") -> bool:
         end = start + pd.offsets.MonthEnd(1)
     days = market.trade_days(start, end)
     return len(days) >= nth and pd.Timestamp(days[nth - 1]).normalize() == day
+
+
+def _long_frames(
+    frames: dict[str, pd.DataFrame],
+    symbols: list[str],
+    fields: list[str],
+    *,
+    skip_paused: bool = False,
+) -> pd.DataFrame:
+    """多标的 ``panel=False`` 长表：一次 melt/merge，避免逐标的构造。"""
+
+    available = [field for field in fields if field in frames]
+    if not available:
+        return pd.DataFrame(columns=["time", "code", *fields])
+    symbol_index = pd.Index(symbols)
+    merged: pd.DataFrame | None = None
+    for field in available:
+        frame = frames[field].reindex(columns=symbol_index)
+        if frame.empty:
+            continue
+        long = (
+            frame.rename_axis("time")
+            .reset_index()
+            .melt(id_vars="time", var_name="code", value_name=field)
+        )
+        if merged is None:
+            merged = long
+        else:
+            merged = merged.merge(
+                long, on=["time", "code"], how="outer", sort=False
+            )
+    if merged is None:
+        return pd.DataFrame(columns=["time", "code", *fields])
+    if skip_paused:
+        merged = merged.dropna(subset=available, how="all")
+    return merged[["time", "code", *available]].reset_index(drop=True)
 
 
 def _long_frame(
