@@ -74,6 +74,7 @@ def load_joinquant_strategy(
     index=None,
     industry=None,
     index_prices=None,
+    finance=None,
 ) -> JoinQuantStrategyAdapter:
     """编译聚宽源码并返回适配器；检测到 BigQuant API 时明确拒绝。"""
 
@@ -91,6 +92,7 @@ def load_joinquant_strategy(
         index=index,
         industry=industry,
         index_prices=index_prices,
+        finance=finance,
     )
     namespace: dict[str, Any] = {"__name__": name, **runtime.globals()}
     # 聚宽策略常用 ``import builtins as bi`` 等；导入行已移除，这里补回别名。

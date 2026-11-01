@@ -30,6 +30,13 @@ def load_statement(
 
     directory = Path(root) / "3_financial_data" / statement
     if not any(directory.glob("*.parquet")):
+        # 新发布视图的 compat 目录只含策略直接读取的几张表；股本、分红等
+        # 在 free/ 下的独立 dataset 目录，按别名回退。
+        alias = {"dividend_factors": "dividend_actions"}.get(statement, statement)
+        fallback = Path(root).parent / alias
+        if any(fallback.glob("*.parquet")):
+            directory = fallback
+    if not any(directory.glob("*.parquet")):
         raise FileNotFoundError(f"财务表未下载: {directory}")
 
     requested = tuple(sorted(set(columns or ())))

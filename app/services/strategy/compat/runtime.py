@@ -77,6 +77,7 @@ class JoinQuantRuntime:
         index=None,
         industry=None,
         index_prices=None,
+        finance=None,
     ) -> None:
         self.context = None
         self.g = GlobalState()
@@ -88,7 +89,7 @@ class JoinQuantRuntime:
         self.index = index
         self.industry = industry
         self.index_prices = index_prices
-        self.finance = FinanceNamespace()
+        self.finance = finance if finance is not None else FinanceNamespace()
 
     def bind(self, context) -> None:
         self.context = context

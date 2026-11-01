@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import inspect
 import os
+from pathlib import Path
 
 import pandas as pd
 
@@ -127,6 +128,7 @@ def run_strategy_backtest(
             from app.services.security.code_guard import assert_safe_user_code
             from app.services.strategy.compat import load_joinquant_strategy
             from app.services.strategy.compat.factors import FactorStore
+            from app.services.strategy.compat.finance import FinanceNamespace
             from app.services.strategy.compat.fundamentals import FundamentalStore
             from app.services.strategy.compat.index import (
                 IndexMembership,
@@ -134,15 +136,43 @@ def run_strategy_backtest(
             )
             from app.services.strategy.compat.industry import IndustryStore
             from app.services.strategy.compat.loader import strip_joinquant_imports
+            from app.services.strategy.compat.master import SecurityMaster
 
             cleaned = strip_joinquant_imports(strategy_code)
             if req.strategy_id is None:
                 assert_safe_user_code(cleaned, kind="策略")
             compat_data_dir = getattr(data_engine, "data_dir", None)
+            # 新发布视图在 <materialized>/free/compat 提供聚宽兼容目录树；
+            # 没有时回退到 MODELSCOPE_ROOT / staging。
+            compat_root = None
+            if compat_data_dir is not None:
+                candidate = Path(compat_data_dir).parent / "free" / "compat"
+                if candidate.is_dir():
+                    compat_root = candidate
+            fundamentals = (
+                FundamentalStore(compat_root)
+                if compat_root is not None
+                else FundamentalStore()
+            )
+            factors = (
+                FactorStore(root=compat_root, data_engine=data_engine)
+                if compat_root is not None
+                else FactorStore(data_engine=data_engine)
+            )
             strategy_obj = load_joinquant_strategy(
                 strategy_code,
-                fundamentals=FundamentalStore(),
-                factors=FactorStore(data_engine=data_engine),
+                fundamentals=fundamentals,
+                factors=factors,
+                master=(
+                    SecurityMaster(compat_root)
+                    if compat_root is not None
+                    else None
+                ),
+                finance=(
+                    FinanceNamespace(compat_root)
+                    if compat_root is not None
+                    else None
+                ),
                 index=(
                     IndexMembership(compat_data_dir)
                     if compat_data_dir is not None
