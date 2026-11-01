@@ -1043,6 +1043,7 @@ def test_strategy_backtest_returns_equity_and_positions(market_data_dir):
         "universe": "CSI500",
         "benchmark": "CSI300",
         "engine_mode": "vectorized",
+        "execution_price_source": "adjusted",
         "strategy_id": None,
         "strategy_version": None,
         "code_hash": None,

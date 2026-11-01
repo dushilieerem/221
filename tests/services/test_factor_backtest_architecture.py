@@ -149,6 +149,13 @@ def test_default_asset_and_data_paths_survive_package_moves(monkeypatch):
 
     for variable in ("SVQUANT_DATA_DIR", "SVQUANT_FACTOR_DIR", "SVQUANT_STRATEGY_DIR"):
         monkeypatch.delenv(variable, raising=False)
+    # 默认行情目录由运行配置决定；测试不依赖本机 config.yaml。
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        "app.config.get_runtime_settings",
+        lambda: SimpleNamespace(data_dir=ROOT.parent / "marketdata"),
+    )
     assert default_market_data_dir() == ROOT.parent / "marketdata"
     assert factor_database_path() == ROOT / "app/assets/factors/factor_library.db"
     assert factor_tool_path() == ROOT / "app/assets/factors/tool.py"

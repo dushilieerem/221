@@ -1,0 +1,46 @@
+schema_version: 1
+name: three_positive_smallcap
+description: 公司策略「三正小市值」：国证A指最小市值 10%，PB/ROE改善/经营现金流为正，等权 30 只
+
+jq:
+  backtest_id: "company-three-positive-smallcap"
+  frequency: day
+  run_time: "09:30"
+  start: "2019-01-02"
+  end: "2026-08-05"
+  initial_cash: 1000000
+  benchmark: "000300.XSHG"
+  options:
+    use_real_price: true
+    slippage: price_related_0.00246
+    commission: 0.0003
+    stamp_tax: 0.001
+    min_commission: 5
+
+svquant:
+  engine_mode: event
+  strategy_source: jq_strategy.py
+  strategy_dialect: joinquant
+  timed_execution: true
+  execution_timing: next_open
+  execution_price_source: unadjusted
+  universe: CSI_ALL
+  benchmark: CSI300
+  initial_capital: 1000000
+  commission_rate: 0.0003
+  stamp_tax: 0.001
+  min_commission: 5
+  slippage_rate: 0.00246
+
+comparison:
+  price_basis: real
+  strict_layers: [L0, L1, L2, L3, L4, L5]
+  acceptance: diagnostic
+
+tolerances:
+  quantity: 0
+  price_abs: 0.02
+  cash_abs: 0.01
+  equity_rel: 1.0e-6
+  return_abs: 1.0e-3
+  metric_rel: 1.0e-3

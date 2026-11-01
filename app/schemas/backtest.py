@@ -155,6 +155,8 @@ class StrategyBacktestRequest(BaseModel):
 
     #: 回测引擎模式；省略时保持既有向量化策略行为。
     engine_mode: Literal["vectorized", "event"] = "vectorized"
+    #: 策略方言：native = SVQuant 类契约；joinquant = 模块级聚宽源码，由兼容层执行。
+    strategy_dialect: Literal["native", "joinquant"] = "native"
     #: 策略 Python 源码（必须实现 generate_signals 方法）
     strategy_code: Optional[str] = Field(None, description="策略 Python 源码")
     #: 已保存策略的索引 ID；与 ``strategy_code`` 二选一
@@ -189,6 +191,14 @@ class StrategyBacktestRequest(BaseModel):
     execution_timing: Literal["same_close", "next_close", "next_open"] = Field(
         "next_close", description="same_close | next_close | next_open"
     )
+    #: 成交/估值价格来源。adjusted = 复权面板（现状）；unadjusted = 未复权价格
+    #: 成交与估值，信号历史仍用复权，持仓按复权比例每日缩放。
+    execution_price_source: Literal["adjusted", "unadjusted"] = Field(
+        "adjusted", description="adjusted | unadjusted"
+    )
+    #: 按时点调度：策略可用 schedule.daily(cb, time="14:50") 注册盘中回调；
+    #: 成交价取下单时点的盘中价，15:00 之后的订单挂到次日开盘。
+    timed_execution: bool = False
     initial_capital: float = Field(1_000_000.0, gt=0)
     #: 返回持仓权重（前端画持仓图用）
     include_positions: bool = False
@@ -208,6 +218,12 @@ class StrategyBacktestRequest(BaseModel):
             raise ValueError("benchmark 与 benchmark_snapshot 至多提供一个")
         if self.engine_mode == "event" and (self.universe_snapshot is not None or self.benchmark_snapshot is not None):
             raise ValueError("事件驱动策略暂不支持 universe_snapshot 或 benchmark_snapshot")
+        if self.engine_mode != "event" and self.execution_price_source != "adjusted":
+            raise ValueError("execution_price_source='unadjusted' 仅事件模式支持")
+        if self.engine_mode != "event" and self.timed_execution:
+            raise ValueError("timed_execution 仅事件模式支持")
+        if self.engine_mode != "event" and self.strategy_dialect != "native":
+            raise ValueError("strategy_dialect='joinquant' 仅事件模式支持")
         return self
 
 
@@ -421,6 +437,8 @@ class StrategyBacktestMeta(BaseModel):
     cost_model: dict[str, str] = Field(default_factory=dict)
     #: 成交时点口径回显（信号时点、成交价、成交日）。
     execution_timing: Literal["same_close", "next_close", "next_open"] = "next_close"
+    #: 成交/估值价格来源回显。
+    execution_price_source: Literal["adjusted", "unadjusted"] = "adjusted"
     execution_model: dict[str, str] = Field(default_factory=dict)
     trading_symbols: Optional[list[str]] = Field(None, exclude_if=lambda value: value is None)
     universe_asset: Optional[ResolvedAssetMeta] = Field(None, exclude_if=lambda value: value is None)

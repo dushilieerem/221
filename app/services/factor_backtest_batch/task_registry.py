@@ -52,6 +52,8 @@ class _BatchTask:
     batch_url: str | None = None
     error: str | None = None
     result: dict[str, Any] | None = None
+    progress_done: int | None = None
+    progress_total: int | None = None
 
 
 class FactorBacktestBatchTaskRegistry:
@@ -151,7 +153,17 @@ class FactorBacktestBatchTaskRegistry:
             if conn is None:
                 return None
             row = conn.execute("SELECT payload FROM async_task_snapshots WHERE task_id = ?", (task_id,)).fetchone()
-            return json.loads(row["payload"]) if row else None
+            if not row:
+                return None
+            data = json.loads(row["payload"])
+            # 进程内已无该任务却落盘为 queued/running：说明服务重启，运行态不恢复。
+            if data.get("status") in {"queued", "running"}:
+                data["status"] = "failed"
+                data["interrupted"] = True
+                data["finished_at"] = time.time()
+                data["error"] = data.get("error") or "服务重启导致任务中断；运行态不恢复，请重新提交"
+                self._persist_snapshot(data)
+            return data
         except Exception:
             return None
         finally:
@@ -210,14 +222,26 @@ class FactorBacktestBatchTaskRegistry:
                 if existing_id is not None and existing_id in self._tasks:
                     return self.snapshot(existing_id)  # type: ignore[return-value]
 
+            task_id = uuid.uuid4().hex
+
+            def wrapped_progress(done: int, total: int) -> None:
+                with self._lock:
+                    current = self._tasks.get(task_id)
+                    if current is not None:
+                        current.progress_done = int(done)
+                        current.progress_total = int(total)
+                self._persist_from_task(task_id)
+                if progress_callback is not None:
+                    progress_callback(done, total)
+
             task = _BatchTask(
-                task_id=uuid.uuid4().hex,
+                task_id=task_id,
                 request_key=request_key,
                 coordinator=coordinator,
                 profile=profile,
                 force_retry=force_retry,
                 dry_run=dry_run,
-                progress_callback=progress_callback,
+                progress_callback=wrapped_progress,
             )
             self._tasks[task.task_id] = task
             if request_key is not None:
@@ -229,6 +253,7 @@ class FactorBacktestBatchTaskRegistry:
                 if request_key is not None and self._dedupe.get(request_key) == task.task_id:
                     self._dedupe.pop(request_key, None)
                 raise
+            self._persist_from_task(task.task_id)
             return self.snapshot(task.task_id)  # type: ignore[return-value]
 
     def _run_task(self, task_id: str) -> None:
@@ -238,6 +263,7 @@ class FactorBacktestBatchTaskRegistry:
                 return
             task.status = "running"
             task.started_at = time.time()
+        self._persist_from_task(task_id)
 
         try:
             result = task.coordinator.run_sync(
@@ -281,17 +307,21 @@ class FactorBacktestBatchTaskRegistry:
         self._persist_from_task(task_id)
 
     def _persist_from_task(self, task_id: str) -> None:
-        # 在锁外落盘，避免 SQLite 写阻塞调度线程。
+        # 在锁外落盘，避免 SQLite 写阻塞调度线程；queued/running 也落盘，
+        # 让服务重启后能查到“中断”而不是 404。
         with self._lock:
             task = self._tasks.get(task_id)
-            if task is None or task.status not in {"succeeded", "failed"}:
+            if task is None:
                 return
             snap = {
                 "task_id": task.task_id, "status": task.status,
                 "created_at": task.created_at, "started_at": task.started_at,
-                "finished_at": task.finished_at, "batch_id": task.batch_id,
-                "batch_url": task.batch_url, "error": task.error,
+                "finished_at": task.finished_at or task.started_at or task.created_at,
+                "batch_id": task.batch_id, "batch_url": task.batch_url,
+                "error": task.error,
                 "result": dict(task.result) if task.result is not None else None,
+                "progress_done": task.progress_done,
+                "progress_total": task.progress_total,
             }
         self._persist_snapshot(snap)
 
@@ -313,6 +343,8 @@ class FactorBacktestBatchTaskRegistry:
                 "batch_url": task.batch_url,
                 "error": task.error,
                 "result": dict(task.result) if task.result is not None else None,
+                "progress_done": task.progress_done,
+                "progress_total": task.progress_total,
             }
 
     def get(self, task_id: str) -> dict[str, Any] | None:

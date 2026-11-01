@@ -1,0 +1,145 @@
+schema_version: 1
+# 公司策略对齐注册表。不是对账用例本身；每个策略在取得聚宽回测参数后
+# 再在该目录下建 case.yaml。
+# 状态：probe_pending | blocked_by_data | blocked_by_engine | ready | parity_pass | parity_accepted
+strategies:
+  - id: ma_trend
+    name: MA趋势跟踪
+    batch: A
+    source: 技术类/MA趋势跟踪/MA均线斜率角度趋势策略.py
+    jq_use_real_price: true
+    frequency: minute
+    intraday_times: true
+    dependencies: [minute_bars_5m, index_CSI300, sw_industry]
+    status: probe_pending
+    golden: partial  # 只有 result_1.csv，缺持仓/成交
+    pilot: true
+
+  - id: gaussian_trend
+    name: 高斯趋势-拉普拉斯防追高
+    batch: A
+    source: 技术类/高斯趋势-拉普拉斯防追高策略/高斯趋势-拉普拉斯防追高策略_.py
+    jq_use_real_price: true
+    frequency: minute
+    intraday_times: true
+    dependencies: [minute_bars_5m, index_CSI300, sw_industry]
+    status: blocked_by_engine
+
+  - id: pb_break
+    name: 破净组合 v2
+    batch: B
+    source: 价值类/破净组合/破净组合_v2_.py
+    jq_use_real_price: true
+    frequency: daily
+    intraday_times: true
+    dependencies: [financial_statements, dividends, total_shares, limit_prices, sw_industry, etf_511880]
+    status: blocked_by_data
+
+  - id: dividend_lowvol_growth
+    name: 红利低波+红利成长 v2
+    batch: B
+    source: 价值类/红利组合/红利低波+红利成长_v2.py
+    jq_use_real_price: true
+    frequency: daily
+    intraday_times: true
+    dependencies: [financial_statements, dividends, total_shares, limit_prices, sw_industry]
+    status: ready  # 兼容层已支持 finance.run_query/涨跌停/委托查询；P1 数据补齐前用免费源近似
+    golden: complete
+    initial_cash: 100000
+    cumulative_return: 690.87
+
+  - id: free_cash_flow
+    name: 自由现金流轮动 v3
+    batch: B
+    source: 价值类/自由现金流轮动策略/自由现金流轮动策略_v3.py
+    jq_use_real_price: true  # 策略组将改为 use_real_price=True；旧导出作废，需重新回测导出
+    frequency: minute
+    intraday_times: true
+    dependencies: [financial_statements, total_shares, limit_prices, index_399101, minute_volume]
+    status: blocked_by_data
+
+  - id: three_positive_smallcap
+    name: 三正小市值
+    batch: B
+    source: 小市值/三正小市值/三正小市值策略.py
+    jq_use_real_price: true
+    frequency: daily
+    intraday_times: false
+    dependencies: [financial_statements, total_shares, limit_prices, index_399317]
+    status: blocked_by_data
+    pilot: true
+
+  - id: buyback_smallcap
+    name: 回购小市值
+    batch: C
+    source: 小市值/回购小市值/回购小市值.py
+    jq_use_real_price: true
+    frequency: daily
+    intraday_times: true
+    dependencies: [buyback_announcements, total_shares, limit_prices]
+    status: blocked_by_data
+
+  - id: cn_2000_smallcap
+    name: 国证2000小市值
+    batch: C
+    source: 小市值/国证2000小市值/国证2000小市值.py
+    jq_use_real_price: true
+    frequency: daily
+    intraday_times: true
+    dependencies: [financial_statements, index_399303, auction_depth, limit_prices]
+    status: blocked_by_data
+
+  - id: growth_spread
+    name: 增速差额
+    batch: B
+    source: 成长类/增速差额/代码_9月21日修复.py
+    jq_use_real_price: true
+    frequency: daily
+    intraday_times: true
+    dependencies: [financial_statements, sw_industry, limit_prices]
+    status: blocked_by_data
+
+  - id: growth_multifactor
+    name: 成长多因子
+    batch: B
+    source: 成长类/成长多因子策略/成长多因子策略-1.py
+    jq_use_real_price: true
+    frequency: daily
+    intraday_times: true
+    dependencies: [financial_statements, float_market_cap, jqfactor]
+    status: ready  # 兼容层已支持 get_factor_values/get_fundamentals，正在产出对账报告
+    golden: complete
+    initial_cash: 200000
+    cumulative_return: 1914.1
+    pilot: false
+
+  - id: csi300_enhance
+    name: 沪深300增强
+    batch: B
+    source: 指数增强/沪深300增强/沪深300增强.py
+    jq_use_real_price: true
+    frequency: daily
+    intraday_times: false
+    dependencies: [financial_statements, index_CSI300, total_shares]
+    status: blocked_by_data
+    note: 目录中混有 BigQuant 版本，需确认对账使用哪份代码
+
+  - id: trend_prosperity_crowding
+    name: 趋势+景气+拥挤 行业轮动
+    batch: D
+    source: 行业轮动/“趋势+景气+拥挤”行业轮动/代码.py
+    jq_use_real_price: true
+    frequency: daily
+    intraday_times: false
+    dependencies: [northbound_holdings, analyst_consensus, sw_industry_index, float_market_cap, eps]
+    status: blocked_by_data
+
+  - id: industry_rotation_volume
+    name: 行业轮动 + 量价背离、高波动
+    batch: D
+    source: 行业轮动/行业轮动 + 量价背离、高波动策略/代码.py
+    jq_use_real_price: true
+    frequency: daily
+    intraday_times: false
+    dependencies: [northbound_holdings, hk_calendar, sw_industry, float_market_cap, eps]
+    status: blocked_by_data

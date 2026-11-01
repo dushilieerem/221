@@ -1,0 +1,47 @@
+schema_version: 1
+name: fixed_basket_hold_large
+description: 与 fixed_basket_hold 相同，但初始资金 1 亿；用于验证整手现金拖累随资金规模下降，并作为零分歧回归门禁
+
+jq:
+  # 在聚宽平台创建回测后把 ID 填到这里
+  backtest_id: "<在此填写聚宽回测 ID>"
+  frequency: day
+  run_time: "09:30"
+  start: "2024-01-02"
+  end: "2024-06-28"
+  initial_cash: 100000000
+  benchmark: "000300.XSHG"
+  options:
+    use_real_price: false
+    slippage_rate: 0.0
+    commission: 0.0003
+    stamp_tax: 0.0005
+    min_commission: 5
+
+svquant:
+  engine_mode: event
+  strategy_source: svquant_strategy.py
+  execution_timing: next_open
+  # 成交/估值用未复权价；信号仍用后复权，持仓按复权比例缩放
+  execution_price_source: unadjusted
+  universe: CSI300
+  benchmark: CSI300
+  initial_capital: 100000000
+  commission_rate: 0.0003
+  stamp_tax: 0.0005
+  min_commission: 5
+  slippage_rate: 0.0
+
+comparison:
+  price_basis: hfq
+  strict_layers: [L0, L1, L2, L3, L4, L5]
+  # 资金规模足够大，整手误差应低于容差，因此要求零分歧。
+  acceptance: strict
+
+tolerances:
+  quantity: 0
+  price_abs: 0.005
+  cash_abs: 0.01
+  equity_rel: 1.0e-6
+  return_abs: 1.0e-3
+  metric_rel: 1.0e-3

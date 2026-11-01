@@ -8,6 +8,8 @@ QuantCore 引擎调用以及 API 响应组装。``runner.py`` 仅保留兼容门
 from __future__ import annotations
 
 import inspect
+import os
+from pathlib import Path
 
 import pandas as pd
 
@@ -120,6 +122,81 @@ def run_strategy_backtest(
             strategy_version = asset.version
             code_hash = asset.code_hash
             expected_entrypoint = asset.entrypoint
+
+        # 聚宽方言：模块级 initialize + 兼容层，不要求策略类。
+        if req.strategy_dialect == "joinquant":
+            from app.services.security.code_guard import assert_safe_user_code
+            from app.services.strategy.compat import load_joinquant_strategy
+            from app.services.strategy.compat.factors import FactorStore
+            from app.services.strategy.compat.finance import FinanceNamespace
+            from app.services.strategy.compat.fundamentals import FundamentalStore
+            from app.services.strategy.compat.index import (
+                IndexMembership,
+                IndexPriceStore,
+            )
+            from app.services.strategy.compat.industry import IndustryStore
+            from app.services.strategy.compat.loader import strip_joinquant_imports
+            from app.services.strategy.compat.master import SecurityMaster
+
+            cleaned = strip_joinquant_imports(strategy_code)
+            if req.strategy_id is None:
+                assert_safe_user_code(cleaned, kind="策略")
+            compat_data_dir = getattr(data_engine, "data_dir", None)
+            # 新发布视图在 <materialized>/free/compat 提供聚宽兼容目录树；
+            # 没有时回退到 MODELSCOPE_ROOT / staging。
+            compat_root = None
+            if compat_data_dir is not None:
+                candidate = Path(compat_data_dir).parent / "free" / "compat"
+                if candidate.is_dir():
+                    compat_root = candidate
+            fundamentals = (
+                FundamentalStore(compat_root)
+                if compat_root is not None
+                else FundamentalStore()
+            )
+            factors = (
+                FactorStore(root=compat_root, data_engine=data_engine)
+                if compat_root is not None
+                else FactorStore(data_engine=data_engine)
+            )
+            strategy_obj = load_joinquant_strategy(
+                strategy_code,
+                fundamentals=fundamentals,
+                factors=factors,
+                master=(
+                    SecurityMaster(compat_root)
+                    if compat_root is not None
+                    else None
+                ),
+                finance=(
+                    FinanceNamespace(compat_root)
+                    if compat_root is not None
+                    else None
+                ),
+                index=(
+                    IndexMembership(compat_data_dir)
+                    if compat_data_dir is not None
+                    else None
+                ),
+                industry=(
+                    IndustryStore(compat_data_dir)
+                    if compat_data_dir is not None
+                    else None
+                ),
+                index_prices=(
+                    IndexPriceStore(compat_data_dir)
+                    if compat_data_dir is not None
+                    else None
+                ),
+            )
+            return _run_event_strategy_backtest(
+                req,
+                strategy_obj,
+                strategy_id,
+                strategy_version,
+                code_hash,
+                data_engine=data_engine,
+            )
 
         # 编译策略代码（P0-11 静态护栏；容器隔离后续）
         from app.services.security.code_guard import assert_safe_user_code
@@ -424,12 +501,16 @@ def _run_event_strategy_backtest(
         if data_engine is None:
             raise RuntimeError("StrategyExperiment 必须提供 DataEngine")
         provider = data_engine.provider
-        strategy = strategy_class()
+        strategy = strategy_class() if isinstance(strategy_class, type) else strategy_class
         required_fields = (
             set(getattr(strategy, "required_fields", ()))
             | set(getattr(strategy, "required_market_state", ()))
             | {"open", "high", "low", "close"}
         )
+        if req.strategy_dialect == "joinquant":
+            # 聚宽源码会直接 get_price(fields=['money'/'volume'])，
+            # 事件策略自身不一定声明这些字段。
+            required_fields |= {"volume", "amount", "turnover"}
         from app.utils.data import first_panel_date
 
         date_probe = data_engine.get_task_panels(
@@ -444,12 +525,20 @@ def _run_event_strategy_backtest(
             strategy,
             as_of=first_panel_date(date_probe),
         )
+        # 聚宽策略首日就要看上一交易日数据（选股、涨跌停、历史窗口），
+        # 多加载一段预热期；权益曲线仍从 req.start 开始。
+        panel_start = req.start
+        warmup = req.strategy_dialect == "joinquant"
+        if warmup:
+            panel_start = (
+                pd.Timestamp(req.start) - pd.Timedelta(days=400)
+            ).strftime("%Y-%m-%d")
         # 无条件加载 listed_status：退市剔除恒开启，不依赖 filter_st 开关。
         listed_status_available = True
         required_fields.add("listed_status")
         try:
             panels = data_engine.get_task_panels(
-                req.start,
+                panel_start,
                 req.end,
                 fields=sorted(required_fields),
                 symbols=raw_symbols,
@@ -462,7 +551,7 @@ def _run_event_strategy_backtest(
             listed_status_available = False
             required_fields.discard("listed_status")
             panels = data_engine.get_task_panels(
-                req.start,
+                panel_start,
                 req.end,
                 fields=sorted(required_fields),
                 symbols=raw_symbols,
@@ -486,6 +575,45 @@ def _run_event_strategy_backtest(
                     event_panels[field].index
                 )
 
+        execution_panels = None
+        if req.execution_price_source == "unadjusted":
+            from app.services.paper_trading.price_view import load_unadjusted_panels
+
+            try:
+                raw_execution = load_unadjusted_panels(
+                    data_engine,
+                    start=panel_start,
+                    end=req.end,
+                    symbols=raw_symbols,
+                    fields=("open", "close"),
+                )
+            except FileNotFoundError as exc:
+                raise ValueError(str(exc)) from exc
+            execution_panels = {
+                field: raw_execution[field].rename(columns=symbol_mapping)
+                for field in ("open", "close")
+            }
+
+        intraday_price = None
+        data_dir = getattr(data_engine, "data_dir", None)
+        if req.timed_execution and data_dir is not None:
+            from app.services.data.intraday import MinuteStore
+
+            store = MinuteStore(data_dir)
+
+            def _intraday_price(date, time, symbol):
+                # 分钟数据缺失（例如 2025-01-15 之前）时回退到日线近似。
+                try:
+                    return store.price_at(date, time, symbol)
+                except Exception:  # noqa: BLE001
+                    return None
+
+            intraday_price = _intraday_price
+
+        # 聚宽首日也有 previous_date；引擎从预热面板取真实上一交易日。
+        first_previous_date = None
+        active_start = req.start if warmup else None
+
         result = EventBacktestEngine(
             event_panels,
             EventBacktestConfig(
@@ -496,7 +624,13 @@ def _run_event_strategy_backtest(
                 slippage_rate=req.slippage_rate,
                 execution_timing=req.execution_timing,
                 filter_st=req.filter_st and listed_status_available,
+                execution_price_source=req.execution_price_source,
+                timed_execution=req.timed_execution,
             ),
+            execution_panels=execution_panels,
+            intraday_price=intraday_price,
+            first_previous_date=first_previous_date,
+            active_start=active_start,
         ).run(strategy)
         equity = result.equity_curve
         metrics = metrics_to_dict(MetricEngine().calculate_all(MetricContext(
@@ -550,7 +684,8 @@ def _run_event_strategy_backtest(
             benchmark_curve=_compute_equity_with_drawdown(benchmark_equity),
             excess_return=excess_return,
             meta=StrategyBacktestMeta(
-                strategy=strategy_class.__name__, universe=req.universe,
+                strategy=getattr(strategy_class, "__name__", type(strategy).__name__),
+                universe=req.universe,
                 benchmark=req.benchmark, engine_mode="event", strategy_id=strategy_id,
                 strategy_version=strategy_version, code_hash=code_hash,
                 filter_suspended=req.filter_suspended,
@@ -576,6 +711,7 @@ def _run_event_strategy_backtest(
                     ),
                 },
                 **_cost_meta(req, engine_mode="event"),
+                execution_price_source=req.execution_price_source,
                 trading_symbols=list(declared_symbols) or None,
             ),
             orders=orders,
@@ -586,6 +722,10 @@ def _run_event_strategy_backtest(
             execution_timeline=execution_timeline,
         )
     except Exception as exc:  # noqa: BLE001
+        if os.environ.get("RE_DEBUG"):
+            import traceback
+
+            traceback.print_exc()
         return StrategyBacktestResponse(error=f"{type(exc).__name__}: {exc}")
 
 
