@@ -253,6 +253,8 @@ def _compare_targets(jq: GoldenRun, svq: CanonicalRun, case: CaseSpec) -> LayerR
             layer.divergences.append(Divergence(
                 layer="L1", field="first_holding_date", symbol=symbol,
                 expected=jq_first[symbol], actual=svq_first[symbol],
+                # 排序用两侧较早的日期，避免“首个分歧”被无日期行抢占。
+                date=min(jq_first[symbol], svq_first[symbol]),
             ))
     return layer
 

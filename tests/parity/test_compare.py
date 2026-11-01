@@ -131,3 +131,17 @@ def test_symbol_set_divergence_carries_first_seen_date():
         if item.field == "symbol_set" and item.symbol == SYMBOL_B
     )
     assert row.date == DATES[2].strftime("%Y-%m-%d")
+
+
+def test_first_holding_date_divergence_is_dated_for_ordering():
+    jq, svq = make_runs()
+    drop = (svq.positions["date"] == DATES[1]) & (svq.positions["symbol"] == SYMBOL_A)
+    svq.positions = svq.positions[~drop].reset_index(drop=True)
+
+    result = compare_runs(jq, svq, make_case())
+
+    row = next(
+        item for item in _layer(result, "L1").divergences
+        if item.field == "first_holding_date" and item.symbol == SYMBOL_A
+    )
+    assert row.date == min(row.expected, row.actual)
