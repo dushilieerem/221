@@ -38,6 +38,8 @@ comparison:
   price_basis: real
   strict_layers: [L0, L1, L2, L3, L4, L5]
   acceptance: diagnostic
+  # 上证红利指数当前没有行情数据；RE 侧基准曲线用沪深300 代替。
+  benchmark_equivalent: CSI300
 
 tolerances:
   quantity: 0

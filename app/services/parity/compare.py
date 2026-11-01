@@ -208,6 +208,10 @@ def _declared_parameter_pairs(case: CaseSpec) -> list[tuple[str, Any, Any, float
     svq_benchmark = svq.get("benchmark")
     if jq_benchmark is not None and svq_benchmark is not None:
         mapped = BENCHMARK_ALIASES.get(str(jq_benchmark).upper(), str(jq_benchmark))
+        # 数据缺失时用例可显式声明等价基准，避免把参考口径差当成 L0 分歧。
+        equivalent = (case.comparison or {}).get("benchmark_equivalent")
+        if equivalent is not None:
+            mapped = str(equivalent)
         add("benchmark", mapped, svq_benchmark)
     return pairs
 
