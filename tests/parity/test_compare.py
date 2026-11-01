@@ -117,3 +117,17 @@ def test_report_mentions_first_divergence():
     assert "2024-01-04" in markdown
     assert "abc" in markdown
     assert "## L4" in markdown
+
+
+def test_symbol_set_divergence_carries_first_seen_date():
+    jq, svq = make_runs()
+    svq.positions = svq.positions.replace(SYMBOL_B, "600036.SH")
+    svq.fills = svq.fills.replace(SYMBOL_B, "600036.SH")
+
+    result = compare_runs(jq, svq, make_case())
+
+    row = next(
+        item for item in _layer(result, "L1").divergences
+        if item.field == "symbol_set" and item.symbol == SYMBOL_B
+    )
+    assert row.date == DATES[2].strftime("%Y-%m-%d")
