@@ -74,7 +74,7 @@ python -m app.cli.joinquant_parity compare --case fixed_basket_hold
 |---|---|---|---|
 | `growth_multifactor` | 2019-01-02 ~ 2026-08-12 | 财务 PIT、jqfactor、全市场 | 已出报告（`views/current` 新视图重跑，`output/joinquant-parity/growth_multifactor/20261101T083428Z/report.md`）：L0（参数/1846 个交易日）严格通过；首个严格分歧在 L1 选股集合，归因于 2014–2015 财务缺失导致 `earnings_growth` 全 NaN（数据侧 P1-7 blocked） |
 | `dividend_lowvol_growth` | 2017-01-12 ~ 2026-07-21 | 财务 PIT、分红事件、行业、涨跌停 | 已出报告（2310 个交易日，`output/joinquant-parity/dividend_lowvol_growth/20261101T112457Z/report.md`）：L0 通过（基准 000015 无行情，用例声明等价 CSI300）；首个严格分歧在 L1 选股集合，聚宽持有 000002.SZ 而 SVQuant 未持有；全区间运行 35 分钟 |
-| `pb_break` | 2020-01-02 ~ 2026-07-23 | 财务 PIT、分红、自定义 `calc_factors`、ETF 511880 | 已接入，全区间运行中；ETF 现金管理暂缺行情，登记为已知偏差 |
+| `pb_break` | 2020-01-02 ~ 2026-07-23 | 财务 PIT、分红、自定义 `calc_factors`、ETF 511880 | 已出报告（1588 个交易日，`output/joinquant-parity/pb_break/20261101T114256Z/report.md`）：L0 通过；首个严格分歧在 L1 选股集合，聚宽持有 000028.SZ 而 SVQuant 未持有；全区间 47 分钟；ETF 511880 暂无行情，现金管理登记为已知偏差 |
 
 其余 11 个策略的阻塞数据缺口与解锁顺序见 [04-13策略对齐路线](04-13策略对齐路线.md)。
 
