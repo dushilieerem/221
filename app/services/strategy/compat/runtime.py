@@ -496,13 +496,15 @@ class JoinQuantRuntime:
         as_of_text = timestamp.strftime("%Y-%m-%d")
         result: dict[str, pd.DataFrame] = {}
         for factor in factors:
+            dependencies = list(getattr(factor, "dependencies", ()) or ())
+            series_map = self.factors.dependency_series_many(
+                dependencies, symbols, as_of_text
+            )
             data: dict[str, pd.DataFrame] = {}
-            for dependency in getattr(factor, "dependencies", ()) or ():
-                series = self.factors.dependency_series(
-                    dependency, symbols, as_of_text
-                )
+            for dependency in dependencies:
+                series = series_map[dependency].reindex(symbols)
                 data[dependency] = pd.DataFrame(
-                    [series.reindex(symbols).to_numpy()],
+                    [series.to_numpy()],
                     index=[timestamp],
                     columns=symbols,
                 )
