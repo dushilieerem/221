@@ -2,7 +2,9 @@
 
 ## 状态
 
-进行中：工具链已实现并通过合成数据测试；首个真实金标待用合法聚宽账号导出。
+进行中：对账工具链与聚宽兼容层已实现；固定篮子用例 strict 通过；公司策略已接入成长多因子、红利低波+红利成长，正在产出 L0–L5 报告。13 个策略的路线与数据缺口见 [04-13策略对齐路线](04-13策略对齐路线.md)。
+
+数据职责已交接给 `svquant-data`：P0 完成后 RE 通过 `views/current` 的 `ifind` 与 `free/compat` 读取同一发布视图；交接工作包与验收见 `svquant-data/docs/HANDOFF-ResearchEngine.md`。
 
 ## 关联
 
@@ -63,6 +65,17 @@ python -m app.cli.joinquant_parity compare --case fixed_basket_hold
 2. `fixed_basket_hold` 在两侧各跑一次后能生成报告，并明确指出首个严格分歧（即使结果不为零）。
 3. 缺金标或缺行情时 `pytest tests/parity` 只 skip 端到端用例，其余用例照常运行。
 4. 对账工具不进入生产依赖：`app.main`、`app.api` 不导入 `app.services.parity`。
+
+## 公司策略用例
+
+公司策略源码快照在 `tests/parity/cases/company/<strategy>/jq_strategy.py`，通过聚宽兼容层原样执行；金标仍在本地 `expected/`（gitignore）。
+
+| 用例 | 区间 | 数据依赖 | 状态 |
+|---|---|---|---|
+| `growth_multifactor` | 2019-01-02 ~ 2026-08-12 | 财务 PIT、jqfactor、全市场 | 已出报告：L0（参数/1846 个交易日）严格通过；首个严格分歧在 L1 选股集合，归因于 2014–2015 财务缺失导致 `earnings_growth` 全 NaN（数据侧待补） |
+| `dividend_lowvol_growth` | 2017-01-12 ~ 2026-07-21 | 财务 PIT、分红事件、行业、涨跌停 | 已接入，全区间运行中 |
+
+其余 11 个策略的阻塞数据缺口与解锁顺序见 [04-13策略对齐路线](04-13策略对齐路线.md)。
 
 ## 首个真实结论（2024-01-02 ~ 2024-06-28，固定 4 只银行股）
 

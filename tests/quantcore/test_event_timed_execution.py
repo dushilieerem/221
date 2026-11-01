@@ -160,6 +160,42 @@ def test_first_previous_date_is_exposed_when_configured():
     ]
 
 
+def test_active_start_keeps_warmup_history_but_starts_equity_later():
+    dates = pd.to_datetime(
+        ["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"]
+    )
+    adjusted = {
+        field: pd.DataFrame({SYMBOL: [10.0, 10.0, 10.0, 10.0]}, index=dates)
+        for field in ("open", "high", "low", "close")
+    }
+    unadjusted = {
+        "open": pd.DataFrame({SYMBOL: [10.0] * 4}, index=dates),
+        "close": pd.DataFrame({SYMBOL: [10.5] * 4}, index=dates),
+    }
+
+    class Probe:
+        def __init__(self):
+            self.seen = []
+
+        def initialize(self, context):
+            context.schedule.daily(self.mark, time="09:31")
+
+        def mark(self, context):
+            self.seen.append((context.current_dt.date(), context.previous_date))
+
+    strategy = Probe()
+    result = EventBacktestEngine(
+        adjusted,
+        _config(),
+        execution_panels=unadjusted,
+        active_start="2024-01-03",
+    ).run(strategy)
+
+    assert list(result.equity_curve.index) == list(dates[1:])
+    assert strategy.seen[0][0] == dates[1].date()
+    assert strategy.seen[0][1] == dates[0].date()
+
+
 def test_normalize_time_accepts_joinquant_style():
     assert normalize_time("9:30") == "09:30"
     assert normalize_time("open") == "09:30"

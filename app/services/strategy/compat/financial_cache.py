@@ -49,7 +49,8 @@ def load_statement(
     available = set(pq.ParquetFile(first_file).schema_arrow.names)
     base = [column for column in _BASE_COLUMNS if column in available]
     fields = base + [column for column in requested if column not in base]
-    select = "*" if not fields else ", ".join(f'"{column}"' for column in fields)
+    # requested 为空表示整表（如 _income_rows）；不能只选基础列。
+    select = "*" if not requested else ", ".join(f'"{column}"' for column in fields)
     sql = (
         f"SELECT {select} FROM read_parquet("
         f"'{directory / '*.parquet'}', union_by_name=true)"

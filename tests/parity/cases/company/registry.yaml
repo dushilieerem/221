@@ -43,7 +43,10 @@ strategies:
     frequency: daily
     intraday_times: true
     dependencies: [financial_statements, dividends, total_shares, limit_prices, sw_industry]
-    status: blocked_by_data
+    status: ready  # 兼容层已支持 finance.run_query/涨跌停/委托查询；P1 数据补齐前用免费源近似
+    golden: complete
+    initial_cash: 100000
+    cumulative_return: 690.87
 
   - id: free_cash_flow
     name: 自由现金流轮动 v3
@@ -104,7 +107,7 @@ strategies:
     frequency: daily
     intraday_times: true
     dependencies: [financial_statements, float_market_cap, jqfactor]
-    status: blocked_by_data  # 需要 jqfactor.get_factor_values 与财务数据
+    status: ready  # 兼容层已支持 get_factor_values/get_fundamentals，正在产出对账报告
     golden: complete
     initial_cash: 200000
     cumulative_return: 1914.1

@@ -138,13 +138,13 @@ class JoinQuantRuntime:
 
     # ------------------------------------------------------------ 下单
 
-    def order(self, security: str, amount: float, **kwargs: Any) -> Any:
+    def order(self, security: str, amount: float, *args: Any, **kwargs: Any) -> Any:
         current = self.context.portfolio.quantity(security)
         desired = current + int(amount)
         event = self.context.orders.target_quantity(security, desired)
         return self._jq_order(security, event, desired)
 
-    def order_value(self, security: str, value: float, **kwargs: Any) -> Any:
+    def order_value(self, security: str, value: float, *args: Any, **kwargs: Any) -> Any:
         price = self.context.market.current_price(security)
         current_value = self.context.portfolio.quantity(security) * (price or 0.0)
         target_value = current_value + float(value)
@@ -152,18 +152,18 @@ class JoinQuantRuntime:
         event = self.context.orders.target_value(security, target_value)
         return self._jq_order(security, event, desired)
 
-    def order_target(self, security: str, amount: float, **kwargs: Any) -> Any:
+    def order_target(self, security: str, amount: float, *args: Any, **kwargs: Any) -> Any:
         desired = int(amount)
         event = self.context.orders.target_quantity(security, desired)
         return self._jq_order(security, event, desired)
 
-    def order_target_value(self, security: str, value: float, **kwargs: Any) -> Any:
+    def order_target_value(self, security: str, value: float, *args: Any, **kwargs: Any) -> Any:
         price = self.context.market.current_price(security)
         desired = self._desired_quantity(float(value), price)
         event = self.context.orders.target_value(security, float(value))
         return self._jq_order(security, event, desired)
 
-    def order_target_percent(self, security: str, percent: float, **kwargs: Any) -> Any:
+    def order_target_percent(self, security: str, percent: float, *args: Any, **kwargs: Any) -> Any:
         value = self._total_value() * float(percent)
         price = self.context.market.current_price(security)
         desired = self._desired_quantity(value, price)
@@ -582,6 +582,8 @@ class JoinQuantRuntime:
             "set_order_cost": self.set_order_cost,
             "set_slippage": self.set_slippage,
             "OrderCost": OrderCost,
+            "MarketOrderStyle": MarketOrderStyle,
+            "LimitOrderStyle": LimitOrderStyle,
             "OrderStatus": OrderStatus,
             "FixedSlippage": FixedSlippage,
             "PriceRelatedSlippage": PriceRelatedSlippage,
@@ -741,6 +743,20 @@ class JQOrder:
         self.status = status
         self.side = "buy" if amount > 0 else ("sell" if amount < 0 else None)
         self.is_buy = amount > 0
+
+
+class MarketOrderStyle:
+    """聚宽市价单占位；兼容层按当前时点价格撮合。"""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.params = dict(kwargs)
+
+
+class LimitOrderStyle:
+    """聚宽限价单占位；保留限价供策略读取，成交仍按引擎时点价。"""
+
+    def __init__(self, limit_price: float | None = None, *args: Any, **kwargs: Any) -> None:
+        self.limit_price = limit_price
 
 
 class OrderCost:

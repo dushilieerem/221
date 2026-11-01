@@ -119,7 +119,7 @@ class FactorStore:
         return self._per_share("net_profit_parent_ttm", as_of)
 
     def _factor_non_recurring_gain_loss(self, symbols, as_of):
-        # 聚宽口径：最新报告期的归母净利润 - 扣非净利润（均为单季度字段）。
+        # 聚宽口径：最新报告期的归母净利润 - 扣非净利润（单季度字段）。
         rows = self._income_rows(as_of)
         result: dict[str, float] = {}
         for symbol, group in rows.groupby("Symbol"):
@@ -144,10 +144,8 @@ class FactorStore:
         return self._per_share("investing_cf_ttm", as_of)
 
     def _factor_total_operating_revenue_per_share_ttm(self, symbols, as_of):
-        revenue = self._per_share("revenue_ttm", as_of)
-        capital = self._latest_financial("capital", ["total_capital"], as_of)
-        capital = capital.set_index("Symbol")["total_capital"].astype(float)
-        return revenue / capital.replace(0.0, np.nan)
+        # per_share.revenue_ttm 是营业总收入 TTM（元），聚宽因子要求每股。
+        return self._per_share("revenue_ttm", as_of) / self._total_shares(as_of)
 
     def _factor_operating_cost_ttm(self, symbols, as_of):
         # 营业成本 = 营业总成本 - 税金及附加 - 销售/管理/研发/财务费用 - 资产减值损失。
@@ -238,8 +236,8 @@ class FactorStore:
         return cost.where(total.notna() & (total != 0), 0.0)
 
     def _factor_market_cap(self, symbols, as_of):
-        # 聚宽 market_cap 单位为亿元；供应商 total_mv 为元。
-        return self._valuation_series("total_mv", as_of) / 1e8
+        # 聚宽 jqfactor 的 market_cap 为元；valuation.market_cap 才是亿元。
+        return self._valuation_series("total_mv", as_of)
 
     # ------------------------------------------------------------ 价格类
 
@@ -278,6 +276,12 @@ class FactorStore:
         return frame.reindex(columns=pd.Index(symbols))
 
     # ------------------------------------------------------------ 数据访问
+
+    def _total_shares(self, as_of: str) -> pd.Series:
+        """PIT 总股本（股），用于把每股指标还原成聚宽的总量因子。"""
+
+        frame = self._latest_financial("capital", ["total_capital"], as_of)
+        return frame.set_index("Symbol")["total_capital"].astype(float)
 
     def _per_share(self, column: str, as_of: str) -> pd.Series:
         return self._latest_financial("per_share", [column], as_of).set_index(
