@@ -10,9 +10,11 @@ date_sequence 是 5956 列宽表，按需投影所需标的的行业列，避免
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from pathlib import Path
 
 import duckdb
+import pandas as pd
 import pyarrow.parquet as pq
 
 _INDUSTRY_FIELD = "ths_the_sw_industry_code_stock"
@@ -33,12 +35,20 @@ class IndustryStore:
     def __init__(self, data_dir: str | Path) -> None:
         self.path = Path(data_dir) / "date_sequence" / "date_sequence.parquet"
         self._columns: dict[str, str] | None = None
+        self._derived_dir = (
+            Path(data_dir).parent / "derived" / "industry_daily"
+        )
+        self._derived: pd.DataFrame | None = None
+        self._derived_by_date: dict[pd.Timestamp, pd.DataFrame] = {}
+        self._derived_dates: list[pd.Timestamp] = []
 
     def industries(
         self,
         symbols: list[str],
         as_of: str | object,
     ) -> dict[str, dict[str, dict[str, str]]]:
+        if self._derived_dir.is_dir():
+            return self._derived_industries(symbols, as_of)
         columns = self._columns_for()
         selected = [(symbol, columns[symbol]) for symbol in symbols if symbol in columns]
         if not selected:
@@ -69,6 +79,50 @@ class IndustryStore:
             code = str(value)
             result[symbol] = {
                 "sw_l1": {"industry_code": code, "industry_name": code}
+            }
+        return result
+
+    def _derived_industries(
+        self, symbols: list[str], as_of: str | object
+    ) -> dict[str, dict[str, dict[str, str]]]:
+        """优先读 P0-7 的 industry_daily 长表（含 SW 代码/名称）。"""
+
+        if self._derived is None:
+            files = sorted(self._derived_dir.rglob("*.parquet"))
+            if not files:
+                self._derived = pd.DataFrame()
+            else:
+                self._derived = pd.concat(
+                    [pd.read_parquet(path) for path in files], ignore_index=True
+                )
+                self._derived["date"] = pd.to_datetime(
+                    self._derived["date"]
+                ).dt.normalize()
+                self._derived_by_date = {
+                    date: group.set_index("symbol")
+                    for date, group in self._derived.groupby("date", sort=True)
+                }
+                self._derived_dates = sorted(self._derived_by_date)
+        frame = self._derived
+        if frame is None or frame.empty:
+            return {}
+        target = pd.Timestamp(as_of).normalize()
+        position = bisect_right(self._derived_dates, target) - 1
+        if position < 0:
+            return {}
+        snapshot = self._derived_by_date[self._derived_dates[position]]
+        rows = snapshot.reindex(symbols).reset_index()
+        result: dict[str, dict[str, dict[str, str]]] = {}
+        for row in rows.itertuples(index=False):
+            code = getattr(row, "sw_l1_code", None)
+            name = getattr(row, "sw_l1_name", None)
+            if code is None or pd.isna(code):
+                code = getattr(row, "ths_code", None)
+            if code is None or pd.isna(code):
+                continue
+            name = name if name is not None and not pd.isna(name) else str(code)
+            result[str(row.symbol)] = {
+                "sw_l1": {"industry_code": str(code), "industry_name": str(name)}
             }
         return result
 

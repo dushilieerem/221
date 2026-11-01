@@ -1148,7 +1148,9 @@ class _MarketView:
             close = close.loc[close.index >= pd.Timestamp(start)]
         if end is not None:
             close = close.loc[close.index <= pd.Timestamp(end)]
-        # 先取昨收再做 count 截断，否则 count=1 时窗口内没有前一行。
+        if count is not None:
+            # 多取一行用于昨收；count=1 时不必构造整段历史面板。
+            close = close.iloc[-(int(count) + 1):]
         previous = close.shift(1)
         codes = pd.Series(
             [str(symbol).split(".")[0] for symbol in previous.columns],

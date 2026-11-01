@@ -266,6 +266,32 @@ def test_get_price_routes_index_codes(tmp_path):
     assert strategy.runtime.g.last == pytest.approx(100.5)
 
 
+def test_industry_store_prefers_derived_industry_daily(tmp_path):
+    from app.services.strategy.compat.industry import IndustryStore
+
+    derived = tmp_path / "derived" / "industry_daily" / "year=2024"
+    derived.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "date": ["2024-01-31", "2024-01-31"],
+            "symbol": ["000001.SZ", "600000.SH"],
+            "sw_l1_code": [pd.NA, "801780"],
+            "sw_l1_name": [pd.NA, "银行"],
+            "ths_code": ["S48", "S48"],
+        }
+    ).to_parquet(derived / "part.parquet")
+    (tmp_path / "ifind").mkdir()
+
+    store = IndustryStore(tmp_path / "ifind")
+    result = store.industries(["000001.SZ", "600000.SH"], "2024-02-01")
+
+    assert result["000001.SZ"]["sw_l1"]["industry_code"] == "S48"
+    assert result["600000.SH"]["sw_l1"] == {
+        "industry_code": "801780",
+        "industry_name": "银行",
+    }
+
+
 class _StubIndex:
     def members(self, code, date):
         return ["000001.SZ", "600000.SH"]
