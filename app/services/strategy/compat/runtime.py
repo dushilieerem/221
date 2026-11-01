@@ -426,7 +426,15 @@ class JoinQuantRuntime:
             raise NotImplementedError(
                 "财务数据目录未配置；请设置 MODELSCOPE_ROOT 或传入 FundamentalStore"
             )
-        as_of = date if date is not None else self._current_date()
+        if date is not None:
+            as_of = date
+        elif self.settings.get("option.avoid_future_data") and getattr(
+            self.context, "previous_date", None
+        ) is not None:
+            # 聚宽 avoid_future_data：当日 09:30 不可见当日收盘估值。
+            as_of = self.context.previous_date
+        else:
+            as_of = self._current_date()
         as_of = pd.Timestamp(as_of).strftime("%Y-%m-%d")
         return self.fundamentals.query(q, as_of=as_of)
 
