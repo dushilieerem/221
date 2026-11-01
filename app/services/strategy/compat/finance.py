@@ -81,24 +81,24 @@ class FinanceNamespace:
             merged["interest"], errors="coerce"
         ).fillna(0.0) / 10.0
         total_shares = pd.to_numeric(merged["total_capital"], errors="coerce")
-        merged["bonus_amount_rmb"] = cash_per_share * total_shares / 10000.0
-        merged["bonus_amount_rmb"] = merged["bonus_amount_rmb"].replace(
-            [np.inf, -np.inf], np.nan
-        )
-        self._prepared = merged
-        return merged
+        bonus = cash_per_share * total_shares / 10000.0
+        bonus = bonus.replace([np.inf, -np.inf], np.nan)
+        # 预先把列名改成聚宽查询字段，后续每次查询直接布尔过滤，避免重复
+        # 构造 20 万行的输出帧（dividend_query 会按 limit 做日期/代码二分）。
+        prepared = pd.DataFrame({
+            f"{_TABLE}.code": merged["Symbol"].to_numpy(),
+            f"{_TABLE}.a_registration_date": merged["time"].to_numpy(),
+            f"{_TABLE}.bonus_amount_rmb": bonus.to_numpy(),
+        })
+        self._prepared = prepared
+        return prepared
 
     def run_query(self, q: Query) -> pd.DataFrame:
         table = q.fields[0].table if q.fields else _TABLE
         if table != _TABLE:
             raise NotImplementedError(f"兼容层暂不支持 finance 表: {table}")
 
-        merged = self._prepared_frame()
-        output = pd.DataFrame({
-            f"{_TABLE}.code": merged["Symbol"].to_numpy(),
-            f"{_TABLE}.a_registration_date": merged["time"].to_numpy(),
-            f"{_TABLE}.bonus_amount_rmb": merged["bonus_amount_rmb"].to_numpy(),
-        })
+        output = self._prepared_frame()
         if q.where is not None:
             output = output[evaluate(output, q.where)]
         for order in q.orders:
@@ -106,6 +106,7 @@ class FinanceNamespace:
             output = output.sort_values(column, ascending=order.ascending)
         if q.limit_count is not None:
             output = output.head(int(q.limit_count))
+        output = output.copy()
         # 聚宽 run_query 返回裸字段名（code / a_registration_date / ...）。
         output = output.rename(
             columns={
