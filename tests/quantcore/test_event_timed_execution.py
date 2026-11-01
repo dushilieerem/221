@@ -200,6 +200,8 @@ def test_normalize_time_accepts_joinquant_style():
     assert normalize_time("9:30") == "09:30"
     assert normalize_time("open") == "09:30"
     assert normalize_time("14:50:00") == "14:50"
+    # 日频回测里 every_bar 每天只触发一次，落在开盘。
+    assert normalize_time("every_bar") == "09:30"
 
 
 def test_timed_execution_is_event_mode_only():

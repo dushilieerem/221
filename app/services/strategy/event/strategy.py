@@ -28,6 +28,8 @@ def normalize_time(value: str) -> str:
         "before_open": "09:00",
         "after_close": "15:10",
         "close": "15:00",
+        # 日频回测里 every_bar 每个交易日只触发一次，时点就是开盘。
+        "every_bar": "09:30",
     }
     if text.lower() in aliases:
         return aliases[text.lower()]

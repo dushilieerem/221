@@ -534,8 +534,37 @@ class JoinQuantRuntime:
         as_of = date if date is not None else self._current_date()
         return self.industry.industries(symbols, as_of)
 
-    def get_extras(self, *args: Any, **kwargs: Any):
-        raise NotImplementedError("get_extras 暂未实现")
+    def get_extras(
+        self,
+        field: str,
+        security_list,
+        start_date=None,
+        end_date=None,
+        count: int | None = None,
+        df: bool = True,
+        **kwargs: Any,
+    ):
+        """聚宽 ``get_extras``；目前只实现 ``is_st``（ST / *ST）。"""
+        if str(field) != "is_st":
+            raise NotImplementedError(f"get_extras 暂只支持 is_st: {field}")
+        market = getattr(self.context, "market", None)
+        engine = getattr(market, "_engine", None)
+        panel = getattr(engine, "panels", {}).get("listed_status") if engine else None
+        if panel is None:
+            raise NotImplementedError("当前数据版本没有 listed_status，无法取 is_st")
+        symbols = [security_list] if isinstance(security_list, str) else list(security_list)
+        frame = panel.reindex(columns=symbols)
+        if start_date is not None:
+            frame = frame.loc[frame.index >= pd.Timestamp(start_date)]
+        if end_date is not None:
+            frame = frame.loc[frame.index <= pd.Timestamp(end_date)]
+        if count is not None:
+            frame = frame.iloc[-int(count):]
+        status = frame.astype("object")
+        result = status.apply(lambda column: column.map(
+            lambda value: False if pd.isna(value) else str(value).strip() in {"ST", "*ST"}
+        ))
+        return result if df else result.to_dict()
 
     def _engine_orders(self) -> list[Any]:
         engine = getattr(getattr(self.context, "market", None), "_engine", None)

@@ -189,6 +189,50 @@ def test_get_factor_values_returns_date_by_symbol_frame():
     assert frame.iloc[0].tolist() == [0.25, 0.25]
 
 
+EXTRAS_PROBE = """
+def initialize(context):
+    g.st = None
+    run_daily(probe, time='09:31')
+
+def probe(context):
+    if g.st is not None or context.previous_date is None:
+        return
+    g.st = get_extras('is_st', ['000001.SZ', '600000.SH'], count=1,
+                      end_date=context.previous_date)
+"""
+
+
+def test_get_extras_is_st_reads_listed_status_panel():
+    adjusted, unadjusted = _panels()
+    adjusted["listed_status"] = pd.DataFrame(
+        {
+            "000001.SZ": ["ST", "ST", None],
+            "600000.SH": [None, None, None],
+        },
+        index=DATES,
+    )
+    engine = EventBacktestEngine(
+        adjusted,
+        EventBacktestConfig(
+            initial_capital=100_000.0,
+            commission_rate=0.0,
+            min_commission=0.0,
+            stamp_tax_rate=0.0,
+            slippage_rate=0.0,
+            execution_price_source="unadjusted",
+            timed_execution=True,
+        ),
+        execution_panels=unadjusted,
+        intraday_price=lambda date, time, symbol: 10.1 if time == "09:31" else None,
+    )
+    strategy = load_joinquant_strategy(EXTRAS_PROBE)
+    engine.run(strategy)
+
+    frame = strategy.runtime.g.st
+    assert list(frame.columns) == ["000001.SZ", "600000.SH"]
+    assert frame.iloc[0].tolist() == [True, False]
+
+
 def test_index_membership_uses_point_in_time_snapshot(tmp_path):
     from app.services.strategy.compat.index import IndexMembership
 
