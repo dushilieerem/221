@@ -532,15 +532,19 @@ class JoinQuantRuntime:
         pending = list(getattr(self.context.orders, "pending", ()))
         pending_ids = {order.order_id for order in pending}
         today = pd.Timestamp(self.context.current_dt).normalize()
+        # 订单按提交顺序追加；从尾部回看，遇到更早日期即可停止。
+        today_orders: list[Any] = []
+        for order in reversed(self._engine_orders()):
+            submitted = getattr(order, "submitted_at", None)
+            if submitted is None:
+                continue
+            if pd.Timestamp(submitted).normalize() != today:
+                break
+            today_orders.append(order)
         result: dict[str, JQOrder] = {}
-        for order in self._engine_orders() + pending:
+        for order in list(reversed(today_orders)) + pending:
             if order.order_id in result:
                 continue
-            # 聚宽策略只关心当日委托与跨日挂单；历史订单不再逐笔构造。
-            submitted = getattr(order, "submitted_at", None)
-            if submitted is not None and pd.Timestamp(submitted).normalize() != today:
-                if order.order_id not in pending_ids:
-                    continue
             result[order.order_id] = self._jq_order_from_event(
                 order, pending=order.order_id in pending_ids
             )
