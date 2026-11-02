@@ -71,36 +71,44 @@ class FactorStore:
         """毛利率 TTM 同比：最新 TTM 毛利率 / 去年同季 TTM 毛利率 - 1。"""
 
         rows = self._income_rows(as_of)
-        result: dict[str, float] = {}
-        for symbol, group in rows.groupby("Symbol"):
-            if self._is_financial(str(symbol)):
-                result[str(symbol)] = np.nan
-                continue
-            group = _prepare_periods(group)
-            total_cost = pd.to_numeric(group["total_operating_cost"], errors="coerce")
-            if total_cost.notna().sum() == 0 or float(total_cost.abs().max()) == 0:
-                result[str(symbol)] = np.nan
-                continue
-            revenue = pd.to_numeric(group["revenue"], errors="coerce")
-            cost = self._operating_cost_series(group)
-            latest = str(group.index.max())
-            prior = _prior_year_period(latest)
-            revenue_ttm = _ttm_sum(revenue)
-            prior_revenue_ttm = _ttm_sum(revenue, prior)
-            cost_ttm = _ttm_at(cost)
-            prior_cost_ttm = _ttm_at(cost, prior)
-            if any(pd.isna(x) for x in (revenue_ttm, prior_revenue_ttm, cost_ttm, prior_cost_ttm)):
-                result[str(symbol)] = np.nan
-                continue
-            if revenue_ttm == 0 or prior_revenue_ttm == 0:
-                result[str(symbol)] = np.nan
-                continue
-            margin = 1.0 - float(cost_ttm) / float(revenue_ttm)
-            prior_margin = 1.0 - float(prior_cost_ttm) / float(prior_revenue_ttm)
-            result[str(symbol)] = (
-                np.nan if prior_margin == 0 else margin / prior_margin - 1.0
-            )
-        return pd.Series(result, dtype=float)
+        if rows.empty:
+            return pd.Series(dtype=float)
+        latest = rows.drop_duplicates("Symbol", keep="last").set_index("Symbol")[
+            "m_timetag"
+        ]
+        index = latest.index
+        periods = latest.to_numpy().astype(str)
+        prior_periods = np.array([_prior_year_period(p) for p in periods])
+
+        revenue_wide = _wide_table(rows, "revenue")
+        cost_wide = _wide_table(
+            rows.assign(_cost=_operating_cost_column(rows)), "_cost"
+        )
+        total_wide = _wide_table(rows, "total_operating_cost")
+        revenue_ttm = _rolling_quarters(revenue_wide, 4)
+        revenue_now = _lookup(revenue_ttm, index.to_numpy(), periods)
+        revenue_prior = _lookup(revenue_ttm, index.to_numpy(), prior_periods)
+        cost_now = _ttm_values(cost_wide, index.to_numpy(), periods)
+        cost_prior = _ttm_values(cost_wide, index.to_numpy(), prior_periods)
+
+        empty_total = (
+            total_wide.isna().all(axis=1)
+            | (total_wide.abs().fillna(0.0).max(axis=1) == 0)
+        ).reindex(index).fillna(True).to_numpy(dtype=bool)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            margin = 1.0 - cost_now / revenue_now
+            prior_margin = 1.0 - cost_prior / revenue_prior
+            growth = margin / prior_margin - 1.0
+        invalid = np.asarray(empty_total, dtype=bool) | ~np.isfinite(growth)
+        invalid |= (revenue_now == 0) | (revenue_prior == 0) | (prior_margin == 0)
+        growth[invalid] = np.nan
+        result = pd.Series(growth, index=index, dtype=float)
+        financial = [
+            symbol for symbol in result.index if self._is_financial(str(symbol))
+        ]
+        if financial:
+            result.loc[financial] = np.nan
+        return result
 
     # ------------------------------------------------------------ 成长/规模
 
@@ -122,21 +130,14 @@ class FactorStore:
     def _factor_non_recurring_gain_loss(self, symbols, as_of):
         # 聚宽口径：最新报告期的归母净利润 - 扣非净利润（单季度字段）。
         rows = self._income_rows(as_of)
-        result: dict[str, float] = {}
-        for symbol, group in rows.groupby("Symbol"):
-            latest = group.sort_values("m_timetag").iloc[-1]
-            net = pd.to_numeric(
-                pd.Series([latest.get("net_profit_excl_min_int_inc")]), errors="coerce"
-            ).iloc[0]
-            deducted = pd.to_numeric(
-                pd.Series([latest.get("deducted_net_profit")]), errors="coerce"
-            ).iloc[0]
-            result[str(symbol)] = (
-                float(net) - float(deducted)
-                if pd.notna(net) and pd.notna(deducted)
-                else np.nan
-            )
-        return pd.Series(result, dtype=float)
+        if rows.empty:
+            return pd.Series(dtype=float)
+        latest = rows.drop_duplicates("Symbol", keep="last").set_index("Symbol")
+        net = pd.to_numeric(
+            latest["net_profit_excl_min_int_inc"], errors="coerce"
+        )
+        deducted = pd.to_numeric(latest["deducted_net_profit"], errors="coerce")
+        return (net - deducted).astype(float)
 
     def _factor_net_operate_cash_flow_ttm(self, symbols, as_of):
         return self._per_share("operating_cf_ttm", as_of)
@@ -150,20 +151,29 @@ class FactorStore:
 
     def _factor_operating_cost_ttm(self, symbols, as_of):
         # 营业成本 = 营业总成本 - 税金及附加 - 销售/管理/研发/财务费用 - 资产减值损失。
+        # 逐标的循环在 5000 只 × 每交易日多次调用时会退化到分钟级，这里整表向量化。
         rows = self._income_rows(as_of)
-        result: dict[str, float] = {}
-        for symbol, group in rows.groupby("Symbol"):
-            if self._is_financial(str(symbol)):
-                result[str(symbol)] = 0.0  # 银行/保险没有营业成本口径，聚宽返回 0
-                continue
-            group = _prepare_periods(group)
-            total_cost = pd.to_numeric(group["total_operating_cost"], errors="coerce")
-            if total_cost.notna().sum() == 0 or float(total_cost.abs().max()) == 0:
-                result[str(symbol)] = 0.0
-                continue
-            cost = self._operating_cost_series(group)
-            result[str(symbol)] = _ttm_at(cost)
-        return pd.Series(result, dtype=float)
+        if rows.empty:
+            return pd.Series(dtype=float)
+        latest = rows.drop_duplicates("Symbol", keep="last").set_index("Symbol")[
+            "m_timetag"
+        ]
+        periods = latest.to_numpy().astype(str)
+        total_wide = _wide_table(rows, "total_operating_cost")
+        cost_wide = _wide_table(rows.assign(_cost=_operating_cost_column(rows)), "_cost")
+        values = _ttm_values(cost_wide, latest.index.to_numpy(), periods)
+        result = pd.Series(values, index=latest.index, dtype=float)
+        # 银行/保险没有营业成本口径，聚宽返回 0；营业总成本全空或全 0 也按 0。
+        empty_total = total_wide.isna().all(axis=1) | (
+            total_wide.abs().fillna(0.0).max(axis=1) == 0
+        )
+        result[empty_total.reindex(result.index).fillna(True)] = 0.0
+        financial = [
+            symbol for symbol in result.index if self._is_financial(str(symbol))
+        ]
+        if financial:
+            result.loc[financial] = 0.0
+        return result
 
     def _factor_operating_profit_ttm(self, symbols, as_of):
         revenue = self._per_share("revenue_ttm", as_of)
@@ -541,6 +551,31 @@ class FactorStore:
             result = slope / mean_abs
         result[(counts_f < 4) | (mean_abs <= 0) | ~np.isfinite(result)] = np.nan
         return pd.Series(result, index=wide.index, dtype=float)
+
+
+def _operating_cost_column(rows: pd.DataFrame) -> pd.Series:
+    """整表计算营业成本（营业总成本扣除各项费用），行内运算。"""
+
+    total = pd.to_numeric(rows["total_operating_cost"], errors="coerce")
+    cost = total.copy()
+    for column in (
+        "less_taxes_surcharges_ops",
+        "sale_expense",
+        "less_gerl_admin_exp",
+        "research_expenses",
+        "financial_expense",
+        "less_impair_loss_assets",
+    ):
+        if column in rows.columns:
+            cost = cost - pd.to_numeric(rows[column], errors="coerce").fillna(0.0)
+    return cost.where(total.notna() & (total != 0), 0.0)
+
+
+def _rolling_quarters(wide: pd.DataFrame, periods: int) -> pd.DataFrame:
+    """单季度字段的滚动 N 期求和（按报告期排序）。"""
+
+    ordered = wide.sort_index(axis=1)
+    return ordered.T.rolling(periods, min_periods=periods).sum().T
 
 
 def _wide_table(rows: pd.DataFrame, column: str) -> pd.DataFrame:
