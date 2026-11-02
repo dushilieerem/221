@@ -124,6 +124,21 @@ class EventBacktestEngine:
             else frozenset()
         )
 
+    def _run_params(self):
+        """聚宽 ``context.run_params`` 的最小实现（日频区间回测）。"""
+
+        from types import SimpleNamespace
+
+        dates = getattr(self, "dates", None)
+        start = dates[0].date() if dates is not None and len(dates) else None
+        end = dates[-1].date() if dates is not None and len(dates) else None
+        return SimpleNamespace(
+            type="simple_backtest",
+            frequency="day",
+            start_date=start,
+            end_date=end,
+        )
+
     def run(self, strategy) -> EventBacktestResult:
         if self.config.timed_execution:
             return self._run_timed(strategy)
@@ -132,6 +147,7 @@ class EventBacktestEngine:
         orders = OrderService()
         context = StrategyContext(data, orders, PortfolioView(ledger))
         context.market = _MarketView(self)
+        context.run_params = self._run_params()
         strategy.initialize(context)
         self._reset_order_history()
         all_orders = self._all_orders
@@ -230,6 +246,7 @@ class EventBacktestEngine:
         orders = OrderService()
         context = StrategyContext(data, orders, PortfolioView(ledger))
         context.market = _MarketView(self)
+        context.run_params = self._run_params()
         strategy.initialize(context)
 
         registered = {normalize_time(item) for item in context.schedule.times()}
@@ -494,6 +511,7 @@ class EventBacktestEngine:
         orders = OrderService(prefix=order_prefix)
         context = StrategyContext(data, orders, PortfolioView(ledger))
         context.market = _MarketView(self)
+        context.run_params = self._run_params()
         # 与区间回测一致：initialize 时尚未开放任何行情。
         strategy.initialize(context)
         merge_state(context.state, persisted_state)
