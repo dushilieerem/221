@@ -1082,6 +1082,33 @@ class _MarketView:
     def previous_close(self, symbol: str) -> float | None:
         return self._engine._previous_close(symbol)
 
+    def paused_panel(
+        self,
+        symbols: list[str],
+        *,
+        count: int | None = None,
+        start: object | None = None,
+        end: object | None = None,
+    ) -> pd.DataFrame | None:
+        """历史停牌标记（1=停牌），供聚宽 ``get_price(fields=['paused'])`` 使用。"""
+
+        frame = self._engine.panels.get("up_and_down_status")
+        if frame is None:
+            return None
+        subset = frame.reindex(columns=pd.Index(symbols))
+        if start is not None:
+            subset = subset.loc[subset.index >= pd.Timestamp(start)]
+        if end is not None:
+            subset = subset.loc[subset.index <= pd.Timestamp(end)]
+        if count is not None:
+            subset = subset.iloc[-int(count):]
+        text = subset.astype("object")
+        return text.apply(
+            lambda column: column.map(
+                lambda value: 0 if pd.isna(value) else int("停牌" in str(value))
+            )
+        )
+
     def status_text(self, symbol: str) -> str | None:
         return self._engine._panel_text("up_and_down_status", symbol)
 

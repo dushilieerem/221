@@ -534,28 +534,31 @@ def _run_event_strategy_backtest(
                 pd.Timestamp(req.start) - pd.Timedelta(days=400)
             ).strftime("%Y-%m-%d")
         # 无条件加载 listed_status：退市剔除恒开启，不依赖 filter_st 开关。
+        # 聚宽策略还会 get_price(fields=['paused'])，需要逐日停牌状态。
         listed_status_available = True
         required_fields.add("listed_status")
-        try:
-            panels = data_engine.get_task_panels(
-                panel_start,
-                req.end,
-                fields=sorted(required_fields),
-                symbols=raw_symbols,
-            )
-        except KeyError:
-            # 当前数据版本没有 listed_status 时按因子回测的口径跳过该过滤，
-            # 其余字段照常加载；其余缺失字段仍然照常报错。
-            if "listed_status" not in required_fields:
+        if req.strategy_dialect == "joinquant":
+            required_fields.add("up_and_down_status")
+        while True:
+            try:
+                panels = data_engine.get_task_panels(
+                    panel_start,
+                    req.end,
+                    fields=sorted(required_fields),
+                    symbols=raw_symbols,
+                )
+                break
+            except KeyError:
+                # 当前数据版本没有状态字段时按因子回测的口径跳过对应过滤，
+                # 其余字段照常加载；其余缺失字段仍然照常报错。
+                if "up_and_down_status" in required_fields:
+                    required_fields.discard("up_and_down_status")
+                    continue
+                if "listed_status" in required_fields:
+                    listed_status_available = False
+                    required_fields.discard("listed_status")
+                    continue
                 raise
-            listed_status_available = False
-            required_fields.discard("listed_status")
-            panels = data_engine.get_task_panels(
-                panel_start,
-                req.end,
-                fields=sorted(required_fields),
-                symbols=raw_symbols,
-            )
         event_panels = {
             field: panels[field].rename(columns=symbol_mapping)
             for field in required_fields

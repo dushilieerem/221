@@ -280,7 +280,7 @@ class JoinQuantRuntime:
         source_fields = [
             aliases.get(field, field)
             for field in requested
-            if field not in {"high_limit", "low_limit"}
+            if field not in {"high_limit", "low_limit", "paused"}
         ]
         raw = self.context.market.history(
             symbols,
@@ -296,6 +296,14 @@ class JoinQuantRuntime:
                 frames[field] = self.context.market.limit_panel(
                     field, symbols, count=count, start=start_date, end=end
                 )
+                continue
+            if field == "paused":
+                # 聚宽返回 1/0；状态面板缺失时按 0 处理（不误判停牌）。
+                paused = self.context.market.paused_panel(
+                    symbols, count=count, start=start_date, end=end
+                )
+                if paused is not None:
+                    frames[field] = paused
                 continue
             source = aliases.get(field, field)
             if source in raw:

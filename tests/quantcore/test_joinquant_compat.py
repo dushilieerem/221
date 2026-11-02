@@ -719,3 +719,42 @@ def f():
 
     compile(cleaned, "<strategy>", "exec")
     assert "pass  # 聚宽导入由兼容层注入" in cleaned
+
+
+PAUSED_PROBE = """
+def initialize(context):
+    g.paused = None
+    run_daily(probe, time='09:31')
+
+def probe(context):
+    if g.paused is not None:
+        return
+    frame = get_price('000001.SZ', start_date='2024-01-02', end_date='2024-01-04',
+                      fields=['close', 'paused'], panel=False)
+    g.paused = frame['paused'].tolist()
+"""
+
+
+def test_get_price_exposes_paused_flag():
+    adjusted, unadjusted = _panels()
+    adjusted["up_and_down_status"] = pd.DataFrame(
+        {SYMBOL: ["非涨跌停", "停牌", "非涨跌停"]}, index=DATES
+    )
+    engine = EventBacktestEngine(
+        adjusted,
+        EventBacktestConfig(
+            initial_capital=100_000.0,
+            commission_rate=0.0,
+            min_commission=0.0,
+            stamp_tax_rate=0.0,
+            slippage_rate=0.0,
+            execution_price_source="unadjusted",
+            timed_execution=True,
+        ),
+        execution_panels=unadjusted,
+        intraday_price=lambda date, time, symbol: 10.1 if time == "09:31" else None,
+    )
+    strategy = load_joinquant_strategy(PAUSED_PROBE)
+    engine.run(strategy)
+
+    assert strategy.runtime.g.paused == [0, 1, 0]
