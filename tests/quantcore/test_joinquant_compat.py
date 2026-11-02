@@ -700,3 +700,22 @@ def test_industry_store_lists_stocks_by_sw_code(tmp_path):
     assert store.stocks("801999", "2024-01-02") == []
     # 非快照日取之前最近一个快照。
     assert store.stocks("801120", "2024-03-01") == ["600519.SH", "000858.SZ"]
+
+
+def test_strip_imports_keeps_try_block_valid():
+    """被移除的导入位于 try 块时，不能留下空块。"""
+    from app.services.strategy.compat.loader import strip_joinquant_imports
+
+    source = """
+def f():
+    try:
+        from jqfactor import get_factor_values
+    except Exception:
+        return None
+    return get_factor_values
+"""
+
+    cleaned = strip_joinquant_imports(source)
+
+    compile(cleaned, "<strategy>", "exec")
+    assert "pass  # 聚宽导入由兼容层注入" in cleaned
