@@ -758,3 +758,22 @@ def test_get_price_exposes_paused_flag():
     engine.run(strategy)
 
     assert strategy.runtime.g.paused == [0, 1, 0]
+
+
+def test_query_supports_field_to_field_comparison():
+    """聚宽 filter 里允许 valuation.code == balance.code。"""
+    from app.services.strategy.compat.query import (
+        Field, Query, evaluate,
+    )
+
+    q = Query(fields=[Field("valuation", "code")]).filter(
+        Field("valuation", "code") == Field("balance", "code")
+    )
+    frame = pd.DataFrame(
+        {
+            "valuation.code": ["000001.SZ", "600000.SH"],
+            "balance.code": ["000001.SZ", "000002.SZ"],
+        }
+    )
+    filtered = frame[evaluate(frame, q.where)]
+    assert filtered["valuation.code"].tolist() == ["000001.SZ"]

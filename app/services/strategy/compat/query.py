@@ -139,6 +139,12 @@ def evaluate(frame, condition: Condition | None):
     series = frame[column]
     op = condition.op
     right = condition.right
+    if isinstance(right, Field):
+        # 聚宽支持字段对字段比较（如 join 条件 valuation.code == balance.code）。
+        other = f"{right.table}.{right.name}"
+        if other not in frame.columns:
+            raise KeyError(f"查询字段不存在: {other}")
+        right = frame[other]
     if pd.api.types.is_datetime64_any_dtype(series) and op not in {"in", "not in"}:
         # 聚宽里日期条件常传 datetime.date；pandas 3 不再跨类型比较。
         try:
