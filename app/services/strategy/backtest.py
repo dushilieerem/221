@@ -482,6 +482,18 @@ def _strategy_filter_info(data_engine, panels, req: StrategyBacktestRequest) -> 
     )
 
 
+def _preload_panels(panels, fields) -> None:
+    """并发预读字段面板；12 个字段串行加载约占启动时间的一半。"""
+
+    names = [field for field in fields if field in panels]
+    if len(names) <= 2:
+        return
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=min(4, len(names))) as pool:
+        list(pool.map(lambda field: panels[field], names))
+
+
 def _rename_symbols(frame: pd.DataFrame, mapping: dict[str, str]) -> pd.DataFrame:
     """面板列名换成交易所代码；不复制数据块，避免 5000 列 rename 的开销。"""
 
@@ -574,6 +586,7 @@ def _run_event_strategy_backtest(
                     required_fields.discard("listed_status")
                     continue
                 raise
+        _preload_panels(panels, sorted(required_fields))
         event_panels = {
             field: _rename_symbols(panels[field], symbol_mapping)
             for field in required_fields
