@@ -72,7 +72,7 @@ python -m app.cli.joinquant_parity compare --case fixed_basket_hold
 
 | 用例 | 区间 | 数据依赖 | 状态 |
 |---|---|---|---|
-| `growth_multifactor` | 2019-01-02 ~ 2026-08-12 | 财务 PIT、jqfactor、全市场 | 已出报告（`views/current` 新视图重跑，`output/joinquant-parity/growth_multifactor/20261101T083428Z/report.md`）：L0（参数/1846 个交易日）严格通过；首个严格分歧在 L1 选股集合，归因于 2014–2015 财务缺失导致 `earnings_growth` 全 NaN（数据侧 P1-7 blocked） |
+| `growth_multifactor` | 2019-01-02 ~ 2026-08-12 | 财务 PIT、jqfactor、全市场 | 已出报告（2014–2015 财务补齐后重跑，`output/joinquant-parity/growth_multifactor/20261102T024904Z/report.md`）：L0 通过，1846 个交易日；首个严格分歧是 002591.SZ 建仓日（聚宽 2019-02-18 / SVQuant 2019-01-02）；持仓重合 63/144（补齐前 59/144），终值 127.6 万 vs 聚宽 200.1 万。注意：用例代码是根目录旧版，与最新版 `成长多因子策略-1.py` 不同 |
 | `dividend_lowvol_growth` | 2017-01-12 ~ 2026-07-21 | 财务 PIT、分红事件、行业、涨跌停 | 已出报告（2310 个交易日，`output/joinquant-parity/dividend_lowvol_growth/20261101T112457Z/report.md`）：L0 通过（基准 000015 无行情，用例声明等价 CSI300）；首个严格分歧在 L1 选股集合，聚宽持有 000002.SZ 而 SVQuant 未持有；全区间运行 35 分钟 |
 | `pb_break` | 2020-01-02 ~ 2026-07-23 | 财务 PIT、分红、自定义 `calc_factors`、ETF 511880 | 已出报告（1588 个交易日，`output/joinquant-parity/pb_break/20261101T131744Z/report.md`）：L0 通过；首个严格分歧在 L1 的 `first_holding_date`（000623.SZ 聚宽 2020-01-02 / SVQuant 2021-01-04）。归母口径修正后持有标的与聚宽重合 38/120（修正前 29/66），全区间终值 2.19M vs 聚宽 6.82M；ETF 511880 暂无行情，现金管理登记为已知偏差 |
 | `three_positive_smallcap` | 2019-01-02 ~ 2026-08-05 | 399317 成分、财务 PIT、市值分层 | 已出报告（1841 个交易日、2526 笔成交，`output/joinquant-parity/three_positive_smallcap/20261101T131808Z/report.md`）：L0 通过；首个严格分歧在 L1 的 `first_holding_date`（002205.SZ 聚宽 2019-01-02 / SVQuant 2020-01-13）；持有标的重合 259/407，全区间终值 24.9M vs 聚宽 7.98M |
