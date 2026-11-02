@@ -777,3 +777,79 @@ def test_query_supports_field_to_field_comparison():
     )
     filtered = frame[evaluate(frame, q.where)]
     assert filtered["valuation.code"].tolist() == ["000001.SZ"]
+
+
+def _income_fixture(tmp_path):
+    """两只股票、十个季度；revenue 是单季，成本费用是年内累计（与生产一致）。"""
+    from app.services.strategy.compat.financial_cache import clear_cache
+
+    clear_cache()
+    income_dir = tmp_path / "3_financial_data" / "income"
+    income_dir.mkdir(parents=True)
+    periods = [
+        "20220331", "20220630", "20220930", "20221231",
+        "20230331", "20230630", "20230930", "20231231",
+        "20240331", "20240630",
+    ]
+    years = [2022, 2022, 2022, 2022, 2023, 2023, 2023, 2023, 2024, 2024]
+    quarters = [1, 2, 3, 4, 1, 2, 3, 4, 1, 2]
+    ann = [f"{year}{month}" for year, month in zip(
+        [2022, 2022, 2022, 2023, 2023, 2023, 2023, 2024, 2024, 2024],
+        ["0425", "0825", "1025", "0425", "0425", "0825", "1025", "0425", "0425", "0825"],
+    )]
+    rows = []
+    expected = {}
+    for symbol, base in (("600000.SH", 10.0), ("600001.SH", 20.0)):
+        running = {}
+        cumulative_cost = []
+        for index, period in enumerate(periods):
+            single = base * (1 + index * 0.1)
+            running[years[index]] = running.get(years[index], 0.0) + single
+            cumulative = running[years[index]]
+            # 费用占营收 20%，营业成本固定为营收的 60%，毛利率恒为 40%。
+            cumulative_cost.append(cumulative * 0.6)
+            rows.append(
+                {
+                    "Symbol": symbol,
+                    "m_timetag": period,
+                    "m_anntime": ann[index],
+                    "revenue": single,
+                    "total_operating_cost": running[years[index]] * 0.8,
+                    "less_taxes_surcharges_ops": cumulative * 0.1,
+                    "sale_expense": cumulative * 0.05,
+                    "less_gerl_admin_exp": cumulative * 0.05,
+                    "research_expenses": 0.0,
+                    "financial_expense": 0.0,
+                    "less_impair_loss_assets": float("nan"),
+                    "net_profit_excl_min_int_inc": base * 0.2,
+                    "deducted_net_profit": base * 0.15,
+                }
+            )
+        # 最新一期 20240630：TTM = 本期累计 + 上年年报 - 上年同期累计。
+        expected[symbol] = cumulative_cost[9] + cumulative_cost[7] - cumulative_cost[5]
+    for symbol in ("600000.SH", "600001.SH"):
+        pd.DataFrame(rows).query("Symbol == @symbol").to_parquet(
+            income_dir / f"{symbol}.parquet"
+        )
+    return tmp_path, expected
+
+
+def test_vectorized_financial_factors_match_formulas(tmp_path):
+    from app.services.strategy.compat.factors import FactorStore
+    from app.services.strategy.compat.financial_cache import clear_cache
+
+    root, expected_cost = _income_fixture(tmp_path)
+    store = FactorStore(root=root, data_engine=object())
+
+    cost = store.compute("operating_cost_ttm", ["600000.SH"], as_of="2024-08-30")
+    assert cost["600000.SH"] == pytest.approx(expected_cost["600000.SH"])
+
+    non_recurring = store.compute(
+        "non_recurring_gain_loss", ["600000.SH"], as_of="2024-08-30"
+    )
+    assert non_recurring["600000.SH"] == pytest.approx(10.0 * 0.05)
+
+    degm = store.compute("DEGM", ["600000.SH"], as_of="2024-08-30")
+    # 毛利率恒为 40%，同比为 0。
+    assert degm["600000.SH"] == pytest.approx(0.0, abs=1e-12)
+    clear_cache()
