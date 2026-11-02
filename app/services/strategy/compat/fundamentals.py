@@ -34,25 +34,86 @@ FINANCIAL_MAP: dict[tuple[str, str], tuple[str, str]] = {
     ("indicator", "roe"): ("pershare_index", "equity_roe"),
     ("indicator", "inc_return"): ("pershare_index", "equity_roe"),
     ("indicator", "gross_profit_margin"): ("pershare_index", "gross_margin"),
-    ("indicator", "inc_net_profit_year_on_year"): ("pershare_index", "inc_net_profit_rate"),
+    # inc_net_profit_year_on_year 改由利润表按归母口径派生（见 FINANCIAL_EXPRESSIONS）。
     ("indicator", "inc_total_revenue_year_on_year"): ("pershare_index", "inc_revenue_rate"),
     ("indicator", "ocf_to_revenue"): ("pershare_index", "operating_cf_to_revenue"),
 }
 
+#: 由利润表原始列派生的聚宽字段；净利润一律按**归母**口径（聚宽 indicator 表口径）。
 FINANCIAL_EXPRESSIONS: dict[tuple[str, str], tuple[str, str]] = {
     ("income", "adjusted_profit_to_profit"): (
         "income",
-        "deducted_net_profit / NULLIF(net_profit_incl_min_int_inc, 0)",
+        "扣非归母净利润(累计) / 归母净利润(累计)",
+    ),
+    # 聚宽把该指标挂在 indicator 下，实际由利润表两列计算。
+    ("indicator", "adjusted_profit_to_profit"): (
+        "income",
+        "扣非归母净利润(累计) / 归母净利润(累计)",
+    ),
+    ("indicator", "inc_net_profit_year_on_year"): (
+        "income",
+        "(归母净利润(累计) - 去年同期) / |去年同期|",
     ),
 }
 
 #: 表达式字段依赖的原始列；在 pandas 侧计算，避免每次查询都扫 Parquet。
+#: ``net_profit_excl_min_int_inc`` 与 ``deducted_net_profit`` 是单季度口径，
+#: 累计值必须按年内累加，不能与累计净利润直接相除。
 EXPRESSION_COLUMNS: dict[tuple[str, str], tuple[str, ...]] = {
     ("income", "adjusted_profit_to_profit"): (
-        "deducted_net_profit",
-        "net_profit_incl_min_int_inc",
+        "net_profit_incl_min_int_inc_after",
+        "net_profit_excl_min_int_inc",
+    ),
+    ("indicator", "adjusted_profit_to_profit"): (
+        "net_profit_incl_min_int_inc_after",
+        "net_profit_excl_min_int_inc",
+    ),
+    ("indicator", "inc_net_profit_year_on_year"): (
+        "net_profit_excl_min_int_inc",
     ),
 }
+
+
+def _derive_income_fields(frame: pd.DataFrame) -> pd.DataFrame:
+    """在利润表全量可见行上派生聚宽口径字段（索引与入参一致）。
+
+    - 归母净利润累计：``net_profit_excl_min_int_inc`` 是单季度，按年内累加；
+    - 扣非比率：累计扣非归母 / 累计归母净利润，聚宽是百分数；
+    - 净利润同比：累计归母与去年同报告期累计归母比较。
+    """
+
+    data = frame.sort_values(["Symbol", "m_timetag"], kind="stable")
+    period = data["m_timetag"].astype(str)
+    parent = pd.to_numeric(data["net_profit_excl_min_int_inc"], errors="coerce")
+    parent_cum = parent.groupby([data["Symbol"], period.str[:4]]).cumsum()
+    lookup = pd.Series(
+        parent_cum.to_numpy(dtype=float),
+        index=pd.MultiIndex.from_arrays([data["Symbol"], period]),
+    )
+    prior_period = (period.str[:4].astype(int) - 1).astype(str) + period.str[4:]
+    prior = lookup.reindex(
+        pd.MultiIndex.from_arrays([data["Symbol"], prior_period])
+    ).to_numpy(dtype=float)
+    cum = parent_cum.to_numpy(dtype=float)
+
+    out = pd.DataFrame(index=data.index)
+    if "net_profit_incl_min_int_inc_after" in data.columns:
+        deducted = pd.to_numeric(
+            data["net_profit_incl_min_int_inc_after"], errors="coerce"
+        ).to_numpy(dtype=float)
+        ratio = np.full(cum.shape, np.nan)
+        np.divide(deducted * 100.0, cum, out=ratio, where=cum != 0)
+        out["adjusted_profit_to_profit"] = ratio
+    growth = np.full(cum.shape, np.nan)
+    np.divide(
+        (cum - prior) * 100.0,
+        np.abs(prior),
+        out=growth,
+        where=np.isfinite(prior) & (prior != 0),
+    )
+    out["inc_net_profit_year_on_year"] = growth
+    return out
+
 
 VALUATION_MAP: dict[str, str] = {
     "code": "symbol",
@@ -166,6 +227,14 @@ class FundamentalStore:
             )
             if frame.empty:
                 continue
+            needs_derived = any(
+                (field.table, field.name) in FINANCIAL_EXPRESSIONS for field in items
+            )
+            derived = (
+                _derive_income_fields(frame)
+                if statement == "income" and needs_derived
+                else None
+            )
             latest = (
                 frame.sort_values(
                     ["Symbol", "m_timetag", "m_anntime"],
@@ -181,13 +250,9 @@ class FundamentalStore:
                 if mapped is not None:
                     output[alias] = latest[mapped[1]].to_numpy()
                     continue
-                deducted = pd.to_numeric(
-                    latest["deducted_net_profit"], errors="coerce"
-                ).to_numpy(dtype=float)
-                net = pd.to_numeric(
-                    latest["net_profit_incl_min_int_inc"], errors="coerce"
-                ).to_numpy(dtype=float)
-                output[alias] = deducted / np.where(net == 0, np.nan, net)
+                if derived is None or field.name not in derived.columns:
+                    raise KeyError(f"未映射字段: {field.table}.{field.name}")
+                output[alias] = derived.loc[latest.index, field.name].to_numpy()
             merged = (
                 output
                 if merged is None

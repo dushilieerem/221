@@ -1,0 +1,46 @@
+schema_version: 1
+name: pb_break
+description: 公司策略「破净组合」：PB<1 深度价值 + ROA/毛利/EBIT/FF8/红利五分支，月度调仓
+
+jq:
+  backtest_id: "company-pb-break"
+  frequency: day
+  run_time: "09:30"
+  start: "2020-01-02"
+  end: "2026-07-23"
+  initial_cash: 1000000
+  benchmark: "000300.XSHG"
+  options:
+    use_real_price: true
+    slippage: fixed_0.001
+    commission: 0.00012
+    stamp_tax: 0.001
+    min_commission: 5
+
+svquant:
+  engine_mode: event
+  strategy_source: jq_strategy.py
+  strategy_dialect: joinquant
+  timed_execution: true
+  execution_timing: next_open
+  execution_price_source: unadjusted
+  universe: CSI_ALL
+  benchmark: CSI300
+  initial_capital: 1000000
+  commission_rate: 0.00012
+  stamp_tax: 0.001
+  min_commission: 5
+  slippage_rate: 0.001
+
+comparison:
+  price_basis: real
+  strict_layers: [L0, L1, L2, L3, L4, L5]
+  acceptance: diagnostic
+
+tolerances:
+  quantity: 0
+  price_abs: 0.01
+  cash_abs: 0.01
+  equity_rel: 1.0e-6
+  return_abs: 1.0e-3
+  metric_rel: 1.0e-3

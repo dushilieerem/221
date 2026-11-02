@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 import numpy as np
@@ -274,6 +275,68 @@ class FactorStore:
         )
         frame = panels[field]
         return frame.reindex(columns=pd.Index(symbols))
+
+    # ------------------------------------------------------------ jqfactor 依赖
+
+    #: jqfactor 依赖名 -> (财务表, 列名)。``_N`` 后缀表示往前第 N 个报告期。
+    _DEPENDENCY_SOURCES: dict[str, tuple[str, str]] = {
+        "roe": ("pershare_index", "equity_roe"),
+        "roa": ("pershare_index", "roa"),
+        "gross_profit_margin": ("pershare_index", "gross_margin"),
+        "total_profit": ("income", "tot_profit"),
+        "financial_expense": ("income", "financial_expense"),
+        "operating_revenue": ("income", "revenue"),
+        "total_current_assets": ("balance", "total_current_assets"),
+        "total_non_current_assets": ("balance", "total_non_current_assets"),
+        "total_current_liability": ("balance", "total_current_liability"),
+        "total_non_current_liability": ("balance", "non_current_liabilities"),
+    }
+
+    def dependency_series(
+        self, dependency: str, symbols: list[str], as_of: str
+    ) -> pd.Series:
+        """聚宽 ``Factor.dependencies`` 的 PIT 取值。"""
+
+        return self.dependency_series_many([dependency], symbols, as_of)[dependency]
+
+    def dependency_series_many(
+        self, dependencies: list[str], symbols: list[str], as_of: str
+    ) -> dict[str, pd.Series]:
+        """一次算多个依赖；同一财务表只载入/排序一次。"""
+
+        parsed: dict[tuple[str, str], list[tuple[str, int]]] = {}
+        for dependency in dependencies:
+            base = dependency
+            offset = 0
+            match = re.fullmatch(r"(.+?)_(\d+)", dependency)
+            if match is not None:
+                base, offset = match.group(1), int(match.group(2))
+            source = self._DEPENDENCY_SOURCES.get(base)
+            if source is None:
+                raise NotImplementedError(f"jqfactor 依赖暂未实现: {dependency}")
+            parsed.setdefault(source, []).append((dependency, offset))
+
+        result: dict[str, pd.Series] = {
+            dependency: pd.Series(dtype=float) for dependency in dependencies
+        }
+        for (statement, column), items in parsed.items():
+            frame = visible(load_statement(self.root, statement, [column]), as_of)
+            if frame.empty:
+                continue
+            frame = (
+                frame.drop_duplicates(["Symbol", "m_timetag"], keep="last")
+                .sort_values(["Symbol", "m_timetag"])
+                .copy()
+            )
+            frame["_rank"] = frame.groupby("Symbol").cumcount(ascending=False)
+            for dependency, offset in items:
+                picks = frame.loc[frame["_rank"] == offset]
+                result[dependency] = (
+                    picks.set_index("Symbol")[column]
+                    .astype(float)
+                    .reindex(symbols)
+                )
+        return result
 
     # ------------------------------------------------------------ 数据访问
 

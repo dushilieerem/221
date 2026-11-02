@@ -51,19 +51,34 @@ class _Log:
     def set_level(self, *args: Any, **kwargs: Any) -> None:  # noqa: D401
         """聚宽日志级别设置；兼容层统一交给 Python logging。"""
 
+    @staticmethod
+    def _render(message: object, args: tuple[Any, ...]) -> str:
+        """按聚宽习惯格式化；没有 ``%s`` 占位符时把参数追加到末尾。"""
+
+        text = str(message)
+        if not args:
+            return text
+        try:
+            return text % args
+        except (TypeError, ValueError):
+            return " ".join([text, *(str(arg) for arg in args)])
+
+    def _emit(self, level: int, message: object, args: tuple[Any, ...]) -> None:
+        self._logger.log(level, self._render(message, args))
+
     def debug(self, message: object, *args: Any) -> None:
-        self._logger.debug(str(message), *args)
+        self._emit(logging.DEBUG, message, args)
 
     def info(self, message: object, *args: Any) -> None:
-        self._logger.info(str(message), *args)
+        self._emit(logging.INFO, message, args)
 
     def warn(self, message: object, *args: Any) -> None:
-        self._logger.warning(str(message), *args)
+        self._emit(logging.WARNING, message, args)
 
     warning = warn
 
     def error(self, message: object, *args: Any) -> None:
-        self._logger.error(str(message), *args)
+        self._emit(logging.ERROR, message, args)
 
 
 class JoinQuantRuntime:
@@ -117,7 +132,21 @@ class JoinQuantRuntime:
     def run_monthly(
         self, func, monthday: int = 1, time: str = "09:30", **kwargs: Any
     ) -> None:
-        self.context.schedule.monthly(func, trading_day=max(1, int(monthday)), time=time)
+        monthday = int(monthday)
+        if monthday < 0:
+            # 聚宽负数表示月末倒数第 N 个交易日（-1 = 最后一个交易日）。
+            nth = abs(monthday)
+
+            def scheduled(context) -> None:
+                if _is_nth_last_trading_day(context, nth, period="month"):
+                    func(context)
+
+            scheduled.__name__ = getattr(func, "__name__", "run_monthly")
+            self.context.schedule.daily(scheduled, time=time)
+            return
+        self.context.schedule.monthly(
+            func, trading_day=max(1, monthday), time=time
+        )
 
     # ------------------------------------------------------------ 设置
 
@@ -273,14 +302,9 @@ class JoinQuantRuntime:
                 frames[field] = raw[source]
 
         if not panel:
-            pieces = [
-                _long_frame(frames, symbol, requested, skip_paused=skip_paused)
-                for symbol in symbols
-            ]
-            pieces = [piece for piece in pieces if not piece.empty]
-            if not pieces:
-                return pd.DataFrame(columns=["time", "code", *requested])
-            return pd.concat(pieces, ignore_index=True)
+            return _long_frames(
+                frames, symbols, requested, skip_paused=skip_paused
+            )
 
         if single:
             return _frame_for(frames, symbols[0], requested)
@@ -464,8 +488,51 @@ class JoinQuantRuntime:
             )
         return result
 
-    def calc_factors(self, *args: Any, **kwargs: Any):
-        raise NotImplementedError("calc_factors 需要 jqfactor 因子兼容层")
+    def calc_factors(
+        self,
+        securities,
+        factors,
+        start_date=None,
+        end_date=None,
+        **kwargs: Any,
+    ):
+        """执行聚宽自定义 ``Factor`` 子类。
+
+        策略通常只用单日（start=end）；兼容层按 ``end_date`` 取 PIT 依赖，
+        返回 ``{factor.name: DataFrame[date × code]}``。
+        """
+
+        if self.factors is None:
+            raise NotImplementedError("jqfactor 数据目录未配置")
+        symbols = [securities] if isinstance(securities, str) else list(securities)
+        as_of = end_date if end_date is not None else start_date
+        as_of = as_of if as_of is not None else self._current_date()
+        timestamp = pd.Timestamp(as_of).normalize()
+        as_of_text = timestamp.strftime("%Y-%m-%d")
+        result: dict[str, pd.DataFrame] = {}
+        for factor in factors:
+            dependencies = list(getattr(factor, "dependencies", ()) or ())
+            series_map = self.factors.dependency_series_many(
+                dependencies, symbols, as_of_text
+            )
+            data: dict[str, pd.DataFrame] = {}
+            for dependency in dependencies:
+                series = series_map[dependency].reindex(symbols)
+                data[dependency] = pd.DataFrame(
+                    [series.to_numpy()],
+                    index=[timestamp],
+                    columns=symbols,
+                )
+            values = factor.calc(data)
+            if isinstance(values, pd.Series):
+                frame = values.reindex(symbols).to_frame().T
+                frame.index = [timestamp]
+                frame.columns = symbols
+            else:
+                frame = pd.DataFrame(values)
+                frame = frame.reindex(columns=symbols)
+            result[str(getattr(factor, "name", "factor"))] = frame
+        return result
 
     def get_index_stocks(self, index_symbol, date=None, **kwargs: Any):
         if self.index is None:
@@ -482,8 +549,37 @@ class JoinQuantRuntime:
         as_of = date if date is not None else self._current_date()
         return self.industry.industries(symbols, as_of)
 
-    def get_extras(self, *args: Any, **kwargs: Any):
-        raise NotImplementedError("get_extras 暂未实现")
+    def get_extras(
+        self,
+        field: str,
+        security_list,
+        start_date=None,
+        end_date=None,
+        count: int | None = None,
+        df: bool = True,
+        **kwargs: Any,
+    ):
+        """聚宽 ``get_extras``；目前只实现 ``is_st``（ST / *ST）。"""
+        if str(field) != "is_st":
+            raise NotImplementedError(f"get_extras 暂只支持 is_st: {field}")
+        market = getattr(self.context, "market", None)
+        engine = getattr(market, "_engine", None)
+        panel = getattr(engine, "panels", {}).get("listed_status") if engine else None
+        if panel is None:
+            raise NotImplementedError("当前数据版本没有 listed_status，无法取 is_st")
+        symbols = [security_list] if isinstance(security_list, str) else list(security_list)
+        frame = panel.reindex(columns=symbols)
+        if start_date is not None:
+            frame = frame.loc[frame.index >= pd.Timestamp(start_date)]
+        if end_date is not None:
+            frame = frame.loc[frame.index <= pd.Timestamp(end_date)]
+        if count is not None:
+            frame = frame.iloc[-int(count):]
+        status = frame.astype("object")
+        result = status.apply(lambda column: column.map(
+            lambda value: False if pd.isna(value) else str(value).strip() in {"ST", "*ST"}
+        ))
+        return result if df else result.to_dict()
 
     def _engine_orders(self) -> list[Any]:
         engine = getattr(getattr(self.context, "market", None), "_engine", None)
@@ -637,7 +733,7 @@ class JoinQuantRuntime:
             "balance": balance,
             "income": income,
             "cash_flow": cash_flow,
-            "Factor": _Unsupported("Factor"),
+            "Factor": Factor,
         }
 
     def _current_date(self):
@@ -763,6 +859,17 @@ class JQOrder:
         self.is_buy = amount > 0
 
 
+class Factor:
+    """聚宽 jqfactor ``Factor`` 基类的最小实现。"""
+
+    name: str = ""
+    max_window: int = 1
+    dependencies: tuple[str, ...] = ()
+
+    def calc(self, data: dict[str, pd.DataFrame]):
+        raise NotImplementedError("Factor 子类必须实现 calc(data)")
+
+
 class MarketOrderStyle:
     """聚宽市价单占位；兼容层按当前时点价格撮合。"""
 
@@ -811,6 +918,25 @@ class _Unsupported:
         raise NotImplementedError(f"{self._name} 在聚宽兼容层中暂未实现")
 
 
+def _is_nth_last_trading_day(
+    context, nth: int, *, period: str = "month"
+) -> bool:
+    """``date`` 是否为本月倒数第 ``nth`` 个交易日。"""
+
+    market = getattr(context, "market", None)
+    if market is None:
+        return False
+    day = pd.Timestamp(context.current_dt).normalize()
+    if period == "month":
+        start = day.replace(day=1)
+        end = start + pd.offsets.MonthEnd(1)
+    else:
+        start = day - pd.Timedelta(days=int(day.weekday()))
+        end = start + pd.Timedelta(days=6)
+    days = market.trade_days(start, end)
+    return len(days) >= nth and pd.Timestamp(days[-nth]).normalize() == day
+
+
 def _is_nth_trading_day(context, nth: int, *, period: str = "week") -> bool:
     """``date`` 是否为本周/本月第 ``nth`` 个交易日（聚宽 run_* 语义）。"""
 
@@ -826,6 +952,42 @@ def _is_nth_trading_day(context, nth: int, *, period: str = "week") -> bool:
         end = start + pd.offsets.MonthEnd(1)
     days = market.trade_days(start, end)
     return len(days) >= nth and pd.Timestamp(days[nth - 1]).normalize() == day
+
+
+def _long_frames(
+    frames: dict[str, pd.DataFrame],
+    symbols: list[str],
+    fields: list[str],
+    *,
+    skip_paused: bool = False,
+) -> pd.DataFrame:
+    """多标的 ``panel=False`` 长表：一次 melt/merge，避免逐标的构造。"""
+
+    available = [field for field in fields if field in frames]
+    if not available:
+        return pd.DataFrame(columns=["time", "code", *fields])
+    symbol_index = pd.Index(symbols)
+    merged: pd.DataFrame | None = None
+    for field in available:
+        frame = frames[field].reindex(columns=symbol_index)
+        if frame.empty:
+            continue
+        long = (
+            frame.rename_axis("time")
+            .reset_index()
+            .melt(id_vars="time", var_name="code", value_name=field)
+        )
+        if merged is None:
+            merged = long
+        else:
+            merged = merged.merge(
+                long, on=["time", "code"], how="outer", sort=False
+            )
+    if merged is None:
+        return pd.DataFrame(columns=["time", "code", *fields])
+    if skip_paused:
+        merged = merged.dropna(subset=available, how="all")
+    return merged[["time", "code", *available]].reset_index(drop=True)
 
 
 def _long_frame(

@@ -21,13 +21,17 @@ def data_root(tmp_path):
     income_dir.mkdir(parents=True)
     pd.DataFrame(
         {
-            "Symbol": [SYMBOL, SYMBOL, SYMBOL],
-            "m_timetag": ["20231231", "20240630", "20241231"],
-            "m_anntime": ["20240401", "20240820", "20250330"],
-            "revenue": [100.0, 60.0, 120.0],
-            "tot_profit": [20.0, 12.0, 24.0],
-            "net_profit_incl_min_int_inc": [10.0, 6.0, 12.0],
-            "deducted_net_profit": [8.0, 5.0, 10.0],
+            "Symbol": [SYMBOL] * 4,
+            "m_timetag": ["20230630", "20231231", "20240630", "20241231"],
+            "m_anntime": ["20230825", "20240401", "20240820", "20250330"],
+            "revenue": [40.0, 100.0, 60.0, 120.0],
+            "tot_profit": [8.0, 20.0, 12.0, 24.0],
+            "net_profit_incl_min_int_inc": [4.0, 6.0, 6.0, 12.0],
+            # 单季度归母净利润；年内累计由它累加，不能直接和累计数混用。
+            "net_profit_excl_min_int_inc": [4.0, 6.0, 6.0, 12.0],
+            # 单季度扣非与年内累计净利润不同期，不能直接相除。
+            "deducted_net_profit": [3.2, 8.0, 5.0, 10.0],
+            "net_profit_incl_min_int_inc_after": [3.6, 9.0, 5.4, 9.6],
         }
     ).to_parquet(income_dir / f"{SYMBOL}.parquet")
 
@@ -69,8 +73,21 @@ def test_fundamentals_expression_and_valuation_merge(data_root):
 
     assert frame.loc[0, "code"] == SYMBOL
     assert frame.loc[0, "operating_revenue"] == 100.0
-    assert frame.loc[0, "adjusted_profit_to_profit"] == pytest.approx(0.8)
+    assert frame.loc[0, "adjusted_profit_to_profit"] == pytest.approx(90.0)
     assert frame.loc[0, "pb_ratio"] == pytest.approx(1.2)
+
+
+def test_fundamentals_net_profit_growth_uses_parent_cumulative(data_root):
+    """净利润同比按归母累计口径，与去年同期同报告期比较。"""
+    from app.services.strategy.compat.query import indicator
+
+    store = FundamentalStore(root=data_root)
+    q = query(indicator.inc_net_profit_year_on_year)
+
+    frame = store.query(q, as_of="2024-09-01")
+
+    # 2024H1 归母累计 6.0，2023H1 4.0。
+    assert frame.loc[0, "inc_net_profit_year_on_year"] == pytest.approx(50.0)
 
 
 def test_growth_from_annual_matches_polyfit(data_root):

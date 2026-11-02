@@ -189,6 +189,50 @@ def test_get_factor_values_returns_date_by_symbol_frame():
     assert frame.iloc[0].tolist() == [0.25, 0.25]
 
 
+EXTRAS_PROBE = """
+def initialize(context):
+    g.st = None
+    run_daily(probe, time='09:31')
+
+def probe(context):
+    if g.st is not None or context.previous_date is None:
+        return
+    g.st = get_extras('is_st', ['000001.SZ', '600000.SH'], count=1,
+                      end_date=context.previous_date)
+"""
+
+
+def test_get_extras_is_st_reads_listed_status_panel():
+    adjusted, unadjusted = _panels()
+    adjusted["listed_status"] = pd.DataFrame(
+        {
+            "000001.SZ": ["ST", "ST", None],
+            "600000.SH": [None, None, None],
+        },
+        index=DATES,
+    )
+    engine = EventBacktestEngine(
+        adjusted,
+        EventBacktestConfig(
+            initial_capital=100_000.0,
+            commission_rate=0.0,
+            min_commission=0.0,
+            stamp_tax_rate=0.0,
+            slippage_rate=0.0,
+            execution_price_source="unadjusted",
+            timed_execution=True,
+        ),
+        execution_panels=unadjusted,
+        intraday_price=lambda date, time, symbol: 10.1 if time == "09:31" else None,
+    )
+    strategy = load_joinquant_strategy(EXTRAS_PROBE)
+    engine.run(strategy)
+
+    frame = strategy.runtime.g.st
+    assert list(frame.columns) == ["000001.SZ", "600000.SH"]
+    assert frame.iloc[0].tolist() == [True, False]
+
+
 def test_index_membership_uses_point_in_time_snapshot(tmp_path):
     from app.services.strategy.compat.index import IndexMembership
 
@@ -204,6 +248,29 @@ def test_index_membership_uses_point_in_time_snapshot(tmp_path):
     assert store.members("000300.XSHG", "2024-01-02") == ["000001.SZ"]
     # 非快照日取之前最近一个快照，不使用未来成分。
     assert store.members("000300.XSHG", "2024-01-05") == ["600000.SH"]
+
+
+def test_index_membership_falls_back_to_derived_long_table(tmp_path):
+    """iFinD 未覆盖的指数读发布视图的 derived/index_membership 长表。"""
+    from app.services.strategy.compat.index import IndexMembership
+
+    data_dir = tmp_path / "ifind"
+    data_dir.mkdir()
+    derived = tmp_path / "derived" / "index_membership" / "year=2024"
+    derived.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "date": ["2024-01-02", "2024-01-02", "2024-01-03", "2024-01-02"],
+            "index_code": ["399317.SZ", "399317.SZ", "399317.SZ", "000300.SH"],
+            "symbol": ["000001.SZ", "600000.SH", "000001.SZ", "600000.SH"],
+            # 权重为空也是成分，不能按权重过滤。
+            "weight": [None, None, None, 0.5],
+        }
+    ).to_parquet(derived / "part.parquet")
+
+    store = IndexMembership(data_dir)
+    assert store.members("399317.XSHE", "2024-01-02") == ["000001.SZ", "600000.SH"]
+    assert store.members("399317.SZ", "2024-01-03") == ["000001.SZ"]
 
 
 def test_industry_store_reads_ths_field_by_date(tmp_path):
@@ -290,6 +357,42 @@ def test_industry_store_prefers_derived_industry_daily(tmp_path):
         "industry_code": "801780",
         "industry_name": "银行",
     }
+
+
+def test_calc_factors_runs_factor_with_pit_dependencies(tmp_path):
+    from app.services.strategy.compat.factors import FactorStore
+    from app.services.strategy.compat.financial_cache import clear_cache
+    from app.services.strategy.compat.runtime import Factor, JoinQuantRuntime
+
+    clear_cache()
+    directory = tmp_path / "3_financial_data" / "pershare_index"
+    directory.mkdir(parents=True)
+    periods = ["20231231", "20240331", "20240630", "20240930", "20241231"]
+    pd.DataFrame(
+        {
+            "Symbol": [SYMBOL] * len(periods),
+            "m_timetag": periods,
+            "m_anntime": ["20240401", "20240430", "20240830", "20241030", "20250401"],
+            "equity_roe": [10.0, 11.0, 12.0, 13.0, 14.0],
+        }
+    ).to_parquet(directory / f"{SYMBOL}.parquet")
+
+    class RoeChange(Factor):
+        name = "RoeChange"
+        dependencies = ("roe", "roe_4")
+
+        def calc(self, data):
+            return data["roe"].iloc[-1] - data["roe_4"].iloc[-1]
+
+    runtime = JoinQuantRuntime(
+        factors=FactorStore(root=tmp_path, data_engine=object())
+    )
+    result = runtime.calc_factors([SYMBOL], [RoeChange()], end_date="2025-06-01")
+    clear_cache()
+
+    frame = result["RoeChange"]
+    assert frame.shape == (1, 1)
+    assert frame.iloc[0, 0] == pytest.approx(4.0)
 
 
 class _StubIndex:
@@ -429,6 +532,46 @@ def test_get_price_long_format_with_high_limit():
     assert row["high_limit"] == pytest.approx(11.55)
 
 
+MONTH_END_PROBE = """
+def initialize(context):
+    g.days = []
+    run_monthly(mark, -1, time='14:55')
+
+def mark(context):
+    g.days.append(str(context.current_dt.date()))
+"""
+
+
+def test_run_monthly_negative_monthday_uses_last_trading_day():
+    from app.models.event import EventBacktestConfig
+
+    dates = pd.to_datetime(["2024-01-29", "2024-01-30", "2024-01-31"])
+    adjusted = {
+        field: pd.DataFrame({SYMBOL: [10.0] * len(dates)}, index=dates)
+        for field in ("open", "high", "low", "close")
+    }
+    unadjusted = {
+        "open": pd.DataFrame({SYMBOL: [10.0] * len(dates)}, index=dates),
+        "close": pd.DataFrame({SYMBOL: [10.0] * len(dates)}, index=dates),
+    }
+    strategy = load_joinquant_strategy(MONTH_END_PROBE)
+    EventBacktestEngine(
+        adjusted,
+        EventBacktestConfig(
+            initial_capital=100_000.0,
+            commission_rate=0.0,
+            min_commission=0.0,
+            stamp_tax_rate=0.0,
+            slippage_rate=0.0,
+            execution_price_source="unadjusted",
+            timed_execution=True,
+        ),
+        execution_panels=unadjusted,
+    ).run(strategy)
+
+    assert strategy.runtime.g.days == ["2024-01-31"]
+
+
 def test_get_index_stocks_delegates_to_membership():
     strategy = load_joinquant_strategy(
         "def initialize(context):\n    g.stocks = get_index_stocks('000300.XSHG')\n",
@@ -436,3 +579,17 @@ def test_get_index_stocks_delegates_to_membership():
     )
     _engine().run(strategy)
     assert strategy.runtime.g.stocks == ["000001.SZ", "600000.SH"]
+
+
+def test_compat_log_handles_message_without_placeholders(caplog):
+    """聚宽策略常见 ``log.warn("文本", a, b)``，不能让 logging 抛格式错误。"""
+    import logging
+
+    from app.services.strategy.compat.runtime import _Log
+
+    logger = _Log()
+    with caplog.at_level(logging.WARNING, logger="joinquant_compat"):
+        logger.warn("skip sell at low limit", "002921.SZ", "联诚精密")
+        logger.warn("仓位 %.1f%%", 19.8)
+    assert "skip sell at low limit 002921.SZ 联诚精密" in caplog.text
+    assert "仓位 19.8%" in caplog.text

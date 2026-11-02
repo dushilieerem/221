@@ -208,6 +208,10 @@ def _declared_parameter_pairs(case: CaseSpec) -> list[tuple[str, Any, Any, float
     svq_benchmark = svq.get("benchmark")
     if jq_benchmark is not None and svq_benchmark is not None:
         mapped = BENCHMARK_ALIASES.get(str(jq_benchmark).upper(), str(jq_benchmark))
+        # 数据缺失时用例可显式声明等价基准，避免把参考口径差当成 L0 分歧。
+        equivalent = (case.comparison or {}).get("benchmark_equivalent")
+        if equivalent is not None:
+            mapped = str(equivalent)
         add("benchmark", mapped, svq_benchmark)
     return pairs
 
@@ -226,15 +230,18 @@ def _compare_targets(jq: GoldenRun, svq: CanonicalRun, case: CaseSpec) -> LayerR
     jq_symbols = _traded_symbols(jq.positions, jq.fills)
     svq_symbols = _traded_symbols(svq.positions, svq.fills)
     layer.checks += 1
+    # 带上该标的首次出现的日期，报告才能定位到具体调仓日。
     for symbol in sorted(jq_symbols - svq_symbols):
         layer.divergences.append(Divergence(
             layer="L1", field="symbol_set", symbol=symbol,
             expected="present", actual="absent",
+            date=_first_seen(jq.positions, jq.fills, symbol),
         ))
     for symbol in sorted(svq_symbols - jq_symbols):
         layer.divergences.append(Divergence(
             layer="L1", field="symbol_set", symbol=symbol,
             expected="absent", actual="present",
+            date=_first_seen(svq.positions, svq.fills, symbol),
         ))
 
     # 建仓日：两侧同一标的的首次持仓日期应一致。
@@ -246,8 +253,28 @@ def _compare_targets(jq: GoldenRun, svq: CanonicalRun, case: CaseSpec) -> LayerR
             layer.divergences.append(Divergence(
                 layer="L1", field="first_holding_date", symbol=symbol,
                 expected=jq_first[symbol], actual=svq_first[symbol],
+                # 排序用两侧较早的日期，避免“首个分歧”被无日期行抢占。
+                date=min(jq_first[symbol], svq_first[symbol]),
             ))
     return layer
+
+
+def _first_seen(
+    positions: pd.DataFrame, fills: pd.DataFrame, symbol: str
+) -> str | None:
+    """该标的（持仓或成交）最早出现的日期。"""
+
+    stamps: list[pd.Timestamp] = []
+    for frame in (positions, fills):
+        if frame is None or frame.empty or "symbol" not in frame.columns:
+            continue
+        subset = frame.loc[frame["symbol"].astype(str) == symbol]
+        if subset.empty:
+            continue
+        stamps.append(pd.to_datetime(subset["date"]).min())
+    if not stamps:
+        return None
+    return min(stamps).strftime("%Y-%m-%d")
 
 
 def _traded_symbols(positions: pd.DataFrame, fills: pd.DataFrame) -> set[str]:
