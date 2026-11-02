@@ -574,6 +574,12 @@ class JoinQuantRuntime:
         as_of = date if date is not None else self._current_date()
         return self.industry.industries(symbols, as_of)
 
+    def get_industry_stocks(self, industry_code, date=None, **kwargs: Any):
+        if self.industry is None:
+            raise NotImplementedError("行业数据目录未配置；请传入 IndustryStore")
+        as_of = date if date is not None else self._current_date()
+        return self.industry.stocks(industry_code, as_of)
+
     def get_extras(
         self,
         field: str,
@@ -745,6 +751,7 @@ class JoinQuantRuntime:
             "calc_factors": self.calc_factors,
             "get_index_stocks": self.get_index_stocks,
             "get_industry": self.get_industry,
+            "get_industry_stocks": self.get_industry_stocks,
             "get_extras": self.get_extras,
             "get_history_fundamentals": self.get_history_fundamentals,
             "cancel_order": self.cancel_order,

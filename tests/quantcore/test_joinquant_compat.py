@@ -673,3 +673,30 @@ def test_finance_income_statement_returns_cumulative_fields(tmp_path):
     assert row["operating_cost"] == pytest.approx(7.0 - 0.5 - 0.5 - 1.0 - 0.2 - 0.1)
     assert row["np_parent_company_owners"] == pytest.approx(3.0)
     clear_cache()
+
+
+def test_industry_store_lists_stocks_by_sw_code(tmp_path):
+    """get_industry_stocks 按申万一级代码取成分，忽略 .SI 后缀。"""
+    from app.services.strategy.compat.industry import IndustryStore
+
+    data_dir = tmp_path / "ifind"
+    data_dir.mkdir()
+    derived = tmp_path / "derived" / "industry_daily" / "year=2024"
+    derived.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "date": ["2024-01-02", "2024-01-02", "2024-01-02"],
+            "symbol": ["600519.SH", "000858.SZ", "000001.SZ"],
+            "sw_l1_code": ["801120.SI", "801120.SI", "801780.SI"],
+            "sw_l1_name": ["食品饮料", "食品饮料", "银行"],
+            "ths_code": ["S34", "S34", "S48"],
+        }
+    ).to_parquet(derived / "part.parquet")
+
+    store = IndustryStore(data_dir)
+
+    assert store.stocks("801120", "2024-01-02") == ["600519.SH", "000858.SZ"]
+    assert store.stocks("801780.SI", "2024-01-02") == ["000001.SZ"]
+    assert store.stocks("801999", "2024-01-02") == []
+    # 非快照日取之前最近一个快照。
+    assert store.stocks("801120", "2024-03-01") == ["600519.SH", "000858.SZ"]

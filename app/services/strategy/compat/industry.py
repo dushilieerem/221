@@ -20,6 +20,17 @@ import pyarrow.parquet as pq
 _INDUSTRY_FIELD = "ths_the_sw_industry_code_stock"
 
 
+def _normalize_industry_code(value: object) -> str:
+    """``801780.SI`` / ``801780`` -> ``801780``；THS 代码原样返回。"""
+
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
+    text = str(value).strip()
+    if pd.isna(value):
+        return ""
+    return text.rsplit(".", 1)[0] if "." in text else text
+
+
 def _column_symbol(name: str) -> str | None:
     """``("000001.SZ", "ths_the_sw_industry_code_stock")`` -> ``000001.SZ``。"""
 
@@ -125,6 +136,52 @@ class IndustryStore:
                 "sw_l1": {"industry_code": str(code), "industry_name": str(name)}
             }
         return result
+
+    def stocks(self, industry_code: str, as_of: str | object) -> list[str]:
+        """聚宽 ``get_industry_stocks``：某申万一级行业在给定日期的成分股。"""
+
+        target = _normalize_industry_code(industry_code)
+        if not target:
+            return []
+        target_date = pd.Timestamp(as_of).normalize()
+        cache = getattr(self, "_stocks_cache", None)
+        if cache is None or cache[0] != target_date:
+            frame = self._derived_frame()
+            if frame is None or frame.empty:
+                return []
+            position = bisect_right(self._derived_dates, target_date) - 1
+            if position < 0:
+                return []
+            snapshot = self._derived_by_date[self._derived_dates[position]]
+            buckets: dict[str, list[str]] = {}
+            for symbol, code in zip(
+                snapshot.index, snapshot.get("sw_l1_code", pd.Series(dtype=object))
+            ):
+                normalized = _normalize_industry_code(code)
+                if normalized:
+                    buckets.setdefault(normalized, []).append(str(symbol))
+            cache = (target_date, buckets)
+            self._stocks_cache = cache
+        return list(cache[1].get(target, []))
+
+    def _derived_frame(self) -> pd.DataFrame | None:
+        if self._derived is None:
+            files = sorted(self._derived_dir.rglob("*.parquet"))
+            if not files:
+                self._derived = pd.DataFrame()
+            else:
+                self._derived = pd.concat(
+                    [pd.read_parquet(path) for path in files], ignore_index=True
+                )
+                self._derived["date"] = pd.to_datetime(
+                    self._derived["date"]
+                ).dt.normalize()
+                self._derived_by_date = {
+                    date: group.set_index("symbol")
+                    for date, group in self._derived.groupby("date", sort=True)
+                }
+                self._derived_dates = sorted(self._derived_by_date)
+        return self._derived
 
     def _columns_for(self) -> dict[str, str]:
         if self._columns is not None:
