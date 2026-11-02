@@ -482,6 +482,17 @@ def _strategy_filter_info(data_engine, panels, req: StrategyBacktestRequest) -> 
     )
 
 
+def _rename_symbols(frame: pd.DataFrame, mapping: dict[str, str]) -> pd.DataFrame:
+    """面板列名换成交易所代码；不复制数据块，避免 5000 列 rename 的开销。"""
+
+    columns = [mapping.get(str(column), column) for column in frame.columns]
+    if columns == list(frame.columns):
+        return frame
+    renamed = frame.copy(deep=False)
+    renamed.columns = columns
+    return renamed
+
+
 def _run_event_strategy_backtest(
     req: StrategyBacktestRequest,
     strategy_class,
@@ -554,13 +565,17 @@ def _run_event_strategy_backtest(
                 if "up_and_down_status" in required_fields:
                     required_fields.discard("up_and_down_status")
                     continue
+                if "turnover" in required_fields:
+                    # 换手率是聚宽策略的可选字段，缺数据时按未提供处理。
+                    required_fields.discard("turnover")
+                    continue
                 if "listed_status" in required_fields:
                     listed_status_available = False
                     required_fields.discard("listed_status")
                     continue
                 raise
         event_panels = {
-            field: panels[field].rename(columns=symbol_mapping)
+            field: _rename_symbols(panels[field], symbol_mapping)
             for field in required_fields
         }
         index = data_engine.get_index(req.benchmark, req.start, req.end)
@@ -593,7 +608,7 @@ def _run_event_strategy_backtest(
             except FileNotFoundError as exc:
                 raise ValueError(str(exc)) from exc
             execution_panels = {
-                field: raw_execution[field].rename(columns=symbol_mapping)
+                field: _rename_symbols(raw_execution[field], symbol_mapping)
                 for field in ("open", "close")
             }
 

@@ -2062,3 +2062,48 @@ def test_factor_industry_curves_follow_execution_timing(market_data_dir):
     assert ic
     for timing in ("next_close", "next_open"):
         assert analysis[timing]["ic_series"] != ic
+
+
+JOINQUANT_STRATEGY_CODE = '''
+def initialize(context):
+    run_daily(buy, time='09:31')
+
+
+def buy(context):
+    if context.portfolio.positions:
+        return
+    info = get_all_securities()
+    if info is None or info.empty:
+        return
+    code = sorted(info.index)[0]
+    order_target_value(code, 10000)
+'''
+
+
+def test_joinquant_strategy_runs_through_api(market_data_dir):
+    """策略组上传聚宽源码即可走 HTTP 接口回测（joinquant 方言 + 事件模式）。"""
+
+    response = client.post(
+        "/api/backtest/strategy",
+        json={
+            "strategy_code": JOINQUANT_STRATEGY_CODE,
+            "strategy_dialect": "joinquant",
+            "engine_mode": "event",
+            "timed_execution": True,
+            "execution_price_source": "adjusted",
+            "start": "2022-01-04",
+            "end": "2022-03-31",
+            "initial_capital": 100000,
+            "commission_rate": 0.0003,
+            "stamp_tax": 0.001,
+            "slippage_rate": 0.0,
+            "min_commission": 5.0,
+            "include_positions": True,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["error"] is None, body["error"]
+    assert body["equity_curve"]
+    assert body["fills"], f"聚宽策略应至少产生一笔成交；orders={body.get('orders')}"
