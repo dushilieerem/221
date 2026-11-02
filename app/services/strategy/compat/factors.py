@@ -435,12 +435,17 @@ class FactorStore:
         """累计字段的 TTM：最新累计 + 上年年报 - 上年同期累计。"""
 
         rows = self._period_rows(statement, column, as_of)
-        result: dict[str, float] = {}
-        for symbol, group in rows.groupby("Symbol"):
-            series = group.set_index("m_timetag")[column].astype(float)
-            ttm = _ttm_at(series)
-            result[str(symbol)] = ttm
-        return pd.Series(result, dtype=float)
+        if rows.empty:
+            return pd.Series(dtype=float)
+        wide = _wide_table(rows, column)
+        # rows 已按 (Symbol, m_timetag) 排序，去重取最后一条就是最新报告期；
+        # 用 groupby(...).max() 在 object 列上会退化到纯 Python 聚合。
+        latest = rows.drop_duplicates("Symbol", keep="last").set_index("Symbol")[
+            "m_timetag"
+        ]
+        periods = latest.to_numpy().astype(str)
+        values = _ttm_values(wide, latest.index.to_numpy(), periods)
+        return pd.Series(values, index=latest.index, dtype=float)
 
     def _ttm_growth_from_cumulative(
         self, statement: str, column: str, as_of: str
@@ -449,7 +454,9 @@ class FactorStore:
         if rows.empty:
             return pd.Series(dtype=float)
         wide = _wide_table(rows, column)
-        latest = rows.groupby("Symbol")["m_timetag"].max()
+        latest = rows.drop_duplicates("Symbol", keep="last").set_index("Symbol")[
+            "m_timetag"
+        ]
         symbols = latest.index.to_numpy()
         latest_periods = latest.to_numpy().astype(str)
         prior_periods = np.array(
@@ -467,7 +474,9 @@ class FactorStore:
         if rows.empty:
             return pd.Series(dtype=float)
         wide = _wide_table(rows, column)
-        latest = rows.groupby("Symbol")["m_timetag"].max()
+        latest = rows.drop_duplicates("Symbol", keep="last").set_index("Symbol")[
+            "m_timetag"
+        ]
         symbols = latest.index.to_numpy()
         latest_periods = latest.to_numpy().astype(str)
         prior_periods = np.array(

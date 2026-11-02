@@ -47,6 +47,8 @@ class JQPortfolioView:
     def __init__(self, view: Any, market: Any) -> None:
         self._view = view
         self._market = market
+        self._positions_cache: _PositionsView | None = None
+        self._positions_key: tuple[Any, ...] | None = None
 
     @property
     def cash(self) -> float:
@@ -73,7 +75,25 @@ class JQPortfolioView:
 
     @property
     def positions(self) -> "_PositionsView":
-        return _PositionsView(self._view, self._market)
+        """同一日期/时点且持仓未变时复用 Position 对象，避免反复构造。"""
+
+        engine = getattr(self._market, "_engine", None)
+        stamp = (
+            getattr(engine, "_current_date", None),
+            getattr(engine, "_current_time", None),
+        )
+        snapshot = tuple(
+            sorted(
+                (str(symbol), int(quantity))
+                for symbol, quantity in self._view.positions.items()
+                if int(quantity) > 0
+            )
+        )
+        key = (*stamp, snapshot)
+        if self._positions_cache is None or self._positions_key != key:
+            self._positions_cache = _PositionsView(self._view, self._market)
+            self._positions_key = key
+        return self._positions_cache
 
     def quantity(self, symbol: str) -> int:
         return int(self._view.quantity(symbol))

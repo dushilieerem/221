@@ -59,6 +59,10 @@ class EventBacktestEngine:
         self._listing_bounds: (
             dict[str, tuple[pd.Timestamp | None, pd.Timestamp | None]] | None
         ) = None
+        # 逐日行缓存：宽表 ``frame.at[date, symbol]`` 的标量访问在策略高频
+        # 查询（current_data / 涨跌停状态）下会退化成 O(列) 的 pandas 定位，
+        # 每个交易日只把当天需要的行转成 dict，后续都是 O(1)。
+        self._row_cache: dict[tuple[int, pd.Timestamp], dict[str, object]] = {}
         # 聚宽 get_orders/get_open_orders 需要回看已处理订单与成交量。
         self._all_orders: list[EventOrder] = []
         self._all_fills: list[EventFill] = []
@@ -159,6 +163,7 @@ class EventBacktestEngine:
         for index, date in enumerate(self.dates):
             timestamp = pd.Timestamp(date)
             self._current_date = timestamp
+            self._row_cache.clear()
             previous = self._previous_date(index)
             context.previous_date = previous.date() if previous is not None else None
             ledger.begin_session()
@@ -267,6 +272,7 @@ class EventBacktestEngine:
         for index, date in enumerate(self.dates):
             timestamp = pd.Timestamp(date)
             self._current_date = timestamp
+            self._row_cache.clear()
             previous = self._previous_date(index)
             context.previous_date = previous.date() if previous is not None else None
             ledger.begin_session()
@@ -780,6 +786,24 @@ class EventBacktestEngine:
 
         return 0 if self.config.execution_timing == "same_close" else 1
 
+    def _row_values(
+        self, frame: pd.DataFrame | None, date: pd.Timestamp | None
+    ) -> dict[str, object] | None:
+        """把某一日整行转成 dict 并缓存；日期切换时清空。"""
+
+        if frame is None or date is None:
+            return None
+        key = (id(frame), date)
+        values = self._row_cache.get(key)
+        if values is None:
+            if date not in frame.index:
+                return None
+            values = frame.loc[date].to_dict()
+            if len(self._row_cache) > 64:
+                self._row_cache.clear()
+            self._row_cache[key] = values
+        return values
+
     def _price(self, symbol: str, date: pd.Timestamp) -> float | None:
         """当日成交参考价。
 
@@ -807,9 +831,12 @@ class EventBacktestEngine:
         self, symbol: str, date: pd.Timestamp, field: str
     ) -> float | None:
         frame = self._price_panels.get(field)
-        if frame is None or symbol not in frame.columns or date not in frame.index:
+        if frame is None or symbol not in frame.columns:
             return None
-        value = frame.at[date, symbol]
+        values = self._row_values(frame, date)
+        if values is None:
+            return None
+        value = values.get(symbol)
         return float(value) if pd.notna(value) and value > 0 else None
 
     def _price_at_time(
@@ -1013,26 +1040,32 @@ class EventBacktestEngine:
             return None
         previous = self._full_dates[location - 1]
         frame = self._price_panels.get("close")
-        if frame is None or symbol not in frame.columns or previous not in frame.index:
+        if frame is None or symbol not in frame.columns:
             return None
-        value = frame.at[previous, symbol]
+        values = self._row_values(frame, previous)
+        if values is None:
+            return None
+        value = values.get(symbol)
         return float(value) if pd.notna(value) and value > 0 else None
 
     def _panel_text(self, panel: str, symbol: str) -> str | None:
         frame = self.panels.get(panel)
-        date = self._current_date
-        if frame is None or date is None:
+        if frame is None or symbol not in frame.columns:
             return None
-        if symbol not in frame.columns or date not in frame.index:
+        values = self._row_values(frame, self._current_date)
+        if values is None:
             return None
-        value = frame.at[date, symbol]
+        value = values.get(symbol)
         return None if pd.isna(value) else str(value).strip()
 
     def _status_matches(self, date: pd.Timestamp, symbol: str, pattern: str) -> bool:
         frame = self.panels.get("up_and_down_status")
-        if frame is None or symbol not in frame.columns or date not in frame.index:
+        if frame is None or symbol not in frame.columns:
             return False
-        value = frame.at[date, symbol]
+        values = self._row_values(frame, date)
+        if values is None:
+            return False
+        value = values.get(symbol)
         if pd.isna(value):
             return False
         text = str(value).strip()
