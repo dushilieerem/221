@@ -593,3 +593,83 @@ def test_compat_log_handles_message_without_placeholders(caplog):
         logger.warn("仓位 %.1f%%", 19.8)
     assert "skip sell at low limit 002921.SZ 联诚精密" in caplog.text
     assert "仓位 19.8%" in caplog.text
+
+
+def test_history_fundamentals_returns_single_quarter_cashflow(tmp_path):
+    """聚宽 get_history_fundamentals 返回单季度流量；源表是年内累计。"""
+    from app.services.strategy.compat.financial_cache import clear_cache
+    from app.services.strategy.compat.fundamentals import FundamentalStore
+    from app.services.strategy.compat.query import cash_flow
+
+    clear_cache()
+    root = tmp_path / "3_financial_data" / "cashflow"
+    root.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "Symbol": ["600000.SH"] * 4,
+            "m_timetag": ["20240331", "20240630", "20240930", "20241231"],
+            "m_anntime": ["20240425", "20240825", "20241025", "20250425"],
+            # 年内累计：Q1 1、H1 3、Q3 6、全年 10。
+            "net_cash_flows_oper_act": [1.0, 3.0, 6.0, 10.0],
+        }
+    ).to_parquet(root / "600000.SH.parquet")
+
+    store = FundamentalStore(root=tmp_path)
+    frame = store.history(
+        [cash_flow.net_operate_cash_flow],
+        ["600000.SH"],
+        watch_date="2025-04-30",
+        count=4,
+    )
+
+    assert frame["statDate"].tolist() == [
+        "2024-03-31", "2024-06-30", "2024-09-30", "2024-12-31",
+    ]
+    assert frame["net_operate_cash_flow"].tolist() == [1.0, 2.0, 3.0, 4.0]
+    clear_cache()
+
+
+def test_finance_income_statement_returns_cumulative_fields(tmp_path):
+    from app.services.strategy.compat.finance import FinanceNamespace
+    from app.services.strategy.compat.financial_cache import clear_cache
+    from app.services.strategy.compat.query import Field, Query
+
+    clear_cache()
+    income_dir = tmp_path / "3_financial_data" / "income"
+    income_dir.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "Symbol": ["600000.SH"],
+            "m_timetag": ["20241231"],
+            "m_anntime": ["20250425"],
+            "revenue": [10.0],
+            "total_operating_cost": [7.0],
+            "less_taxes_surcharges_ops": [0.5],
+            "sale_expense": [0.5],
+            "less_gerl_admin_exp": [1.0],
+            "research_expenses": [0.2],
+            "financial_expense": [0.1],
+            "less_impair_loss_assets": [float("nan")],
+            "net_profit_excl_min_int_inc": [3.0],
+        }
+    ).to_parquet(income_dir / "600000.SH.parquet")
+
+    namespace = FinanceNamespace(tmp_path)
+    table = "finance.STK_INCOME_STATEMENT"
+    q = Query(
+        fields=[
+            Field(table, "code"),
+            Field(table, "total_operating_revenue"),
+            Field(table, "operating_cost"),
+            Field(table, "np_parent_company_owners"),
+        ]
+    ).filter(Field(table, "code").in_(["600000.SH"]))
+
+    frame = namespace.run_query(q)
+
+    row = frame.iloc[0]
+    assert row["total_operating_revenue"] == pytest.approx(10.0)
+    # 营业总成本 7 减去税金/销售/管理/研发/财务（减值缺失按 0）。
+    assert row["operating_cost"] == pytest.approx(7.0 - 0.5 - 0.5 - 1.0 - 0.2 - 0.1)
+    assert row["np_parent_company_owners"] == pytest.approx(3.0)
+    clear_cache()

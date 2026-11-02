@@ -108,16 +108,25 @@ class ComparisonResult:
 
 
 def compare_runs(jq: GoldenRun, svq: CanonicalRun, case: CaseSpec) -> ComparisonResult:
-    """执行 L0–L5 比对。"""
+    """执行用例声明的比对层（默认 L0–L5）。
+
+    只有收益曲线的金标（``comparison.layers: [L0, L4, L5]``）跳过 L1–L3，
+    不会因为持仓/成交为空而误报通过。
+    """
 
     tolerances = case.tolerances
+    builders = {
+        "L0": lambda: _compare_parameters(jq, svq, case, tolerances),
+        "L1": lambda: _compare_targets(jq, svq, case),
+        "L2": lambda: _compare_fills(jq, svq, case, tolerances),
+        "L3": lambda: _compare_positions(jq, svq, case, tolerances),
+        "L4": lambda: _compare_equity(jq, svq, case, tolerances),
+        "L5": lambda: _compare_metrics(jq, svq, case, tolerances),
+    }
     layers = [
-        _compare_parameters(jq, svq, case, tolerances),
-        _compare_targets(jq, svq, case),
-        _compare_fills(jq, svq, case, tolerances),
-        _compare_positions(jq, svq, case, tolerances),
-        _compare_equity(jq, svq, case, tolerances),
-        _compare_metrics(jq, svq, case, tolerances),
+        build()
+        for name, build in builders.items()
+        if name in case.layers
     ]
     warnings: list[str] = []
     if case.price_basis != _PRICE_BASIS_REAL:

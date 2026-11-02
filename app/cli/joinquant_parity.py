@@ -21,7 +21,7 @@ from typing import Any
 import pandas as pd
 
 from app.services.parity.compare import compare_runs
-from app.services.parity.jq_ui_export import import_ui_export
+from app.services.parity.jq_ui_export import import_returns, import_ui_export
 from app.services.parity.loader import (
     GoldenRun,
     ParityError,
@@ -78,6 +78,18 @@ def _build_parser() -> argparse.ArgumentParser:
     imports.add_argument("--out", default=None, help="输出目录；省略时写用例 expected/")
     imports.add_argument("--json", action="store_true")
     imports.set_defaults(handler=_cmd_import_golden)
+
+    returns_import = sub.add_parser(
+        "import-returns",
+        parents=[common],
+        help="只导入收益曲线（result_1.csv），用于收益层对账",
+    )
+    returns_import.add_argument("--case", required=True)
+    returns_import.add_argument("--from", dest="source", required=True, help="result_1.csv 路径")
+    returns_import.add_argument("--initial-cash", type=float, default=None)
+    returns_import.add_argument("--out", default=None, help="输出目录；省略时写用例 expected/")
+    returns_import.add_argument("--json", action="store_true")
+    returns_import.set_defaults(handler=_cmd_import_returns)
 
     run = sub.add_parser("run", parents=[common], help="运行 SVQuant 侧并落盘响应")
     run.add_argument("--case", required=True)
@@ -144,6 +156,18 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     else:
         report["note"] = "金标未导出；validate 只校验了 case.yaml"
     _emit(report, as_json=args.json)
+    return 0
+
+
+def _cmd_import_returns(args: argparse.Namespace) -> int:
+    case = _load_case(args)
+    summary = import_returns(
+        args.source,
+        case,
+        initial_cash=args.initial_cash,
+        output_dir=args.out,
+    )
+    _emit(summary, as_json=args.json)
     return 0
 
 

@@ -29,6 +29,7 @@ DEFAULT_ROOT = Path(
 )
 
 _TABLE = "finance.STK_XR_XD"
+_INCOME_TABLE = "finance.STK_INCOME_STATEMENT"
 
 
 class _DividendFields:
@@ -37,14 +38,31 @@ class _DividendFields:
     bonus_amount_rmb = Field(_TABLE, "bonus_amount_rmb")
 
 
+class _IncomeFields:
+    """聚宽利润表 ``STK_INCOME_STATEMENT`` 的子集；金额为年内累计。"""
+
+    code = Field(_INCOME_TABLE, "code")
+    total_operating_revenue = Field(_INCOME_TABLE, "total_operating_revenue")
+    operating_cost = Field(_INCOME_TABLE, "operating_cost")
+    np_parent_company_owners = Field(_INCOME_TABLE, "np_parent_company_owners")
+    sale_expense = Field(_INCOME_TABLE, "sale_expense")
+    administration_expense = Field(_INCOME_TABLE, "administration_expense")
+    financial_expense = Field(_INCOME_TABLE, "financial_expense")
+    pub_date = Field(_INCOME_TABLE, "pub_date")
+    end_date = Field(_INCOME_TABLE, "end_date")
+    report_type = Field(_INCOME_TABLE, "report_type")
+
+
 class FinanceNamespace:
-    """聚宽 ``finance`` 命名空间；当前只覆盖 ``STK_XR_XD``。"""
+    """聚宽 ``finance`` 命名空间；覆盖 ``STK_XR_XD`` 与 ``STK_INCOME_STATEMENT``。"""
 
     STK_XR_XD = _DividendFields()
+    STK_INCOME_STATEMENT = _IncomeFields()
 
     def __init__(self, root: str | Path = DEFAULT_ROOT) -> None:
         self.root = Path(root)
         self._prepared: pd.DataFrame | None = None
+        self._income: pd.DataFrame | None = None
 
     def _prepared_frame(self) -> pd.DataFrame:
         """全量分红 + PIT 股本；与查询日期无关，进程内只算一次。"""
@@ -95,6 +113,8 @@ class FinanceNamespace:
 
     def run_query(self, q: Query) -> pd.DataFrame:
         table = q.fields[0].table if q.fields else _TABLE
+        if table == _INCOME_TABLE:
+            return self._query_frame(q, self._income_frame())
         if table != _TABLE:
             raise NotImplementedError(f"兼容层暂不支持 finance 表: {table}")
 
@@ -104,18 +124,94 @@ class FinanceNamespace:
         for order in q.orders:
             column = f"{order.field.table}.{order.field.name}"
             output = output.sort_values(column, ascending=order.ascending)
+        return self._slice(q, output, table)
+
+    @staticmethod
+    def _slice(q: Query, output: pd.DataFrame, table: str) -> pd.DataFrame:
+        if q.offset_count:
+            output = output.iloc[int(q.offset_count):]
         if q.limit_count is not None:
             output = output.head(int(q.limit_count))
         output = output.copy()
         # 聚宽 run_query 返回裸字段名（code / a_registration_date / ...）。
-        output = output.rename(
+        return output.rename(
             columns={
                 column: column.rsplit(".", 1)[-1]
                 for column in output.columns
-                if column.startswith(f"{_TABLE}.")
+                if column.startswith(f"{table}.")
+            }
+        ).reset_index(drop=True)
+
+    def _query_frame(self, q: Query, output: pd.DataFrame) -> pd.DataFrame:
+        if q.where is not None:
+            output = output[evaluate(output, q.where)]
+        for order in q.orders:
+            column = f"{order.field.table}.{order.field.name}"
+            output = output.sort_values(column, ascending=order.ascending, kind="stable")
+        return self._slice(q, output, _INCOME_TABLE)
+
+    def _income_frame(self) -> pd.DataFrame:
+        """利润表历史快照；``revenue`` 与归母净利润是单季度，这里按年内累加。"""
+
+        if self._income is not None:
+            return self._income
+        columns = [
+            "revenue",
+            "total_operating_cost",
+            "less_taxes_surcharges_ops",
+            "sale_expense",
+            "less_gerl_admin_exp",
+            "research_expenses",
+            "financial_expense",
+            "less_impair_loss_assets",
+            "net_profit_excl_min_int_inc",
+        ]
+        raw = load_statement(self.root, "income", columns).copy()
+        period = raw["m_timetag"].astype(str)
+        year = period.str[:4]
+        revenue = pd.to_numeric(raw["revenue"], errors="coerce")
+        parent = pd.to_numeric(raw["net_profit_excl_min_int_inc"], errors="coerce")
+        revenue_cum = revenue.groupby([raw["Symbol"], year]).cumsum()
+        parent_cum = parent.groupby([raw["Symbol"], year]).cumsum()
+        expense = sum(
+            pd.to_numeric(raw[column], errors="coerce").fillna(0.0)
+            for column in (
+                "less_taxes_surcharges_ops",
+                "sale_expense",
+                "less_gerl_admin_exp",
+                "research_expenses",
+                "financial_expense",
+                "less_impair_loss_assets",
+            )
+        )
+        frame = pd.DataFrame(
+            {
+                f"{_INCOME_TABLE}.code": raw["Symbol"].to_numpy(),
+                f"{_INCOME_TABLE}.total_operating_revenue": revenue_cum.to_numpy(dtype=float),
+                f"{_INCOME_TABLE}.operating_cost": (
+                    pd.to_numeric(raw["total_operating_cost"], errors="coerce") - expense
+                ).to_numpy(dtype=float),
+                f"{_INCOME_TABLE}.np_parent_company_owners": parent_cum.to_numpy(dtype=float),
+                f"{_INCOME_TABLE}.sale_expense": pd.to_numeric(
+                    raw["sale_expense"], errors="coerce"
+                ).to_numpy(dtype=float),
+                f"{_INCOME_TABLE}.administration_expense": pd.to_numeric(
+                    raw["less_gerl_admin_exp"], errors="coerce"
+                ).to_numpy(dtype=float),
+                f"{_INCOME_TABLE}.financial_expense": pd.to_numeric(
+                    raw["financial_expense"], errors="coerce"
+                ).to_numpy(dtype=float),
+                f"{_INCOME_TABLE}.pub_date": pd.to_datetime(
+                    raw["m_anntime"].astype(str), format="%Y%m%d", errors="coerce"
+                ),
+                f"{_INCOME_TABLE}.end_date": pd.to_datetime(
+                    period, format="%Y%m%d", errors="coerce"
+                ),
+                f"{_INCOME_TABLE}.report_type": 0,
             }
         )
-        return output.reset_index(drop=True)
+        self._income = frame
+        return frame
 
 
 __all__ = ["FinanceNamespace", "DEFAULT_ROOT"]

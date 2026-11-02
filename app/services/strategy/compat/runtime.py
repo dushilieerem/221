@@ -462,6 +462,31 @@ class JoinQuantRuntime:
         as_of = pd.Timestamp(as_of).strftime("%Y-%m-%d")
         return self.fundamentals.query(q, as_of=as_of)
 
+    def get_history_fundamentals(
+        self,
+        security=None,
+        fields=None,
+        watch_date=None,
+        count: int = 1,
+        interval: str = "1q",
+        stat_by_year: bool = False,
+        **kwargs: Any,
+    ):
+        """聚宽 ``get_history_fundamentals``：按观察日取最近 N 期财务数据。"""
+
+        if self.fundamentals is None:
+            raise NotImplementedError("财务数据目录未配置")
+        if stat_by_year:
+            raise NotImplementedError("get_history_fundamentals(stat_by_year=True) 暂未支持")
+        symbols = [security] if isinstance(security, str) else list(security or [])
+        if not symbols:
+            return pd.DataFrame(columns=["code", "statDate"])
+        if watch_date is None:
+            watch_date = self.context.previous_date or self._current_date()
+        return self.fundamentals.history(
+            list(fields or []), symbols, watch_date=watch_date, count=int(count)
+        )
+
     def get_factor_values(
         self,
         securities,
@@ -721,6 +746,7 @@ class JoinQuantRuntime:
             "get_index_stocks": self.get_index_stocks,
             "get_industry": self.get_industry,
             "get_extras": self.get_extras,
+            "get_history_fundamentals": self.get_history_fundamentals,
             "cancel_order": self.cancel_order,
             "get_orders": self.get_orders,
             "get_open_orders": self.get_open_orders,

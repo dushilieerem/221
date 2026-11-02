@@ -24,9 +24,9 @@ FINANCIAL_MAP: dict[tuple[str, str], tuple[str, str]] = {
     ("balance", "total_assets"): ("balance", "tot_assets"),
     ("balance", "total_liability"): ("balance", "tot_liab"),
     ("balance", "total_owner_equities"): ("balance", "total_equity"),
-    ("income", "operating_revenue"): ("income", "revenue"),
+    # operating_revenue / np_parent_company_owners 是年内累计，源数据是单季度，
+    # 由 _derive_income_fields 按年内累加派生（见 FINANCIAL_EXPRESSIONS）。
     ("income", "net_profit"): ("income", "net_profit_incl_min_int_inc"),
-    ("income", "np_parent_company_owners"): ("income", "net_profit_excl_min_int_inc"),
     ("cash_flow", "net_operate_cash_flow"): ("cashflow", "net_cash_flows_oper_act"),
     ("cash_flow", "fix_intan_other_asset_acqui_cash"): ("cashflow", "cash_pay_acq_const_fiolta"),
     ("indicator", "eps"): ("pershare_index", "s_fa_eps_basic"),
@@ -41,6 +41,8 @@ FINANCIAL_MAP: dict[tuple[str, str], tuple[str, str]] = {
 
 #: 由利润表原始列派生的聚宽字段；净利润一律按**归母**口径（聚宽 indicator 表口径）。
 FINANCIAL_EXPRESSIONS: dict[tuple[str, str], tuple[str, str]] = {
+    ("income", "operating_revenue"): ("income", "营业额年内累计"),
+    ("income", "np_parent_company_owners"): ("income", "归母净利润年内累计"),
     ("income", "adjusted_profit_to_profit"): (
         "income",
         "扣非归母净利润(累计) / 归母净利润(累计)",
@@ -60,6 +62,8 @@ FINANCIAL_EXPRESSIONS: dict[tuple[str, str], tuple[str, str]] = {
 #: ``net_profit_excl_min_int_inc`` 与 ``deducted_net_profit`` 是单季度口径，
 #: 累计值必须按年内累加，不能与累计净利润直接相除。
 EXPRESSION_COLUMNS: dict[tuple[str, str], tuple[str, ...]] = {
+    ("income", "operating_revenue"): ("revenue",),
+    ("income", "np_parent_company_owners"): ("net_profit_excl_min_int_inc",),
     ("income", "adjusted_profit_to_profit"): (
         "net_profit_incl_min_int_inc_after",
         "net_profit_excl_min_int_inc",
@@ -73,6 +77,19 @@ EXPRESSION_COLUMNS: dict[tuple[str, str], tuple[str, ...]] = {
     ),
 }
 
+
+def _to_single_quarter(frame: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    """把年内累计的现金流量字段差分成单季度；年初首期保持原值。"""
+
+    data = frame.copy()
+    year = data["m_timetag"].astype(str).str[:4]
+    for column in dict.fromkeys(columns):
+        if column not in data.columns:
+            continue
+        values = pd.to_numeric(data[column], errors="coerce")
+        previous = values.groupby([data["Symbol"], year]).shift(1)
+        data[column] = (values - previous).where(previous.notna(), values)
+    return data
 
 def _derive_income_fields(frame: pd.DataFrame) -> pd.DataFrame:
     """在利润表全量可见行上派生聚宽口径字段（索引与入参一致）。
@@ -97,6 +114,12 @@ def _derive_income_fields(frame: pd.DataFrame) -> pd.DataFrame:
     cum = parent_cum.to_numpy(dtype=float)
 
     out = pd.DataFrame(index=data.index)
+    if "revenue" in data.columns:
+        out["operating_revenue"] = pd.to_numeric(
+            data["revenue"], errors="coerce"
+        ).groupby([data["Symbol"], period.str[:4]]).cumsum().to_numpy(dtype=float)
+    if "net_profit_excl_min_int_inc" in data.columns:
+        out["np_parent_company_owners"] = cum
     if "net_profit_incl_min_int_inc_after" in data.columns:
         deducted = pd.to_numeric(
             data["net_profit_incl_min_int_inc_after"], errors="coerce"
@@ -262,6 +285,61 @@ class FundamentalStore:
         if merged is None:
             return pd.DataFrame()
         return merged
+
+    def history(
+        self,
+        fields: list[Field],
+        securities: list[str],
+        *,
+        watch_date: str | pd.Timestamp,
+        count: int,
+    ) -> pd.DataFrame:
+        """聚宽 ``get_history_fundamentals`` 的最小实现。
+
+        返回 ``code / statDate / <字段>`` 长表，只包含 ``watch_date`` 当日已公告的
+        最近 ``count`` 个报告期；合并报表（``report_type=0``）只有一套，无需区分。
+        """
+
+        as_of = pd.Timestamp(watch_date).strftime("%Y%m%d")
+        by_statement: dict[str, list[Field]] = {}
+        for field in fields:
+            mapped = FINANCIAL_MAP.get((field.table, field.name))
+            if mapped is None:
+                raise KeyError(f"get_history_fundamentals 未映射字段: {field.table}.{field.name}")
+            by_statement.setdefault(mapped[0], []).append(field)
+
+        merged: pd.DataFrame | None = None
+        wanted = set(securities)
+        for statement, items in by_statement.items():
+            raw_columns = [FINANCIAL_MAP[(f.table, f.name)][1] for f in items]
+            frame = visible(load_statement(self.root, statement, raw_columns), as_of)
+            if frame.empty:
+                continue
+            frame = frame.loc[frame["Symbol"].isin(wanted)]
+            if frame.empty:
+                continue
+            frame = frame.sort_values(["Symbol", "m_timetag"], kind="stable")
+            if statement == "cashflow":
+                # 聚宽 get_history_fundamentals(interval='1q') 返回单季度流量，
+                # 源表是年内累计，先按年内差分。
+                frame = _to_single_quarter(frame, raw_columns)
+            frame = frame.groupby("Symbol", group_keys=False).tail(int(count))
+            output = pd.DataFrame({"code": frame["Symbol"].to_numpy()})
+            output["statDate"] = [
+                f"{str(value)[:4]}-{str(value)[4:6]}-{str(value)[6:8]}"
+                for value in frame["m_timetag"]
+            ]
+            for field in items:
+                mapped = FINANCIAL_MAP[(field.table, field.name)]
+                output[field.name] = pd.to_numeric(
+                    frame[mapped[1]], errors="coerce"
+                ).to_numpy(dtype=float)
+            merged = output if merged is None else merged.merge(
+                output, on=["code", "statDate"], how="inner"
+            )
+        if merged is None:
+            return pd.DataFrame(columns=["code", "statDate"])
+        return merged.reset_index(drop=True)
 
     def _valuation_frame(self, as_of: str) -> pd.DataFrame:
         if not self.valuation.is_dir():

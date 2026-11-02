@@ -72,7 +72,8 @@ def test_fundamentals_expression_and_valuation_merge(data_root):
     frame = store.query(q, as_of="2024-06-30")
 
     assert frame.loc[0, "code"] == SYMBOL
-    assert frame.loc[0, "operating_revenue"] == 100.0
+    # 2023 年两个季度（40 + 100）年内累计。
+    assert frame.loc[0, "operating_revenue"] == 140.0
     assert frame.loc[0, "adjusted_profit_to_profit"] == pytest.approx(90.0)
     assert frame.loc[0, "pb_ratio"] == pytest.approx(1.2)
 
