@@ -181,7 +181,8 @@ def monthly_rebalance_dates():
     与聚宽 ``run_monthly(..., 1)`` 在回测首日触发的行为一致。
     """
 
-    start = dt.date.fromisoformat(START)
+    # 聚宽研究环境的 Python 版本低于 3.7，没有 date.fromisoformat。
+    start = dt.datetime.strptime(START, "%Y-%m-%d").date()
     warmup_start = start - dt.timedelta(days=30)
     days = list(get_trade_days(warmup_start, END))
     in_range = [index for index, day in enumerate(days) if day >= start]
@@ -202,7 +203,7 @@ def monthly_rebalance_dates():
 def main() -> None:
     rows = []
     dates = monthly_rebalance_dates()
-    print(f"调仓日 {len(dates)} 个：{dates[0]} ~ {dates[-1]}")
+    print("调仓日 {} 个：{} ~ {}".format(len(dates), dates[0], dates[-1]))
     for index, asof in enumerate(dates, 1):
         q = query(
             valuation.code,
@@ -264,11 +265,11 @@ def main() -> None:
                 "total_score": float(total.get(code, 0.0)),
             })
         if index % 10 == 0:
-            print(f"进度 {index}/{len(dates)}，累计 {len(rows)} 行")
+            print("进度 {}/{}，累计 {} 行".format(index, len(dates), len(rows)))
 
     frame = pd.DataFrame(rows)
     frame.to_csv(OUTPUT, index=False, encoding="utf-8-sig")
-    print(f"已写出 {OUTPUT}：{len(frame)} 行")
+    print("已写出 {}：{} 行".format(OUTPUT, len(frame)))
 
 
 main()
