@@ -38,11 +38,62 @@ class FactorStore:
         self.data_engine = data_engine if data_engine is not None else _default_data_engine()
         self._industry_names: pd.Series | None = None
         self._valuation_cache: dict[tuple[str, str], pd.Series] = {}
+        # 财务因子只随「已公告的报告集」变化，公告间隔内逐日重复计算是最大浪费。
+        self._signature_cache: dict[str, tuple[int, ...]] = {}
+        self._factor_cache: dict[tuple[str, tuple[int, ...]], pd.Series] = {}
+
+    #: 只依赖财报快照的因子；估值/价格类因子不能按财报签名缓存。
+    _FINANCIAL_FACTORS = frozenset(
+        {
+            "operating_revenue_growth_rate",
+            "np_parent_company_owners_growth_rate",
+            "np_parent_company_owners_ttm",
+            "non_recurring_gain_loss",
+            "DEGM",
+            "operating_cost_ttm",
+            "sale_expense_ttm",
+            "total_operating_revenue_per_share_ttm",
+        }
+    )
+
+    def _financial_signature(self, as_of: str) -> tuple[int, ...]:
+        """财报快照签名：行数 + 最近公告日；没有新公告时同一策略日间不变。"""
+
+        cached = self._signature_cache.get(as_of)
+        if cached is not None:
+            return cached
+        signature: list[int] = []
+        for statement in ("income", "pershare_index", "per_share"):
+            try:
+                frame = visible(load_statement(self.root, statement), as_of)
+            except FileNotFoundError:
+                signature.extend([-1, -1])
+                continue
+            announce = frame["m_anntime"].astype(str)
+            try:
+                latest = int(announce.max())
+            except (TypeError, ValueError):
+                latest = 0
+            signature.extend([len(frame), latest])
+        value = tuple(signature)
+        if len(self._signature_cache) > 256:
+            self._signature_cache.clear()
+        self._signature_cache[as_of] = value
+        return value
 
     def compute(self, factor: str, symbols: list[str], as_of: str) -> pd.Series:
         handler = getattr(self, f"_factor_{factor}", None)
         if handler is None:
             raise NotImplementedError(f"jqfactor 描述因子暂未实现: {factor}")
+        if factor in self._FINANCIAL_FACTORS:
+            key = (factor, self._financial_signature(as_of))
+            cached = self._factor_cache.get(key)
+            if cached is None:
+                cached = handler(symbols, as_of)
+                if len(self._factor_cache) > 4096:
+                    self._factor_cache.clear()
+                self._factor_cache[key] = cached
+            return cached.reindex(symbols)
         return handler(symbols, as_of).reindex(symbols)
 
     # ------------------------------------------------------------ 风格描述因子
