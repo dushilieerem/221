@@ -30,7 +30,7 @@ FINANCIAL_MAP: dict[tuple[str, str], tuple[str, str]] = {
     ("cash_flow", "net_operate_cash_flow"): ("cashflow", "net_cash_flows_oper_act"),
     ("cash_flow", "fix_intan_other_asset_acqui_cash"): ("cashflow", "cash_pay_acq_const_fiolta"),
     ("indicator", "eps"): ("pershare_index", "s_fa_eps_basic"),
-    ("indicator", "roa"): ("pershare_index", "roa"),
+    # indicator.roa 在聚宽是「单季净利润 / 平均总资产」，由 _single_quarter_roa 派生。
     ("indicator", "roe"): ("pershare_index", "equity_roe"),
     ("indicator", "inc_return"): ("pershare_index", "equity_roe"),
     ("indicator", "gross_profit_margin"): ("pershare_index", "gross_margin"),
@@ -164,6 +164,7 @@ class FundamentalStore:
         self.fin = self.root / "3_financial_data"
         self.valuation = self.root / "5_technical_derived" / "valuation"
         self._valuation_cache: dict[str, pd.DataFrame] = {}
+        self._roa_cache: dict[str, pd.Series] = {}
 
     def query(self, q: Query, *, as_of: str) -> pd.DataFrame:
         as_of_key = as_of.replace("-", "")
@@ -174,6 +175,9 @@ class FundamentalStore:
         needed.extend(_condition_fields(q.where))
         needed = list(dict.fromkeys(needed))
 
+        needs_roa = any(
+            field.table == "indicator" and field.name == "roa" for field in needed
+        )
         financial = [
             field for field in needed
             if field.name != "code"
@@ -196,11 +200,19 @@ class FundamentalStore:
             val = self._valuation_frame(as_of_key)
             frame = val if frame.empty else frame.merge(val, on="symbol", how="inner")
 
+        if frame.empty and needs_roa:
+            frame = pd.DataFrame({"symbol": self._single_quarter_roa(as_of_key).index})
         if frame.empty:
             return pd.DataFrame(columns=["code", *[f.name for f in q.fields]])
 
         for table in code_tables:
             frame[f"{table}.code"] = frame["symbol"]
+
+        if needs_roa:
+            # 聚宽 indicator.roa 是单季净利润 / 平均总资产；源表 roa 是累计口径。
+            frame["indicator.roa"] = (
+                frame["symbol"].map(self._single_quarter_roa(as_of_key)).astype(float)
+            )
 
         if q.where is not None:
             frame = frame[evaluate(frame, q.where)]
@@ -340,6 +352,51 @@ class FundamentalStore:
         if merged is None:
             return pd.DataFrame(columns=["code", "statDate"])
         return merged.reset_index(drop=True)
+
+    def _single_quarter_roa(self, as_of: str) -> pd.Series:
+        """聚宽 ``indicator.roa``：单季净利润（含少数）/ 平均总资产 × 100。"""
+
+        cached = self._roa_cache.get(as_of)
+        if cached is not None:
+            return cached
+        income = visible(
+            load_statement(self.root, "income", ["net_profit_incl_min_int_inc"]), as_of
+        )
+        balance = visible(load_statement(self.root, "balance", ["tot_assets"]), as_of)
+        if income.empty or balance.empty:
+            result = pd.Series(dtype=float)
+            self._roa_cache[as_of] = result
+            return result
+
+        income = income.sort_values(["Symbol", "m_timetag"], kind="stable")
+        net = pd.to_numeric(income["net_profit_incl_min_int_inc"], errors="coerce")
+        year = income["m_timetag"].astype(str).str[:4]
+        prev_net = net.groupby(income["Symbol"]).shift(1)
+        prev_year = year.groupby(income["Symbol"]).shift(1)
+        same_year = prev_year.notna() & (prev_year == year)
+        single = net.where(~same_year, net - prev_net)
+        latest_income = (
+            income.assign(_single=single.to_numpy())
+            .drop_duplicates("Symbol", keep="last")
+            .set_index("Symbol")
+        )
+
+        balance = balance.sort_values(["Symbol", "m_timetag"], kind="stable")
+        balance["_assets"] = pd.to_numeric(balance["tot_assets"], errors="coerce")
+        balance["_prev_assets"] = balance.groupby("Symbol")["_assets"].shift(1)
+        latest_balance = balance.drop_duplicates("Symbol", keep="last").set_index(
+            "Symbol"
+        )
+        assets = latest_balance["_assets"]
+        average = (assets + latest_balance["_prev_assets"]) / 2.0
+        average = average.where(average > 0, assets)
+
+        ratio = latest_income["_single"] / average.reindex(latest_income.index)
+        result = (ratio * 100.0).replace([np.inf, -np.inf], np.nan).astype(float)
+        if len(self._roa_cache) > 64:
+            self._roa_cache.clear()
+        self._roa_cache[as_of] = result
+        return result
 
     def _valuation_frame(self, as_of: str) -> pd.DataFrame:
         if not self.valuation.is_dir():
