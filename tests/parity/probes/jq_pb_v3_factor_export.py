@@ -29,28 +29,10 @@ import datetime as dt
 import numpy as np
 import pandas as pd
 
-# 研究环境里不要用 ``from jqdata import *``（在 notebook 的函数/缩进上下文会报
-# "import * only allowed at module level"），改成按需导入。
-try:
-    from jqdata import (
-        finance,
-        get_fundamentals,
-        get_trade_days,
-        indicator,
-        query,
-        valuation,
-    )
-except ImportError:  # 个别环境只暴露模块属性
-    import jqdata as _jqdata
-
-    finance = _jqdata.finance
-    get_fundamentals = _jqdata.get_fundamentals
-    get_trade_days = _jqdata.get_trade_days
-    indicator = _jqdata.indicator
-    query = _jqdata.query
-    valuation = _jqdata.valuation
-
-from jqfactor import Factor, calc_factors, get_factor_values
+# 聚宽研究环境只需星号导入；务必整段从行首开始粘贴，前面不能有缩进，
+# 否则会报 "import * only allowed at module level"。
+from jqdata import *  # noqa: F401,F403
+from jqfactor import *  # noqa: F401,F403
 
 START = "2016-09-30"
 END = "2026-09-30"
