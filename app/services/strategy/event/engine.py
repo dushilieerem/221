@@ -63,6 +63,12 @@ class EventBacktestEngine:
         # 查询（current_data / 涨跌停状态）下会退化成 O(列) 的 pandas 定位，
         # 每个交易日只把当天需要的行转成 dict，后续都是 O(1)。
         self._row_cache: dict[tuple[int, pd.Timestamp], dict[str, object]] = {}
+        # 状态面板（ST / 停牌）的布尔矩阵缓存：宽表字符串比较按列很慢，
+        # 首次使用时整表向量化一次，之后每天只做 numpy 切片。
+        self._status_matrix_cache: dict[
+            tuple[str, str | tuple[str, ...]],
+            tuple[pd.Index, pd.Index, np.ndarray],
+        ] = {}
         # 聚宽 get_orders/get_open_orders 需要回看已处理订单与成交量。
         self._all_orders: list[EventOrder] = []
         self._all_fills: list[EventFill] = []
@@ -206,8 +212,7 @@ class EventBacktestEngine:
                     "reason_code": "DELISTED",
                 })
 
-            close_prices = self._mark_close.loc[date]
-            total_value = ledger.cash + sum(ledger.positions.get(symbol, 0) * float(close_prices[symbol]) for symbol in self.symbols if pd.notna(close_prices[symbol]))
+            total_value = self._portfolio_value(ledger, timestamp)
             equity.append(total_value)
             snapshots.append(PositionSnapshot(context.current_dt, ledger.cash, dict(ledger.positions), dict(ledger.sellable), total_value))
             events.append({"type": "SESSION_CLOSE", "timestamp": context.current_dt})
@@ -324,12 +329,7 @@ class EventBacktestEngine:
 
             close_time = max("15:00", times[-1]) if times else "15:00"
             context.current_dt = self._at(timestamp, close_time)
-            close_prices = self._mark_close.loc[date]
-            total_value = ledger.cash + sum(
-                ledger.positions.get(symbol, 0) * float(close_prices[symbol])
-                for symbol in self.symbols
-                if pd.notna(close_prices[symbol])
-            )
+            total_value = self._portfolio_value(ledger, timestamp)
             equity.append(total_value)
             snapshots.append(PositionSnapshot(
                 context.current_dt,
@@ -804,6 +804,21 @@ class EventBacktestEngine:
             self._row_cache[key] = values
         return values
 
+    def _portfolio_value(self, ledger, date: pd.Timestamp) -> float:
+        """按收盘价估值：只遍历持仓，避免每天对全市场做 Series 标量定位。"""
+
+        row = self._row_values(self._mark_close, date)
+        total = float(ledger.cash)
+        if row is None:
+            return total
+        for symbol, quantity in ledger.positions.items():
+            if not quantity:
+                continue
+            price = row.get(symbol)
+            if price is not None and pd.notna(price):
+                total += float(quantity) * float(price)
+        return total
+
     def _price(self, symbol: str, date: pd.Timestamp) -> float | None:
         """当日成交参考价。
 
@@ -1088,6 +1103,60 @@ class _MarketView:
     def __init__(self, engine: EventBacktestEngine) -> None:
         self._engine = engine
 
+    def _status_matrix(
+        self, name: str, values: str | tuple[str, ...]
+    ) -> tuple[pd.Index, pd.Index, np.ndarray] | None:
+        """把状态面板（字符串）一次性转成布尔矩阵并缓存。
+
+        状态面板是 Arrow 字符串宽表（2600×5900），任何按列的字符串比较
+        都要几秒；回测里每天都会按窗口取一次，必须预先向量化成 numpy。
+        """
+
+        engine = self._engine
+        key = (name, values)
+        cached = engine._status_matrix_cache.get(key)
+        if cached is not None:
+            return cached
+        panel = engine.panels.get(name)
+        if panel is None:
+            return None
+        mask = (
+            panel.isin(list(values))
+            if isinstance(values, tuple)
+            else panel.eq(values)
+        )
+        cached = (mask.index, mask.columns, mask.to_numpy(dtype=bool))
+        engine._status_matrix_cache[key] = cached
+        return cached
+
+    def _status_frame(
+        self,
+        cached: tuple[pd.Index, pd.Index, np.ndarray],
+        symbols: list[str],
+        *,
+        count: int | None = None,
+        start: object | None = None,
+        end: object | None = None,
+    ) -> pd.DataFrame:
+        """按行窗口与标的投影布尔矩阵；缺失标的按 False 处理。"""
+
+        index, columns, matrix = cached
+        positions = index
+        if start is not None:
+            positions = positions[positions >= pd.Timestamp(start)]
+        if end is not None:
+            positions = positions[positions <= pd.Timestamp(end)]
+        rows = index.get_indexer(positions)
+        if count is not None:
+            rows = rows[-int(count):]
+            positions = positions[-int(count):]
+        width = columns.get_indexer(pd.Index(symbols))
+        block = np.zeros((len(rows), len(width)), dtype=bool)
+        present = width >= 0
+        if rows.size and present.any():
+            block[:, present] = matrix[np.ix_(rows, width[present])]
+        return pd.DataFrame(block, index=positions, columns=symbols)
+
     def current_price(self, symbol: str) -> float | None:
         engine = self._engine
         date = engine._current_date
@@ -1125,22 +1194,13 @@ class _MarketView:
     ) -> pd.DataFrame | None:
         """历史停牌标记（1=停牌），供聚宽 ``get_price(fields=['paused'])`` 使用。"""
 
-        frame = self._engine.panels.get("up_and_down_status")
-        if frame is None:
+        cached = self._status_matrix("up_and_down_status", "停牌")
+        if cached is None:
             return None
-        subset = frame.reindex(columns=pd.Index(symbols))
-        if start is not None:
-            subset = subset.loc[subset.index >= pd.Timestamp(start)]
-        if end is not None:
-            subset = subset.loc[subset.index <= pd.Timestamp(end)]
-        if count is not None:
-            subset = subset.iloc[-int(count):]
-        text = subset.astype("object")
-        return text.apply(
-            lambda column: column.map(
-                lambda value: 0 if pd.isna(value) else int("停牌" in str(value))
-            )
+        block = self._status_frame(
+            cached, symbols, count=count, start=start, end=end
         )
+        return block.astype(np.int64)
 
     def status_text(self, symbol: str) -> str | None:
         return self._engine._panel_text("up_and_down_status", symbol)
@@ -1200,14 +1260,16 @@ class _MarketView:
                 frame = self._engine.panels.get(field)
             if frame is None:
                 continue
-            subset = frame.reindex(columns=pd.Index(symbols))
+            # 先按行切片再投影列：面板是「全历史 × 全市场」，双轴同时 reindex
+            # 每次都要搬运上千万个单元格；行切片后只剩几十行。
+            subset = frame
             if start is not None:
                 subset = subset.loc[subset.index >= pd.Timestamp(start)]
             if end is not None:
                 subset = subset.loc[subset.index <= pd.Timestamp(end)]
             if count is not None:
                 subset = subset.iloc[-int(count):]
-            result[field] = subset
+            result[field] = subset.reindex(columns=pd.Index(symbols))
         return result
 
     def limit_panel(
@@ -1221,7 +1283,7 @@ class _MarketView:
     ) -> pd.DataFrame:
         """按昨收与板块规则生成涨跌停价面板（未复权口径）。"""
 
-        close = self._engine._mark_close.reindex(columns=pd.Index(symbols))
+        close = self._engine._mark_close
         if start is not None:
             close = close.loc[close.index >= pd.Timestamp(start)]
         if end is not None:
@@ -1229,7 +1291,8 @@ class _MarketView:
         if count is not None:
             # 多取一行用于昨收；count=1 时不必构造整段历史面板。
             close = close.iloc[-(int(count) + 1):]
-        previous = close.shift(1)
+        # 行切片之后再投影列，避免每次都对「全历史 × 全市场」做双轴 reindex。
+        previous = close.reindex(columns=pd.Index(symbols)).shift(1)
         codes = pd.Series(
             [str(symbol).split(".")[0] for symbol in previous.columns],
             index=previous.columns,
@@ -1237,22 +1300,23 @@ class _MarketView:
         ratio = pd.Series(0.10, index=previous.columns)
         ratio[codes.str.startswith(("300", "301", "688"))] = 0.20
         ratio[codes.str.startswith(("4", "8", "920"))] = 0.30
-        ratios = pd.DataFrame(
-            np.repeat(ratio.to_numpy()[None, :], len(previous), axis=0),
-            index=previous.index,
-            columns=previous.columns,
-        )
-        status = self._engine.panels.get("listed_status")
-        if status is not None:
-            # 先投影列再取行；对 2600×5900 的状态面板一次性双轴 reindex 很慢。
-            st = status.reindex(columns=previous.columns).reindex(
-                index=previous.index
+        ratio_values = np.broadcast_to(ratio.to_numpy(dtype=float), previous.shape)
+        cached = self._status_matrix("listed_status", ("ST", "*ST"))
+        if cached is not None:
+            block = self._status_frame(
+                cached,
+                symbols,
+                start=start,
+                end=end,
+                count=None if count is None else int(count) + 1,
+            ).reindex(index=previous.index, columns=previous.columns)
+            ratio_values = np.where(
+                block.fillna(False).to_numpy(dtype=bool), 0.05, ratio_values
             )
-            ratios = ratios.mask(st.isin(["ST", "*ST"]), 0.05)
-        values = (
-            previous * (1.0 + ratios)
-            if field == "high_limit"
-            else previous * (1.0 - ratios)
+        prices = previous.to_numpy(dtype=float)
+        factor = 1.0 + ratio_values if field == "high_limit" else 1.0 - ratio_values
+        values = pd.DataFrame(
+            prices * factor, index=previous.index, columns=previous.columns
         )
         if count is not None:
             values = values.iloc[-int(count):]
