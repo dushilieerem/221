@@ -411,6 +411,7 @@ Web 端需要展示调仓或成交过程时，使用 `include_execution_timeline
 | 年度收益（`annual_returns`） | `year`、`return_value` | 自然年份及该年首末有效净值点计算的收益率。 |
 | 元信息（`meta`） | `strategy`、`universe`、`benchmark`、`engine_mode` | 实际执行的策略类名、股票池、基准和回测引擎模式。 |
 | 已保存策略元信息（`meta`） | `strategy_id`、`strategy_version`、`code_hash` | 仅通过 `strategy_id` 运行时有值：策略 ID、实际使用版本和源码 SHA-256 哈希；直接提交源码时均为 `null`。 |
+| 运行标识（`meta`） | `data_release_id`、`spec_hash`、`run_id` | `data_release_id` 为本次实际绑定的行情发布（与因子回测同口径）；`spec_hash` 是「请求参数 + 数据发布」的 SHA-256，不含运行期 id，同一输入可复现；`run_id` 为本次任务 id（同步接口同样返回），用于把报告与运行日志对应。三者都由引擎真实返回，调用方不应从页面 `current` 推断。 |
 | 过滤开关回显（`meta`） | `filter_suspended`、`filter_st`、`filter_limit_up`、`filter_limit_down` | 本次请求的四个过滤开关原样回显。 |
 | 过滤诊断（`meta.filter_status`） | `is_suspended`、`is_st`、`is_limit_up`、`is_limit_down` | 四项过滤各自的执行状态：`disabled`（开关关闭或字段缺失且被跳过）、`skipped_missing_field`（字段缺失，放行）、`enabled` / `enabled_partial`（生效，后者表示部分状态值缺失并按放行处理）；事件模式下前三个常为 `matcher_always_on`，表示由撮合层无条件拦截、不受开关影响。 |
 | 持仓快照（`positions`） | `date`、`holdings` | `holdings` 是 `{symbol, name, weight}` 数组。`symbol` 为带交易所后缀的代码（如 `000001.SZ`），`name` 为证券名称，`weight` 为目标持仓权重。 |

@@ -7,7 +7,9 @@ QuantCore 引擎调用以及 API 响应组装。``runner.py`` 仅保留兼容门
 
 from __future__ import annotations
 
+import hashlib
 import inspect
+import json
 import os
 from pathlib import Path
 
@@ -84,6 +86,23 @@ def _instantiate_vectorized_strategy(strategy_class, panels):
             f"{strategy_class.__name__} 缺少可注入的行情字段参数: {', '.join(missing)}"
         )
     return strategy_class(*positional, **keyword)
+
+
+def _strategy_run_identity(req: StrategyBacktestRequest, data_engine) -> dict[str, str | None]:
+    """本次回测绑定的数据发布与规格指纹，供报告自证可复现。
+
+    与因子回测同口径：``spec_hash`` 覆盖请求参数与数据发布，不含运行期 id。
+    """
+
+    release_id = getattr(data_engine, "release_id", None) if data_engine is not None else None
+    payload = {
+        "request": req.model_dump(mode="json"),
+        "data_release_id": release_id,
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return {"data_release_id": release_id, "spec_hash": digest}
 
 
 def run_strategy_backtest(
@@ -397,6 +416,7 @@ def run_strategy_backtest(
             strategy_id=strategy_id,
             strategy_version=strategy_version,
             code_hash=code_hash,
+            **_strategy_run_identity(req, data_engine),
             filter_suspended=req.filter_suspended,
             filter_st=req.filter_st,
             filter_limit_up=req.filter_limit_up,
@@ -756,6 +776,7 @@ def _run_event_strategy_backtest(
                 universe=req.universe,
                 benchmark=req.benchmark, engine_mode="event", strategy_id=strategy_id,
                 strategy_version=strategy_version, code_hash=code_hash,
+                **_strategy_run_identity(req, data_engine),
                 filter_suspended=req.filter_suspended,
                 filter_st=req.filter_st,
                 filter_limit_up=req.filter_limit_up,

@@ -1031,6 +1031,13 @@ def test_strategy_backtest_returns_equity_and_positions(market_data_dir):
     body = response.json()
     assert body["error"] is None
     meta = body["meta"]
+    # 运行标识单独断言：数据发布、规格指纹、任务 id 都必须真实返回。
+    identity = {
+        key: meta.pop(key) for key in ("data_release_id", "spec_hash", "run_id")
+    }
+    assert identity["data_release_id"]
+    assert len(identity["spec_hash"]) == 64
+    assert identity["run_id"]
     # 交易成本参数由 _cost_meta 单独构造，拆出来断言以免精确字典过长。
     cost_meta = {
         key: meta.pop(key)

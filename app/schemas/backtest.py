@@ -425,6 +425,12 @@ class StrategyBacktestMeta(BaseModel):
     strategy_id: Optional[str] = None
     strategy_version: Optional[str] = None
     code_hash: Optional[str] = None
+    #: 本次回测实际绑定的行情发布；与因子回测同口径，供报告自证数据版本。
+    data_release_id: Optional[str] = None
+    #: 请求 + 数据发布的规范化指纹（不含 run_id），同一输入可复现同一结果。
+    spec_hash: Optional[str] = None
+    #: 本次任务 id；同步接口也会返回，便于把报告与运行日志对应起来。
+    run_id: Optional[str] = None
     #: 本次请求的过滤开关回显；事件模式下前三个由撮合层常开拒单覆盖
     filter_suspended: bool = False
     filter_st: bool = False
