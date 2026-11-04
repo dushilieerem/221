@@ -565,6 +565,63 @@ def _context(day, previous):
     return context
 
 
+def _industry_safe(codes, asof):
+    """研究环境 get_industry 的返回形态不稳定，这里统一成 {code: 行业代码}。"""
+
+    if not codes:
+        return {}
+    raw = None
+    error = None
+    for attempt in range(2):
+        try:
+            if attempt == 0:
+                raw = get_industry(security=list(codes), date=asof)
+            else:
+                raw = get_industry(list(codes), asof)
+            break
+        except Exception as exc:
+            error = "%s: %s" % (type(exc).__name__, exc)
+            raw = None
+    if not _STATS.get("industry_raw_printed"):
+        _STATS["industry_raw_printed"] = True
+        sample = None
+        if isinstance(raw, dict) and raw:
+            sample = (list(raw.keys())[0], raw[list(raw.keys())[0]])
+        elif isinstance(raw, pd.DataFrame):
+            sample = ("DataFrame", list(raw.columns)[:4])
+        print("诊断 行业原始返回：%s，样例 %s，错误 %s" % (type(raw).__name__, sample, error))
+    if raw is None:
+        return {}
+
+    result = {}
+    if isinstance(raw, pd.DataFrame):
+        for code in raw.index:
+            payload = raw.loc[code]
+            code_value = None
+            try:
+                code_value = payload.get(("sw_l1", "industry_code"))
+            except Exception:
+                pass
+            if code_value is None:
+                for column in raw.columns:
+                    if isinstance(column, tuple) and column[0] == "sw_l1" and "code" in column[1]:
+                        try:
+                            code_value = payload[column]
+                        except Exception:
+                            code_value = None
+                        break
+            result[code] = code_value
+        return dict((code, value) for code, value in result.items() if value is not None)
+
+    for code in codes:
+        item = raw.get(code) or {}
+        level = item.get("sw_l1") or {}
+        value = level.get("industry_code")
+        if value is not None:
+            result[code] = value
+    return result
+
+
 def _rows_of(day, codes, stage, values=None):
     for offset, code in enumerate(codes):
         value = None
@@ -657,7 +714,11 @@ def run_date(day, previous):
     _rows_of(day, b_rank, "b_rank")
 
     candidates = list(dict.fromkeys(a_rank + b_rank))
-    industries = _fetch_industry(candidates, asof) if candidates else {}
+    industries = _industry_safe(candidates, asof)
+    if not _STATS.get("industry_printed"):
+        _STATS["industry_printed"] = True
+        filled = sum(1 for value in industries.values() if value)
+        print("诊断 行业 %s：候选 %d，取到行业 %d" % (asof, len(candidates), filled))
     for code in candidates:
         STAGES.append({
             "date": str(day), "stage": "industry", "rank": None,
