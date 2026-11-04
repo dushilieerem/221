@@ -10,6 +10,7 @@ date_sequence 是 5956 列宽表，按需投影所需标的的行业列，避免
 
 from __future__ import annotations
 
+import os
 from bisect import bisect_right
 from pathlib import Path
 
@@ -18,6 +19,12 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 _INDUSTRY_FIELD = "ths_the_sw_industry_code_stock"
+
+#: 可选的 PIT 行业历史覆盖文件（CSV/Parquet）。列：
+#: date, symbol, sw_l1_code, sw_l1_name, sw_l2_code, sw_l2_name。
+#: 生产视图里的 industry_daily 是 latest_only；对账时用聚宽导出的历史快照
+#: 通过这个文件覆盖，避免 2016–2020 用今天的行业归属。
+INDUSTRY_HISTORY_ENV = "RE_INDUSTRY_HISTORY"
 
 
 def _normalize_industry_code(value: object) -> str:
@@ -40,10 +47,34 @@ def _column_symbol(name: str) -> str | None:
     return parts[1] if len(parts) >= 3 else None
 
 
+def _load_history(
+    path: Path,
+) -> tuple[list[pd.Timestamp], dict[pd.Timestamp, pd.DataFrame]] | None:
+    """读取 PIT 行业快照（CSV 或 Parquet），按日期建索引。"""
+
+    if not path.is_file():
+        raise FileNotFoundError(f"行业历史覆盖文件不存在: {path}")
+    if path.suffix.lower() in {".parquet", ".pq"}:
+        frame = pd.read_parquet(path)
+    else:
+        frame = pd.read_csv(path, encoding="utf-8-sig")
+    required = {"date", "symbol", "sw_l1_code"}
+    missing = required - set(frame.columns)
+    if missing:
+        raise ValueError(f"行业历史文件缺少列: {sorted(missing)}")
+    frame["date"] = pd.to_datetime(frame["date"]).dt.normalize()
+    frame = frame.drop_duplicates(["date", "symbol"], keep="last")
+    by_date = {
+        date: group.set_index("symbol")
+        for date, group in frame.groupby("date", sort=True)
+    }
+    return sorted(by_date), by_date
+
+
 class IndustryStore:
     """按交易日读取个股 THS 一级行业代码。"""
 
-    def __init__(self, data_dir: str | Path) -> None:
+    def __init__(self, data_dir: str | Path, history_path: str | Path | None = None) -> None:
         self.path = Path(data_dir) / "date_sequence" / "date_sequence.parquet"
         self._columns: dict[str, str] | None = None
         self._derived_dir = (
@@ -52,12 +83,19 @@ class IndustryStore:
         self._derived: pd.DataFrame | None = None
         self._derived_by_date: dict[pd.Timestamp, pd.DataFrame] = {}
         self._derived_dates: list[pd.Timestamp] = []
+        # 可选 PIT 覆盖：优先于 latest_only 的 industry_daily。
+        override = history_path or os.environ.get(INDUSTRY_HISTORY_ENV)
+        self._history: tuple[list[pd.Timestamp], dict[pd.Timestamp, pd.DataFrame]] | None = (
+            _load_history(Path(override)) if override else None
+        )
 
     def industries(
         self,
         symbols: list[str],
         as_of: str | object,
     ) -> dict[str, dict[str, dict[str, str]]]:
+        if self._history is not None:
+            return self._history_industries(symbols, as_of)
         if self._derived_dir.is_dir():
             return self._derived_industries(symbols, as_of)
         columns = self._columns_for()
@@ -91,6 +129,48 @@ class IndustryStore:
             result[symbol] = {
                 "sw_l1": {"industry_code": code, "industry_name": code}
             }
+        return result
+
+    def _history_snapshot(self, as_of: str | object) -> pd.DataFrame | None:
+        """取不晚于 ``as_of`` 的最近一个行业快照。"""
+
+        if self._history is None:
+            return None
+        dates, by_date = self._history
+        target = pd.Timestamp(as_of).normalize()
+        position = bisect_right(dates, target) - 1
+        if position < 0:
+            return None
+        return by_date[dates[position]]
+
+    def _history_industries(
+        self, symbols: list[str], as_of: str | object
+    ) -> dict[str, dict[str, dict[str, str]]]:
+        snapshot = self._history_snapshot(as_of)
+        if snapshot is None or snapshot.empty:
+            return {}
+        rows = snapshot.reindex(symbols)
+        result: dict[str, dict[str, dict[str, str]]] = {}
+        for symbol, row in rows.iterrows():
+            payload: dict[str, dict[str, str]] = {}
+            for level, code_column, name_column in (
+                ("sw_l1", "sw_l1_code", "sw_l1_name"),
+                ("sw_l2", "sw_l2_code", "sw_l2_name"),
+            ):
+                code = row.get(code_column)
+                if code is None or pd.isna(code):
+                    continue
+                name = row.get(name_column)
+                payload[level] = {
+                    "industry_code": str(code),
+                    "industry_name": (
+                        str(name)
+                        if name is not None and not pd.isna(name)
+                        else str(code)
+                    ),
+                }
+            if payload:
+                result[str(symbol)] = payload
         return result
 
     def _derived_industries(
@@ -143,6 +223,16 @@ class IndustryStore:
         target = _normalize_industry_code(industry_code)
         if not target:
             return []
+        if self._history is not None:
+            snapshot = self._history_snapshot(as_of)
+            if snapshot is None or snapshot.empty:
+                return []
+            codes = snapshot.get("sw_l1_code", pd.Series(dtype=object))
+            return [
+                str(symbol)
+                for symbol, code in zip(snapshot.index, codes)
+                if _normalize_industry_code(code) == target
+            ]
         target_date = pd.Timestamp(as_of).normalize()
         cache = getattr(self, "_stocks_cache", None)
         if cache is None or cache[0] != target_date:
