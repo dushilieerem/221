@@ -90,10 +90,10 @@ def compute_components(values: dict[str, pd.Series]) -> pd.DataFrame:
     }).replace([np.inf, -np.inf], np.nan)
 
 
-def main(path: str) -> int:
+def main(path: str, root: str | None = None) -> int:
     jq = pd.read_csv(path)
     jq["code_local"] = jq["code"].map(to_local)
-    store = FactorStore()
+    store = FactorStore(root) if root else FactorStore()
     rows = []
     for date, part in jq.groupby("date"):
         codes = part["code_local"].tolist()
@@ -156,4 +156,4 @@ def main(path: str) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1]))
+    raise SystemExit(main(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else None))
