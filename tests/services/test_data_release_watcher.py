@@ -228,10 +228,14 @@ def test_watcher_reloads_when_symlink_points_to_new_release(tmp_path):
     engine.load_parquet(first)
     assert engine.get_task_panels(fields=["close"])["close"].iloc[-1, 0] == 11.0
 
+    # 生产环境下 settings.data_dir 是启动时解析后的绝对路径，
+    # 只有 data_dir_configured 保留未解析的符号链接。
     settings = replace(
         default_runtime_settings(),
-        data_dir=current,
-        data_manifest=current / "data_manifest.yaml",
+        data_dir=first,
+        data_manifest=first / "data_manifest.yaml",
+        data_dir_configured=current,
+        data_manifest_configured=current / "data_manifest.yaml",
     )
     watcher = DataReleaseWatcher(engine, settings)
 

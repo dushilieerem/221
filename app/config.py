@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 from pathlib import Path
 from typing import Any, Mapping
@@ -99,6 +99,24 @@ def _path(value: Any, *, base: Path, default: Path) -> Path:
     return candidate.resolve()
 
 
+def _configured_path(value: Any, *, base: Path, default: Path) -> Path:
+    """同 ``_path``，但**不解析符号链接**。
+
+    视图通过 ``views/current`` 这类链接轮换，进程启动时解析一次就会钉死在
+    旧发布上；保留未解析的配置路径，供发布监视器与手动重载在每次检查时
+    重新解析。
+    """
+
+    if value is None:
+        return default.expanduser()
+    if not isinstance(value, (str, Path)) or not str(value).strip():
+        raise ValueError(f"路径配置必须是非空字符串，得到 {value!r}")
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        candidate = base / candidate
+    return candidate
+
+
 def _optional_string(value: Any, name: str) -> str | None:
     if value is None or value == "":
         return None
@@ -168,6 +186,9 @@ class RuntimeSettings:
     ai_base_url: str
     ai_api_key: str | None = field(repr=False)
     ai_model: str
+    #: 未解析符号链接的配置路径；发布轮换时用它重新解析目标。
+    data_dir_configured: Path | None = None
+    data_manifest_configured: Path | None = None
 
     @property
     def base_url(self) -> str:
@@ -197,6 +218,11 @@ def _from_manager(manager: ConfigManager, config_path: Path) -> RuntimeSettings:
         base=base_dir,
         default=base_dir.parent / "marketdata",
     )
+    data_dir_configured = _configured_path(
+        data.get("dir", manager.get("data_dir")),
+        base=base_dir,
+        default=base_dir.parent / "marketdata",
+    )
     manifest_value = data.get(
         "manifest",
         manager.get("data_manifest", "data_manifest.yaml"),
@@ -205,6 +231,11 @@ def _from_manager(manager: ConfigManager, config_path: Path) -> RuntimeSettings:
         manifest_value,
         base=data_dir,
         default=data_dir / "data_manifest.yaml",
+    )
+    data_manifest_configured = _configured_path(
+        manifest_value,
+        base=data_dir_configured,
+        default=data_dir_configured / "data_manifest.yaml",
     )
 
     factor_database = _path(
@@ -302,6 +333,8 @@ def _from_manager(manager: ConfigManager, config_path: Path) -> RuntimeSettings:
         config_path=config_path,
         data_dir=data_dir,
         data_manifest=data_manifest,
+        data_dir_configured=data_dir_configured,
+        data_manifest_configured=data_manifest_configured,
         expected_data_version=_optional_string(
             data.get("expected_version", data.get("version")),
             "data.expected_version",
@@ -351,7 +384,14 @@ def default_runtime_settings() -> RuntimeSettings:
     ``config.yaml``，因此不会静默启动。
     """
 
-    return _from_manager(ConfigManager(), DEFAULT_CONFIG_PATH)
+    settings = _from_manager(ConfigManager(), DEFAULT_CONFIG_PATH)
+    # 默认值只用于导入与单测；不携带未解析配置路径，避免替换 data_dir 后
+    # 监视器/重载仍按真实仓库的默认视图做判断。
+    return replace(
+        settings,
+        data_dir_configured=None,
+        data_manifest_configured=None,
+    )
 
 
 def load_runtime_settings(path: str | Path = DEFAULT_CONFIG_PATH) -> RuntimeSettings:

@@ -44,9 +44,15 @@ def reload_data_release(
     """
 
     with _RELOAD_LOCK:
+        # 用「未解析符号链接」的配置路径重新校验：视图轮换时链接已指向新
+        # 发布，而 settings.data_dir 是启动时解析出的旧绝对路径。
+        target_dir = settings.data_dir_configured or settings.data_dir
+        target_manifest = (
+            settings.data_manifest_configured or settings.data_manifest
+        )
         manifest = validate_data_manifest(
-            settings.data_dir,
-            manifest_path=settings.data_manifest,
+            target_dir,
+            manifest_path=target_manifest,
             expected_data_version=settings.expected_data_version,
             expected_manifest_sha256=settings.expected_manifest_sha256,
             verify_hashes=settings.verify_data_hashes,
@@ -130,7 +136,10 @@ class DataReleaseWatcher:
     def _linked_release_changed(self) -> bool:
         """配置路径（符号链接）解析后与已装载目录不一致即为视图轮换。"""
 
-        configured = getattr(self._settings, "data_dir", None)
+        configured = (
+            getattr(self._settings, "data_dir_configured", None)
+            or getattr(self._settings, "data_dir", None)
+        )
         active = getattr(self._engine, "data_dir", None)
         if configured is None or active is None:
             return False
