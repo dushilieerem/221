@@ -30,7 +30,7 @@ START = "2016-09-30"
 END = "2026-09-30"
 OUTPUT = "破净v3_FF8明细导出.csv"
 
-COMPONENTS: list[dict] = []
+COMPONENTS = []  # 逐股明细；聚宽研究环境的 Python 版本较旧，不要用 list[dict] 这类注解
 _CURRENT_DATE = {"value": None}
 
 DEPENDENCIES = [
