@@ -100,7 +100,7 @@ python -m app.cli.joinquant_parity compare --case fixed_basket_hold
 | `dividend_v3_10w` | 10 万 | 59.5% / 56.9% | 397.5% / 211.7% | `output/joinquant-parity/dividend_v3_10w/20261103T083458Z/report.md` |
 | `dividend_v3_100w` | 100 万 | 59.2% / 56.9% | 478.6% / 230.3% | `output/joinquant-parity/dividend_v3_100w/20261103T083508Z/report.md` |
 | `pb_v3` | 10 万 | 66.2% / 66.7%（ROA 修正前 56.3% / 60.1%） | 519.6% / 278.6% | `output/joinquant-parity/pb_v3/20261104T042038Z/report.md` |
-| `fcf_v3` | 10 万 | 57.7% / 65.8% | 573.0% / 217.1% | `output/joinquant-parity/fcf_v3/20261103T175827Z/report.md` |
+| `fcf_v3` | 10 万 | 76.8% / 84.1%（行业剔除修复前 57.7% / 65.8%） | 573.0% / 343.9% | `output/joinquant-parity/fcf_v3/20261104T075737Z/report.md` |
 
 四个用例的 L0 全部通过，首个严格分歧都在 L1 的选股集合/建仓日；L5 五项指标全部不满足容差。
 
@@ -110,7 +110,7 @@ python -m app.cli.joinquant_parity compare --case fixed_basket_hold
 - `calc_factors` 自定义 FF8：聚宽 jqfactor 的依赖项是**单季度**口径，源表 `pershare_index` / 利润表流量字段是年内累计。2026-11-04 改为按财报重算单季度 ROE（单季净利/平均全部权益）、ROA（单季净利/平均总资产）、毛利率（单季营业收入−营业成本），`total_profit`/`financial_expense` 按年内差分。用聚宽导出逐值核对：8 项布尔一致率 74%–99% → **88%–99%**，依赖原值中位偏差 0%–2.3%。破净 v3 持仓重合 62.2% → **66.2%**（按金标口径），收益 220.4% → 278.6%。
 - `indicator.gross_profit_margin` 秩相关 0.94，但两位小数只有 33% 一致，极值处差异可达数倍，尚未确认是单季/累计口径还是营业成本定义不同。
 - 破净 v3 的 ETF 现金管理（511880）：2026-11-04 已接入事件引擎（`extra_symbols` + 视图 `free/etf_daily`，聚宽代码归一、卖出免印花税），短窗口已验证可正常买卖；全区间重跑待下一轮。
-- 行业分类：数据侧已交付 `derived/industry_membership_history`（PIT，2016-01-19 起，与聚宽月度快照不一致率 0.14–0.18%），兼容层已优先使用。**对价值类 v3 的选股无影响**：2019 全年破净/红利在 PIT 与 latest_only 下持仓逐字节相同（行业约束未触发）。同时修复了 `get_industry` 返回 `801780.SI` 导致自由现金流 v3 银行/地产剔除失效的问题。
+- 行业分类：数据侧已交付 `derived/industry_membership_history`（PIT，2016-01-19 起，与聚宽月度快照不一致率 0.14–0.18%），兼容层已优先使用。**对价值类 v3 的选股无影响**：2019 全年破净/红利在 PIT 与 latest_only 下持仓逐字节相同（行业约束未触发）。同时修复了 `get_industry` 返回 `801780.SI` 导致自由现金流 v3 银行/地产剔除失效的问题——修复后自由现金流 v3 重合率 57.7% → **76.8%**（按金标），收益 217.1% → 343.9%。
 
 ## 首个真实结论（2024-01-02 ~ 2024-06-28，固定 4 只银行股）
 
