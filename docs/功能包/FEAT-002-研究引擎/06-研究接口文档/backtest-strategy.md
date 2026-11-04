@@ -31,7 +31,7 @@ Web 端需要展示调仓或成交过程时，使用 `include_execution_timeline
 | `universe` | string | `CSI500` | 股票池。 |
 | `universe_snapshot` | object/null | `null` | WebApp 已鉴权并解析的静态证券池快照；仅向量化模式支持，且与 `universe` 至多传一个。 |
 | `start` / `end` | string/null | `null` | 回测区间，格式 `YYYY-MM-DD`。 |
-| `benchmark` | enum | `CSI300` | `CSI300`、`CSI500`、`CSI1000` 或 `SSE50`。 |
+| `benchmark` | enum | `CSI300` | `CSI300` 或 `CSI500`（请求模型目前只接受这两个值）。 |
 | `benchmark_snapshot` | object/null | `null` | WebApp 已鉴权并解析的固定权重组合基准快照；仅向量化模式支持，且与 `benchmark` 至多传一个。 |
 | `commission_rate` | number | `0.0` | 佣金率。向量化按换手率计提；事件按每笔成交额计提。 |
 | `slippage_rate` | number | `0.0` | 滑点率。向量化与佣金同项相加按换手计提；事件模式下**调整成交价**（买入向上、卖出向下）。 |
