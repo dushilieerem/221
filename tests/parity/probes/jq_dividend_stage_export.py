@@ -476,6 +476,7 @@ def _build_initial_universe(context):
 
 STAGES = []
 WEIGHTS = []
+_STATS = {"printed": False}
 
 
 class _Log(object):
@@ -498,25 +499,36 @@ def _current_data_view(asof):
     names = securities["display_name"] if "display_name" in securities.columns else pd.Series("", index=codes)
 
     st_map = {}
+    st_error = None
     try:
         st_frame = get_extras("is_st", codes, end_date=asof, count=1, df=True)
         if st_frame is not None and not st_frame.empty:
             last = st_frame.iloc[-1]
             st_map = dict((code, bool(last.get(code, False))) for code in codes)
-    except Exception:
+    except Exception as exc:
         st_map = {}
+        st_error = "%s: %s" % (type(exc).__name__, exc)
 
     vol_map = {}
+    vol_error = None
     for start in range(0, len(codes), 800):
         batch = codes[start:start + 800]
         try:
             frame = get_price(batch, end_date=asof, count=1, fields=["volume"],
                               panel=False, skip_paused=False, fq=None)
-            if frame is not None and not frame.empty:
+            if frame is not None and not frame.empty and "code" in frame.columns:
                 for code, value in zip(frame["code"], frame["volume"]):
                     vol_map[code] = value
-        except Exception:
-            pass
+            elif frame is not None and not frame.empty:
+                vol_error = "columns=%s" % list(frame.columns)
+        except Exception as exc:
+            vol_error = "%s: %s" % (type(exc).__name__, exc)
+
+    if not _STATS["printed"]:
+        _STATS["printed"] = True
+        print("诊断 %s：证券 %d，is_st %d（%s），volume %d（%s）" % (
+            asof, len(codes), len(st_map), st_error or "ok",
+            len(vol_map), vol_error or "ok"))
 
     class _Item(object):
         pass
@@ -527,7 +539,12 @@ def _current_data_view(asof):
             item.name = str(names.get(code, ""))
             item.is_st = st_map.get(code, False)
             volume = vol_map.get(code)
-            item.paused = (volume is None or pd.isna(volume) or float(volume) <= 0)
+            # 取不到成交量时按“正常交易”处理，避免接口不可用把整个池清空；
+            # 真实停牌仍会被后续价格/成交检查拦截。
+            if volume is None:
+                item.paused = False
+            else:
+                item.paused = bool(pd.isna(volume)) or float(volume) <= 0
             return item
 
     return _View()
