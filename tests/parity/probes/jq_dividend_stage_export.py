@@ -11,6 +11,7 @@
 
 研究环境 Python 版本较旧，本文件不使用 3.9+ 语法。
 """
+import builtins as py
 import datetime as dt
 
 import numpy as np
