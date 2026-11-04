@@ -1,62 +1,499 @@
 # -*- coding: utf-8 -*-
-"""在聚宽「研究环境」导出红利 v3 每个调仓日的选股中间结果。
+"""在聚宽「研究环境」导出红利 v3 每个调仓日的选股中间结果（自包含版）。
 
-目的：把「我们和聚宽的红利选股差异」定位到具体阶段（基础池 / 市值 / 流动性 /
-ROE / 连续分红 / 股息率 / 波动率 / B 池基本面 / 行业上限），而不是只看月末持仓。
+本文件由 tools/build_dividend_probe.py 从
+`tests/parity/cases/value_v3/dividend_v3_10w/jq_strategy.py` 逐字抽取函数生成，
+不需要上传策略文件，直接整段粘贴运行即可。
 
-用法
-----
-1. 把 `dividend_v3_10w/jq_strategy.py`（或 100w 版本，策略逻辑相同）上传到研究环境
-   当前目录，文件名与 STRATEGY_PATH 一致。
-2. 把本脚本整段粘贴进一个 cell（**从行首开始**），运行。
-3. 生成两个文件，下载后发给 RE：
-   - `红利v3_选股阶段导出.csv`：date, stage, rank, code, value
-   - `红利v3_最终权重导出.csv`：date, code, weight, pool
+输出：
+- 红利v3_选股阶段导出.csv：date, stage, rank, code, value
+- 红利v3_最终权重导出.csv：date, code, weight, pool
 
-说明
-----
-- 只调用策略自身的选股函数（不复制逻辑），研究环境缺 `get_current_data`，
-  本脚本用 `get_extras('is_st')` + 当日成交量构造等价视图。
-- 不依赖回测上下文，`g` / `log` / `run_daily` 等都是桩。
-- 研究环境 Python 版本较旧：不要用 3.9+ 注解与 f-string。
+研究环境 Python 版本较旧，本文件不使用 3.9+ 语法。
 """
 import datetime as dt
-import types
 
 import numpy as np
 import pandas as pd
 
 from jqdata import *  # noqa: F401,F403
 
-STRATEGY_PATH = "jq_strategy.py"
 START = "2016-09-30"
 END = "2026-09-30"
-#: 每 N 个调仓日取 1 个（1=全部）。研究环境配额紧张时可设 3 或 6。
+#: 每 N 个调仓日取 1 个（1=全部）。配额紧张时设 3 或 6。
 DATE_STEP = 1
 STAGE_OUTPUT = "红利v3_选股阶段导出.csv"
 WEIGHT_OUTPUT = "红利v3_最终权重导出.csv"
+
+
+# 研究环境的 get_industry 可能返回 DataFrame（回测里是 dict），统一成 dict。
+_ORIGINAL_GET_INDUSTRY = get_industry
+
+
+def get_industry(security, date=None, **kwargs):
+    result = _ORIGINAL_GET_INDUSTRY(security, date=date, **kwargs)
+    if isinstance(result, pd.DataFrame):
+        mapping = {}
+        for code in result.index:
+            payload = {}
+            for group in ("sw_l1", "sw_l2"):
+                try:
+                    value = result[(group, "industry_code")].get(code)
+                except Exception:
+                    value = None
+                if value is not None and not pd.isna(value):
+                    payload[group] = {"industry_code": value}
+            mapping[code] = payload
+        return mapping
+    return result
+
+#: 以下常量与函数逐字复制自 dividend_v3_10w/jq_strategy.py
+
+POOL_TARGET_NUM = 5
+POOL_BUDGET = 0.50
+INVEST_RATIO = 0.99
+MAX_POSITIONS = 10
+MAX_INDUSTRY = 5
+MAX_TARGET_WEIGHT = 0.198
+MIN_MARKET_CAP_A = 50.0
+NEW_STOCK_DAYS = 365
+ROE_YEARS = 3
+DIVIDEND_YIELD_MIN = 0.03
+VOLATILITY_TRADING_DAYS = 780
+MIN_COMPLETE_WEEKS = 50
+CANDIDATE_MULTIPLIER = 3
+
+
+def _stable_rank(series, ascending=False):
+    values = pd.to_numeric(series, errors='coerce')
+    values = values.replace([np.inf, -np.inf], np.nan).dropna()
+    return values.sort_index().sort_values(ascending=ascending, kind='mergesort')
+
+
+def _fetch_industry(codes, asof):
+    if not codes:
+        return {}
+    data = get_industry(security=list(codes), date=asof)
+    if data is None:
+        raise ValueError('行业数据返回 None')
+
+    result = {}
+    for code in codes:
+        result[code] = data.get(code, {}).get('sw_l1', {}).get('industry_code')
+    return result
+
+
+def _get_price_batches(codes, asof, count, fields, fq=None, batch_size=200):
+    pieces = []
+    for start in py.range(0, len(codes), batch_size):
+        batch = codes[start:start + batch_size]
+        frame = get_price(
+            batch,
+            end_date=asof,
+            count=count,
+            frequency='daily',
+            fields=fields,
+            panel=False,
+            skip_paused=False,
+            fq=fq
+        )
+        if frame is None:
+            raise ValueError('历史行情返回 None')
+        if not frame.empty:
+            pieces.append(frame)
+
+    if not pieces:
+        return pd.DataFrame()
+    return pd.concat(pieces, ignore_index=True)
+
+
+def _query_dividend_recursive(codes, start_date, end_date):
+    query_obj = query(
+        finance.STK_XR_XD.code,
+        finance.STK_XR_XD.a_registration_date,
+        finance.STK_XR_XD.bonus_amount_rmb
+    ).filter(
+        finance.STK_XR_XD.code.in_(codes),
+        finance.STK_XR_XD.a_registration_date > start_date,
+        finance.STK_XR_XD.a_registration_date <= end_date
+    ).limit(4000)
+
+    frame = finance.run_query(query_obj)
+    if frame is None:
+        raise ValueError('分红数据返回 None')
+    if len(frame) < 4000:
+        return frame
+
+    days = (end_date - start_date).days
+    if days > 1:
+        middle = start_date + dt.timedelta(days=days // 2)
+        left = _query_dividend_recursive(codes, start_date, middle)
+        right = _query_dividend_recursive(codes, middle, end_date)
+        return pd.concat([left, right], ignore_index=True)
+
+    if len(codes) > 1:
+        half = len(codes) // 2
+        left = _query_dividend_recursive(codes[:half], start_date, end_date)
+        right = _query_dividend_recursive(codes[half:], start_date, end_date)
+        return pd.concat([left, right], ignore_index=True)
+
+    raise ValueError('单股单日分红记录达到接口上限，拒绝使用截断数据')
+
+
+def _fetch_dividends(codes, start_date, end_date, batch_size=200):
+    pieces = []
+    for start in py.range(0, len(codes), batch_size):
+        frame = _query_dividend_recursive(
+            codes[start:start + batch_size], start_date, end_date
+        )
+        if frame is not None and not frame.empty:
+            pieces.append(frame)
+
+    if not pieces:
+        return pd.DataFrame(columns=[
+            'code', 'a_registration_date', 'bonus_amount_rmb'
+        ])
+    return pd.concat(pieces, ignore_index=True)
+
+
+def _fetch_market_caps(codes, asof):
+    pieces = []
+    for start in py.range(0, len(codes), 800):
+        query_obj = query(
+            valuation.code,
+            valuation.market_cap,
+            valuation.circulating_market_cap
+        ).filter(valuation.code.in_(codes[start:start + 800]))
+        frame = get_fundamentals(query_obj, date=asof)
+        if frame is None:
+            raise ValueError('市值数据返回 None')
+        if not frame.empty:
+            pieces.append(frame)
+
+    if not pieces:
+        return pd.DataFrame()
+    result = pd.concat(pieces, ignore_index=True)
+    return result.drop_duplicates('code').set_index('code')
+
+
+def _trailing_dividend_yield(records, market_caps, asof):
+    if records is None or records.empty:
+        return pd.Series(dtype=float)
+
+    frame = records.copy()
+    dates = pd.to_datetime(frame['a_registration_date'], errors='coerce')
+    cash = pd.to_numeric(frame['bonus_amount_rmb'], errors='coerce')
+    age = (pd.Timestamp(asof) - dates).dt.days
+    valid = (age >= 0) & (age < 365) & (cash > 0)
+
+    if not valid.any():
+        return pd.Series(dtype=float)
+
+    cash_sum = cash[valid].groupby(frame.loc[valid, 'code']).sum()
+    caps = pd.to_numeric(market_caps.reindex(cash_sum.index), errors='coerce')
+    dividend_yield = (cash_sum / 10000.0) / caps.where(caps > 0)
+    return _stable_rank(dividend_yield, ascending=False)
+
+
+def _continuous_dividend_codes(records, codes, required_years):
+    if records is None or records.empty:
+        return []
+
+    frame = records.copy()
+    frame['year'] = pd.to_datetime(
+        frame['a_registration_date'], errors='coerce'
+    ).dt.year
+    frame['cash'] = pd.to_numeric(
+        frame['bonus_amount_rmb'], errors='coerce'
+    )
+
+    groups = frame.loc[frame['cash'] > 0].groupby('code')['year'].apply(set)
+    required = set(required_years)
+    result = []
+    for code in codes:
+        if code in groups.index and required.issubset(groups.loc[code]):
+            result.append(code)
+    return result
+
+
+def _filter_market_cap_a(stock_list, asof):
+    data = _fetch_market_caps(stock_list, asof)
+    if data.empty:
+        return []
+    circulating = pd.to_numeric(
+        data['circulating_market_cap'], errors='coerce'
+    )
+    return circulating[circulating >= MIN_MARKET_CAP_A].index.tolist()
+
+
+def _filter_liquidity(stock_list, asof):
+    frame = _get_price_batches(stock_list, asof, 5, ['money'])
+    if frame.empty or 'code' not in frame.columns:
+        return []
+
+    frame = frame.copy()
+    frame['money'] = pd.to_numeric(frame['money'], errors='coerce')
+    frame = frame.replace([np.inf, -np.inf], np.nan).dropna(subset=['money'])
+    summary = frame.groupby('code')['money'].agg(['mean', 'count'])
+    summary = summary[(summary['count'] >= 5) & (summary['mean'] > 0)]
+    if summary.empty:
+        return []
+
+    ranked = _stable_rank(summary['mean'], ascending=False)
+    keep_count = py.max(1, py.int(np.ceil(len(ranked) * 0.80)))
+    return ranked.head(keep_count).index.tolist()
+
+
+def _filter_roe_quality(stock_list, asof, required_years):
+    snapshots = {}
+
+    for year in required_years:
+        snapshot_date = py.min(dt.date(year, 12, 31), asof)
+        pieces = []
+
+        for start in py.range(0, len(stock_list), 800):
+            query_obj = query(
+                indicator.code,
+                indicator.inc_return
+            ).filter(indicator.code.in_(stock_list[start:start + 800]))
+            frame = get_fundamentals(query_obj, date=snapshot_date)
+            if frame is None:
+                raise ValueError('%s 年 ROE 快照返回 None' % year)
+            if not frame.empty:
+                pieces.append(frame)
+
+        if pieces:
+            combined = pd.concat(pieces, ignore_index=True)
+            combined = combined.drop_duplicates('code').set_index('code')
+            snapshots[year] = pd.to_numeric(
+                combined['inc_return'], errors='coerce'
+            )
+        else:
+            snapshots[year] = pd.Series(dtype=float)
+
+    roe = pd.DataFrame(snapshots).reindex(
+        index=stock_list, columns=required_years
+    )
+    roe = roe.replace([np.inf, -np.inf], np.nan).dropna()
+    if roe.empty:
+        return []
+
+    score = roe.mean(axis=1) - roe.std(axis=1, ddof=1)
+    ranked = _stable_rank(score, ascending=False)
+    keep_count = py.max(1, py.int(np.ceil(len(ranked) * 0.70)))
+    return ranked.head(keep_count).index.tolist()
+
+
+def _weekly_volatility(stock_list, asof):
+    frame = _get_price_batches(
+        stock_list,
+        asof,
+        VOLATILITY_TRADING_DAYS,
+        ['close'],
+        fq='pre'
+    )
+    if frame.empty:
+        return pd.Series(dtype=float)
+
+    result = {}
+    for code, stock_data in frame.groupby('code'):
+        try:
+            close_values = pd.to_numeric(
+                stock_data['close'], errors='coerce'
+            )
+            time_values = pd.to_datetime(
+                stock_data['time'], errors='coerce'
+            )
+
+            # 兼容聚宽旧版 pandas，不使用 Series.to_numpy()。
+            closes = np.asarray(close_values.values, dtype=float)
+            times = pd.DatetimeIndex(time_values.values)
+            series = pd.Series(closes, index=times)
+            series = series.dropna().sort_index()
+            series = series[(series > 0) &
+                            (series.index.normalize() <= pd.Timestamp(asof).normalize())]
+            series = series[~series.index.duplicated(keep='last')]
+
+            weekly = series.resample('W-FRI').last().dropna()
+            # 周一至周四形成的当周数据会被标记到未来的周五，必须排除。
+            weekly = weekly[weekly.index <= pd.Timestamp(asof)]
+            if len(weekly) < MIN_COMPLETE_WEEKS:
+                continue
+
+            returns = np.log(weekly / weekly.shift(1))
+            returns = returns.replace([np.inf, -np.inf], np.nan).dropna()
+            value = float(returns.std(ddof=1))
+            if np.isfinite(value) and value > 0:
+                result[code] = value
+        except Exception as e:
+            log.warn('周波动率计算失败 %s：%s', code, e)
+
+    return _stable_rank(pd.Series(result, dtype=float), ascending=True)
+
+
+def _fetch_value_fundamentals(stock_list, asof):
+    pieces = []
+    for start in py.range(0, len(stock_list), 800):
+        query_obj = query(
+            valuation.code,
+            valuation.market_cap,
+            valuation.pe_ratio,
+            indicator.inc_return,
+            indicator.inc_total_revenue_year_on_year,
+            indicator.inc_net_profit_year_on_year
+        ).filter(valuation.code.in_(stock_list[start:start + 800]))
+
+        frame = get_fundamentals(query_obj, date=asof)
+        if frame is None:
+            raise ValueError('B 池基本面数据返回 None')
+        if not frame.empty:
+            pieces.append(frame)
+
+    if not pieces:
+        return pd.DataFrame()
+
+    result = pd.concat(pieces, ignore_index=True)
+    result = result.drop_duplicates('code').set_index('code')
+    return result.replace([np.inf, -np.inf], np.nan)
+
+
+def _allocate_pool_slots(a_rank, b_rank, industry_map):
+    candidates = [
+        list(dict.fromkeys(a_rank)),
+        list(dict.fromkeys(b_rank))
+    ]
+    chosen = [[], []]
+    pointers = [0, 0]
+    selected_unique = set()
+    industry_counts = {}
+
+    # A、B 交替取股，避免其中一个池先占满行业名额。
+    while True:
+        progressed = False
+        for pool_index in (0, 1):
+            if len(chosen[pool_index]) >= POOL_TARGET_NUM:
+                continue
+
+            while pointers[pool_index] < len(candidates[pool_index]):
+                code = candidates[pool_index][pointers[pool_index]]
+                pointers[pool_index] += 1
+                progressed = True
+
+                industry = industry_map.get(code)
+                if not industry:
+                    continue
+
+                # 同一股票可同时占 A、B 各一个名额，但行业只按唯一股票计数。
+                if code not in selected_unique:
+                    if len(selected_unique) >= MAX_POSITIONS:
+                        continue
+                    if industry_counts.get(industry, 0) >= MAX_INDUSTRY:
+                        continue
+
+                chosen[pool_index].append(code)
+                if code not in selected_unique:
+                    selected_unique.add(code)
+                    industry_counts[industry] = industry_counts.get(industry, 0) + 1
+                break
+
+        if not progressed:
+            break
+        if (len(chosen[0]) >= POOL_TARGET_NUM and
+                len(chosen[1]) >= POOL_TARGET_NUM):
+            break
+
+    slot_weight = INVEST_RATIO * POOL_BUDGET / POOL_TARGET_NUM
+    weights = {}
+    for pool in chosen:
+        for code in pool:
+            weights[code] = weights.get(code, 0.0) + slot_weight
+
+    # 候选不足时，把尚未使用的仓位平均补给已经合格的股票，但绝不突破 19.8%。
+    # 这样比直接留出大量现金更接近 v1 的满仓特征，同时消除 50%/100% 单股仓位。
+    target_total = INVEST_RATIO
+    remaining = py.max(0.0, target_total - py.sum(weights.values()))
+    for _ in py.range(20):
+        if remaining <= 1e-10:
+            break
+        available = [
+            code for code in weights
+            if weights[code] < MAX_TARGET_WEIGHT - 1e-10
+        ]
+        if not available:
+            break
+
+        equal_add = remaining / len(available)
+        distributed = 0.0
+        for code in available:
+            room = MAX_TARGET_WEIGHT - weights[code]
+            add_value = py.min(room, equal_add)
+            weights[code] += add_value
+            distributed += add_value
+
+        if distributed <= 1e-12:
+            break
+        remaining -= distributed
+
+    # 浮点保护。
+    for code in list(weights.keys()):
+        weights[code] = py.min(float(weights[code]), MAX_TARGET_WEIGHT)
+
+    return weights, chosen, remaining
+
+
+def _build_initial_universe(context):
+    asof = context.previous_date
+    securities = get_all_securities(types=['stock'], date=asof)
+    if securities is None or securities.empty:
+        raise ValueError('股票池为空')
+
+    current_data = get_current_data()
+    result = []
+
+    for code, row in securities.iterrows():
+        if code.startswith(('68', '4', '8', '92')):
+            continue
+        if pd.isna(row['start_date']):
+            continue
+        if (pd.Timestamp(asof) - pd.Timestamp(row['start_date'])).days < NEW_STOCK_DAYS:
+            continue
+
+        try:
+            data = current_data[code]
+            if data.paused or data.is_st:
+                continue
+            if py.any(text in data.name for text in ('ST', '*', '退')):
+                continue
+            result.append(code)
+        except Exception:
+            # 当前行情无法核对的股票不进入本月候选，不能视作正常股票放行。
+            continue
+
+    return result
+
+
+# ======================== 导出主流程 ========================
 
 STAGES = []
 WEIGHTS = []
 
 
-def _log_stub():
-    log = types.SimpleNamespace()
+class _Log(object):
+    def info(self, *args, **kwargs):
+        pass
 
-    def _noop(*args, **kwargs):
-        return None
-
-    log.info = _noop
-    log.warn = _noop
-    log.warning = _noop
-    log.error = _noop
-    log.set_level = _noop
-    return log
+    warn = info
+    warning = info
+    error = info
 
 
-def _current_data_factory(asof, securities):
+log = _Log()
+
+
+def _current_data_view(asof):
     """研究环境没有 get_current_data，用收盘后的等价信息拼一个。"""
 
+    securities = get_all_securities(types=["stock"], date=asof)
     codes = list(securities.index)
     names = securities["display_name"] if "display_name" in securities.columns else pd.Series("", index=codes)
 
@@ -65,7 +502,7 @@ def _current_data_factory(asof, securities):
         st_frame = get_extras("is_st", codes, end_date=asof, count=1, df=True)
         if st_frame is not None and not st_frame.empty:
             last = st_frame.iloc[-1]
-            st_map = {code: bool(last.get(code, False)) for code in codes}
+            st_map = dict((code, bool(last.get(code, False))) for code in codes)
     except Exception:
         st_map = {}
 
@@ -96,14 +533,21 @@ def _current_data_factory(asof, securities):
     return _View()
 
 
-def _build_context(day, previous):
-    context = types.SimpleNamespace()
+_VIEW = {"value": None}
+
+
+def get_current_data():
+    return _VIEW["value"]
+
+
+def _context(day, previous):
+    context = type("Context", (object,), {})()
     context.current_dt = pd.Timestamp(day) + pd.Timedelta(hours=9, minutes=1)
     context.previous_date = previous
     return context
 
 
-def _rows_of(date, codes, stage, values=None, start_rank=1):
+def _rows_of(day, codes, stage, values=None):
     for offset, code in enumerate(codes):
         value = None
         if values is not None:
@@ -112,80 +556,67 @@ def _rows_of(date, codes, stage, values=None, start_rank=1):
             except Exception:
                 value = None
         STAGES.append({
-            "date": str(date),
-            "stage": stage,
-            "rank": start_rank + offset,
-            "code": code,
-            "value": value,
+            "date": str(day), "stage": stage, "rank": offset + 1,
+            "code": code, "value": value,
         })
 
 
 def _top(series, fraction):
-    ranked = series.dropna()
-    if ranked.empty:
-        return ranked
-    count = max(1, int(np.ceil(len(ranked) * fraction)))
-    return ranked.head(count)
+    if series is None or len(series) == 0:
+        return series
+    count = max(1, int(np.ceil(len(series) * fraction)))
+    return series.head(count)
 
 
-def run_date(ns, day, previous, market_cls):
-    """按策略自身的顺序跑一遍选股，逐阶段记录。"""
-
-    g = ns["g"]
-    g.today = None  # 强制 _ensure_day 重算
-    ns["get_current_data"] = lambda: market_cls
-    context = _build_context(day, previous)
-    ns["_ensure_day"](context)
+def run_date(day, previous):
     asof = previous
+    _VIEW["value"] = _current_data_view(asof)
+    context = _context(day, previous)
 
-    initial = ns["_build_initial_universe"](context)
+    initial = _build_initial_universe(context)
     _rows_of(day, initial, "initial")
     if not initial:
         return
 
-    cap = ns["_filter_market_cap_a"](initial, asof)
+    cap = _filter_market_cap_a(initial, asof)
     _rows_of(day, cap, "a_market_cap")
     if not cap:
         return
 
-    liquid = ns["_filter_liquidity"](cap, asof)
+    liquid = _filter_liquidity(cap, asof)
     _rows_of(day, liquid, "a_liquidity")
     if not liquid:
         return
 
-    years = list(range(pd.Timestamp(day).year - ns["ROE_YEARS"], pd.Timestamp(day).year))
-    roe = ns["_filter_roe_quality"](liquid, asof, years)
+    years = list(range(pd.Timestamp(day).year - ROE_YEARS, pd.Timestamp(day).year))
+    roe = _filter_roe_quality(liquid, asof, years)
     _rows_of(day, roe, "a_roe")
     if not roe:
         return
 
     query_start = dt.date(years[0], 1, 1) - dt.timedelta(days=1)
-    records = ns["_fetch_dividends"](roe, query_start, asof)
-    continuous = ns["_continuous_dividend_codes"](records, roe, years)
+    records = _fetch_dividends(roe, query_start, asof)
+    continuous = _continuous_dividend_codes(records, roe, years)
     _rows_of(day, continuous, "a_continuous_dividend")
     if not continuous:
         return
 
-    caps = ns["_fetch_market_caps"](continuous, asof)
+    caps = _fetch_market_caps(continuous, asof)
     if caps.empty:
         return
-    yields = ns["_trailing_dividend_yield"](records, caps["market_cap"], asof)
+    yields = _trailing_dividend_yield(records, caps["market_cap"], asof)
     yields = yields.reindex(continuous).dropna()
-    yields = yields[yields > ns["DIVIDEND_YIELD_MIN"]]
+    yields = yields[yields > DIVIDEND_YIELD_MIN]
     _rows_of(day, list(yields.index), "a_dividend_yield", yields)
-    if yields.empty:
-        a_rank = []
-    else:
-        if len(yields) > 10:
-            picked = _top(yields, 0.40)
-        else:
-            picked = yields
-        volatility = ns["_weekly_volatility"](list(picked.index), asof)
-        _rows_of(day, list(volatility.index), "a_volatility", volatility)
-        a_rank = list(volatility.index[: ns["POOL_TARGET_NUM"] * ns["CANDIDATE_MULTIPLIER"]])
 
-    # B 池
-    fundamentals = ns["_fetch_value_fundamentals"](initial, asof)
+    a_rank = []
+    if len(yields) > 0:
+        picked = _top(yields, 0.40) if len(yields) > 10 else yields
+        volatility = _weekly_volatility(list(picked.index), asof)
+        _rows_of(day, list(volatility.index), "a_volatility", volatility)
+        a_rank = list(volatility.index[: POOL_TARGET_NUM * CANDIDATE_MULTIPLIER])
+
+    fundamentals = _fetch_value_fundamentals(initial, asof)
     b_rank = []
     if not fundamentals.empty:
         valid = (
@@ -198,49 +629,32 @@ def run_date(ns, day, previous, market_cls):
         _rows_of(day, b_stocks, "b_fundamentals")
         if b_stocks:
             start_date = asof - dt.timedelta(days=365)
-            b_records = ns["_fetch_dividends"](b_stocks, start_date, asof)
-            b_yields = ns["_trailing_dividend_yield"](b_records, fundamentals["market_cap"], asof)
-            b_yields = b_yields[b_yields > ns["DIVIDEND_YIELD_MIN"]]
+            b_records = _fetch_dividends(b_stocks, start_date, asof)
+            b_yields = _trailing_dividend_yield(b_records, fundamentals["market_cap"], asof)
+            b_yields = b_yields[b_yields > DIVIDEND_YIELD_MIN]
             _rows_of(day, list(b_yields.index), "b_dividend_yield", b_yields)
-            b_rank = list(b_yields.index[: ns["POOL_TARGET_NUM"] * ns["CANDIDATE_MULTIPLIER"]])
+            b_rank = list(b_yields.index[: POOL_TARGET_NUM * CANDIDATE_MULTIPLIER])
 
     _rows_of(day, a_rank, "a_rank")
     _rows_of(day, b_rank, "b_rank")
 
     candidates = list(dict.fromkeys(a_rank + b_rank))
-    industries = ns["_fetch_industry"](candidates, asof) if candidates else {}
+    industries = _fetch_industry(candidates, asof) if candidates else {}
     for code in candidates:
         STAGES.append({
-            "date": str(day),
-            "stage": "industry",
-            "rank": None,
-            "code": code,
-            "value": (industries.get(code) or ""),
+            "date": str(day), "stage": "industry", "rank": None,
+            "code": code, "value": (industries.get(code) or ""),
         })
 
-    weights, chosen, remaining = ns["_allocate_pool_slots"](a_rank, b_rank, industries)
+    weights, chosen, remaining = _allocate_pool_slots(a_rank, b_rank, industries)
     for code, weight in weights.items():
         WEIGHTS.append({
-            "date": str(day),
-            "code": code,
-            "weight": float(weight),
+            "date": str(day), "code": code, "weight": float(weight),
             "pool": "A" if code in chosen[0] else ("B" if code in chosen[1] else "?"),
         })
 
 
 def main():
-    with open(STRATEGY_PATH, "r", encoding="utf-8") as handle:
-        source = handle.read()
-    ns = {"__name__": "dividend_stage_export"}
-    ns["g"] = types.SimpleNamespace()
-    ns["log"] = _log_stub()
-    for name in ("set_option", "set_benchmark", "set_slippage", "set_order_cost", "run_daily"):
-        ns[name] = lambda *args, **kwargs: None
-    ns["PriceRelatedSlippage"] = lambda *args, **kwargs: None
-    ns["OrderCost"] = lambda *args, **kwargs: None
-    exec(compile(source, STRATEGY_PATH, "exec"), ns)
-    ns["initialize"](None)  # 只用来初始化 g 的字段；run_daily 等是桩
-
     days = list(get_trade_days(START, END))
     starts = []
     for index, day in enumerate(days):
@@ -252,10 +666,8 @@ def main():
             continue
         day = days[index]
         previous = days[index - 1] if index > 0 else day - dt.timedelta(days=1)
-        securities = get_all_securities(types=["stock"], date=previous)
-        market = _current_data_factory(previous, securities)
         try:
-            run_date(ns, day, previous, market)
+            run_date(day, previous)
         except Exception as exc:
             STAGES.append({
                 "date": str(day), "stage": "error", "rank": None,
