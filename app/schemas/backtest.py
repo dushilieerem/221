@@ -199,6 +199,9 @@ class StrategyBacktestRequest(BaseModel):
     #: 按时点调度：策略可用 schedule.daily(cb, time="14:50") 注册盘中回调；
     #: 成交价取下单时点的盘中价，15:00 之后的订单挂到次日开盘。
     timed_execution: bool = False
+    #: 额外并入行情面板的 ETF 代码（如货币 ETF 511880 做现金管理）。
+    #: ETF 不在股票池数据里，引擎会从视图的 free/etf_daily 单独加载。
+    extra_symbols: list[str] = Field(default_factory=list)
     initial_capital: float = Field(1_000_000.0, gt=0)
     #: 返回持仓权重（前端画持仓图用）
     include_positions: bool = False

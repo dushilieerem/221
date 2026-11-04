@@ -625,6 +625,41 @@ def _run_event_strategy_backtest(
                 for field in ("open", "close")
             }
 
+        # 策略显式声明的 ETF（如货币基金 511880）单独并入面板：ETF 不在
+        # 股票池数据里，来自视图的 free/etf_daily，按 symbol + time join。
+        etf_symbols: set[str] = set()
+        etf_aliases: dict[str, str] = {}
+        if req.extra_symbols:
+            from app.services.data.etf import load_etf_panels
+            from app.services.strategy.compat.runtime import normalize_security
+
+            extra_symbols = {
+                normalize_security(symbol) for symbol in req.extra_symbols
+            }
+            if data_engine.data_dir is None:
+                raise ValueError("加载 ETF 行情需要行情目录")
+            etf_panels = load_etf_panels(
+                data_engine.data_dir,
+                sorted(extra_symbols),
+                start=panel_start,
+                end=req.end,
+            )
+            etf_symbols = set(extra_symbols)
+            # 策略里写死的 511880.XSHG 与引擎代码 511880.SH 的别名，
+            # 持仓和订单一律按策略侧写法回报。
+            etf_aliases = {
+                normalize_security(symbol): symbol for symbol in req.extra_symbols
+            }
+            for field, panel in etf_panels.items():
+                if field in event_panels:
+                    event_panels[field] = event_panels[field].join(
+                        panel.reindex(index=event_panels[field].index), how="left"
+                    )
+                if execution_panels is not None and field in execution_panels:
+                    execution_panels[field] = execution_panels[field].join(
+                        panel.reindex(index=execution_panels[field].index), how="left"
+                    )
+
         intraday_price = None
         data_dir = getattr(data_engine, "data_dir", None)
         if req.timed_execution and data_dir is not None:
@@ -662,6 +697,8 @@ def _run_event_strategy_backtest(
             intraday_price=intraday_price,
             first_previous_date=first_previous_date,
             active_start=active_start,
+            etf_symbols=etf_symbols,
+            symbol_aliases=etf_aliases,
         ).run(strategy)
         equity = result.equity_curve
         metrics = metrics_to_dict(MetricEngine().calculate_all(MetricContext(

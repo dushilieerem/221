@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.services.strategy.compat.runtime import normalize_security
+
 
 class JQPosition:
     def __init__(self, symbol: str, quantity: int, average_cost: float, price: float | None) -> None:
@@ -96,7 +98,7 @@ class JQPortfolioView:
         return self._positions_cache
 
     def quantity(self, symbol: str) -> int:
-        return int(self._view.quantity(symbol))
+        return int(self._view.quantity(normalize_security(symbol)))
 
     @property
     def total_value(self) -> float:
@@ -116,15 +118,32 @@ class _PositionsView(dict):
         for symbol, quantity in view.positions.items():
             if int(quantity) <= 0:
                 continue
-            self[str(symbol)] = JQPosition(
-                str(symbol),
+            display = self._display(str(symbol))
+            self[display] = JQPosition(
+                display,
                 int(quantity),
                 view.average_cost(str(symbol)) or 0.0,
                 market.current_price(str(symbol)),
             )
 
+    def _display(self, symbol: Any) -> str:
+        """统一成策略侧写法：去聚宽后缀再按引擎别名回填（ETF 用原写法）。"""
+
+        normalized = normalize_security(symbol)
+        display = getattr(self._market, "display_symbol", None)
+        return display(normalized) if callable(display) else normalized
+
+    def __getitem__(self, symbol: str) -> JQPosition:
+        return dict.__getitem__(self, self._display(symbol))
+
+    def __contains__(self, symbol: object) -> bool:
+        return dict.__contains__(self, self._display(symbol))
+
+    def get(self, symbol: str, default: Any = None) -> Any:
+        return dict.get(self, self._display(symbol), default)
+
     def __missing__(self, symbol: str) -> JQPosition:
-        return JQPosition(str(symbol), 0, 0.0, self._market.current_price(str(symbol)))
+        return JQPosition(symbol, 0, 0.0, self._market.current_price(normalize_security(symbol)))
 
 
 def wrap_portfolio(view: Any, market: Any) -> JQPortfolioView:

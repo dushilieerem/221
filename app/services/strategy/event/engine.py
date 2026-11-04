@@ -36,6 +36,8 @@ class EventBacktestEngine:
         intraday_price=None,
         first_previous_date: object | None = None,
         active_start: object | None = None,
+        etf_symbols: set[str] | None = None,
+        symbol_aliases: dict[str, str] | None = None,
     ) -> None:
         missing = self.required_fields - panels.keys()
         if missing:
@@ -52,6 +54,12 @@ class EventBacktestEngine:
         else:
             self.dates = self._full_dates
         self.symbols = list(self.panels["close"].columns)
+        # 额外并入面板的 ETF：它们参与撮合与估值，但不算「股票」，
+        # get_all_securities(['stock']) 需要把它们排除。
+        self.etf_symbols = frozenset(etf_symbols or ())
+        # 策略里写死的代码（如 511880.XSHG）与引擎代码（511880.SH）之间的
+        # 别名；持仓与订单一律按策略侧的写法回报，保证字符串比较成立。
+        self.symbol_aliases = dict(symbol_aliases or {})
         if self.dates.empty:
             raise ValueError("事件回测没有可用交易日")
         # 首次/末次有效报价：聚宽兼容层的 get_all_securities 会逐标的查询，
@@ -721,7 +729,13 @@ class EventBacktestEngine:
         price = self._execution_price(price, side)
         value = quantity * price
         commission = max(value * self.config.commission_rate, self.config.min_commission)
-        stamp_tax = value * self.config.stamp_tax_rate if side == "sell" else 0.0
+        # ETF（基金份额）卖出不收印花税；聚宽 set_order_cost(type='fund') 同样不设。
+        tax_exempt = order.symbol in self.etf_symbols
+        stamp_tax = (
+            value * self.config.stamp_tax_rate
+            if side == "sell" and not tax_exempt
+            else 0.0
+        )
         if side == "buy":
             current_quantity = ledger.positions.get(order.symbol, 0)
             current_cost = ledger.average_cost.get(order.symbol, 0.0)
@@ -1214,6 +1228,15 @@ class _MarketView:
     @property
     def symbols(self) -> list[str]:
         return list(self._engine.symbols)
+
+    @property
+    def etf_symbols(self) -> frozenset[str]:
+        return self._engine.etf_symbols
+
+    def display_symbol(self, symbol: str) -> str:
+        """引擎代码 -> 策略侧写法（只有 ETF 别名会被改写）。"""
+
+        return self._engine.symbol_aliases.get(symbol, symbol)
 
     def trade_days(
         self,

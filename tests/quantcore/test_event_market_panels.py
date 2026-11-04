@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pandas as pd
 
-from app.services.strategy.compat.runtime import _long_frames
+from app.models.event import EventBacktestConfig
+from app.services.strategy.compat.portfolio import _PositionsView
+from app.services.strategy.compat.runtime import JoinQuantRuntime, _long_frames
 from app.services.strategy.event.engine import EventBacktestEngine, _MarketView
 
 
@@ -85,3 +89,103 @@ def test_long_frames_aligns_mismatched_indexes():
 
     assert len(long) == 3
     assert pd.isna(long.loc[long["time"] == dates[2], "paused"]).all()
+
+
+def test_joinquant_suffix_resolves_to_panel_symbols():
+    symbols, dates, panels = _panels()
+    engine = EventBacktestEngine(panels)
+    engine._current_date = dates[-1]
+    runtime = JoinQuantRuntime()
+    runtime.context = SimpleNamespace(market=_MarketView(engine))
+
+    # 策略里写死的 ``000001.XSHE`` 必须取到 ``000001.SZ`` 的行情，
+    # 而不是静默返回 NaN。
+    frame = runtime.get_price("000001.XSHE", count=1, fields=["close"], panel=False)
+    assert frame["close"].iloc[-1] == 15.0
+
+    missing = runtime.get_price("600001.XSHG", count=1, fields=["close"], panel=False)
+    assert missing["close"].iloc[-1] == 15.0
+
+
+def test_positions_view_accepts_joinquant_suffix():
+    class _View:
+        positions = {"511880.SH": 300}
+
+        def average_cost(self, symbol):
+            return 100.0
+
+    class _Market:
+        @staticmethod
+        def current_price(symbol):
+            return 100.0
+
+    view = _PositionsView(_View(), _Market())
+    assert "511880.XSHG" in view
+    assert view["511880.XSHG"].total_amount == 300
+    assert view["600000.XSHG"].total_amount == 0
+
+
+def test_etf_alias_is_reported_in_positions():
+    class _View:
+        positions = {"511880.SH": 300}
+
+        def average_cost(self, symbol):
+            return 100.0
+
+    class _Market:
+        aliases = {"511880.SH": "511880.XSHG"}
+
+        @staticmethod
+        def current_price(symbol):
+            return 100.0
+
+        def display_symbol(self, symbol):
+            return self.aliases.get(symbol, symbol)
+
+    view = _PositionsView(_View(), _Market())
+
+    assert "511880.XSHG" in view
+    assert "511880.SH" in view
+    assert view["511880.XSHG"].security == "511880.XSHG"
+    assert sorted(view) == ["511880.XSHG"]
+
+
+def test_etf_sell_is_exempt_from_stamp_tax():
+    dates = pd.bdate_range("2024-01-02", periods=4)
+    close = pd.DataFrame(
+        {"000001.SZ": [10.0] * 4, "511880.SH": [100.0] * 4}, index=dates
+    )
+    panels = {field: close.copy() for field in ("open", "high", "low", "close")}
+
+    class RoundTrip:
+        def initialize(self, context):
+            context.schedule.daily(self.trade, time="09:31")
+
+        def trade(self, context):
+            step = getattr(context.state, "step", 0)
+            if step == 0:
+                context.orders.target_quantity("000001.SZ", 200)
+                context.orders.target_quantity("511880.SH", 200)
+                context.state.step = 1
+            elif step == 1:
+                context.orders.target_quantity("000001.SZ", 0)
+                context.orders.target_quantity("511880.SH", 0)
+                context.state.step = 2
+
+    engine = EventBacktestEngine(
+        panels,
+        EventBacktestConfig(
+            initial_capital=100_000.0,
+            commission_rate=0.0,
+            min_commission=0.0,
+            stamp_tax_rate=0.001,
+            slippage_rate=0.0,
+            execution_timing="next_open",
+        ),
+        etf_symbols={"511880.SH"},
+    )
+    result = engine.run(RoundTrip())
+
+    sells = {fill.symbol: fill for fill in result.fills if fill.side == "sell"}
+    assert sells["000001.SZ"].stamp_tax > 0
+    assert sells["511880.SH"].stamp_tax == 0.0

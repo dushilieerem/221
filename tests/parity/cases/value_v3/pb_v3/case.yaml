@@ -31,6 +31,8 @@ svquant:
   stamp_tax: 0.001
   min_commission: 5
   slippage_rate: 0.001
+  # 货币 ETF 现金管理：ETF 不在股票池数据里，从视图 free/etf_daily 单独并入面板。
+  extra_symbols: ["511880.SH"]
 
 comparison:
   price_basis: real

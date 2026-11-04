@@ -40,6 +40,7 @@ Web 端需要展示调仓或成交过程时，使用 `include_execution_timeline
 | `execution_timing` | enum | `next_close` | `same_close` \| `next_close` \| `next_open`；信号恒在 T 日收盘产生，控制何时、以什么价成交。详见「成交时点语义」。 |
 | `execution_price_source` | enum | `adjusted` | 仅事件模式：`adjusted` 用复权价成交与估值；`unadjusted` 用未复权价成交、估值、整手与费用，信号历史仍用复权价，持仓按复权比例每日缩放。详见「成交价来源」。 |
 | `timed_execution` | boolean | `false` | 仅事件模式：按时点调度。策略用 `schedule.daily(cb, time="14:50")` 注册盘中回调，成交价取下单时点的盘中价；15:00 之后的订单挂到次日开盘。详见「时点调度」。 |
+| `extra_symbols` | string[] | `[]` | 仅事件模式：额外并入行情面板的 ETF 代码（如货币基金 `511880.SH`）。ETF 不在股票池数据里，引擎从视图的 `free/etf_daily` 单独加载，参与撮合与估值但不算股票（`get_all_securities(['stock'])` 会排除）；卖出不收印花税。 |
 | `initial_capital` | number | `1000000` | 初始资金。 |
 | `include_positions` | boolean | `false` | 返回持仓权重快照。 |
 | `include_rebalance_logs` | boolean | `false` | 仅向量化模式返回目标权重变化日志；事件模式请使用 `include_execution_timeline`。 |
@@ -96,6 +97,16 @@ Web 端需要展示调仓或成交过程时，使用 `include_execution_timeline
 盘中成交价优先读 `high_frequency/1min`（按日文件、`(date, "HH:MM", symbol)`）；该日期没有分钟数据时，上午时点回退到日线开盘价、下午时点回退到日线收盘价。`assumptions.execution` 为 `timed`，`assumptions.intraday_price` 为 `1m` 或 `daily_open_close_fallback`。
 
 该语义来自聚宽日频回测实测：09:31 与 14:50 的市价单按当时的 `last_price` 成交，15:10 的订单状态为 `new`、当日不成交。仅支持 `engine_mode="event"`。
+
+## 额外 ETF 标的
+
+事件模式默认只交易股票池里的标的。策略需要持有货币 ETF 做现金管理时（例如破净 v3 的 `511880.XSHG`），用 `extra_symbols` 显式声明：
+
+- 行情来自视图的 `free/etf_daily`（ETF 不并入 `ifind/market_data` 股票池），按 `symbol + time` 与股票面板 join；
+- 策略里的聚宽代码（`511880.XSHG`）会被统一转换成 `511880.SH` 再查面板，持仓与订单回报仍按策略侧写法返回，保证策略内的字符串比较成立；
+- ETF 参与撮合、估值与涨跌停（按 10%），但 `get_all_securities(['stock'])` 不会返回它们；卖出不收印花税。
+
+区间内 ETF 没有行情时对应列为空，引擎按停牌处理（不能成交）；缺少数据集时直接报错，不会静默跳过。
 
 ## 交易成本语义
 

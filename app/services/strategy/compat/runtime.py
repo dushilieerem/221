@@ -37,6 +37,22 @@ from app.services.strategy.compat.query import (
 
 _SUPPORTED_FREQUENCIES = {"daily", "1d", "day"}
 
+#: 聚宽交易所后缀 -> 本仓库后缀。策略里写死的 ``511880.XSHG`` 这类代码必须
+#: 在进入引擎前转换，否则面板取不到列、会静默返回 NaN。
+_JQ_SUFFIX = {"XSHG": "SH", "XSHE": "SZ", "XBSE": "BJ"}
+
+
+def normalize_security(code: Any) -> Any:
+    """把聚宽代码换成引擎使用的交易所代码；其它输入原样返回。"""
+
+    if not isinstance(code, str):
+        return code
+    base, separator, suffix = code.rpartition(".")
+    if not separator:
+        return code
+    mapped = _JQ_SUFFIX.get(suffix.upper())
+    return f"{base}.{mapped}" if mapped else code
+
 
 class GlobalState(SimpleNamespace):
     """聚宽 ``g``：每次回测开始时清空。"""
@@ -172,12 +188,14 @@ class JoinQuantRuntime:
     # ------------------------------------------------------------ 下单
 
     def order(self, security: str, amount: float, *args: Any, **kwargs: Any) -> Any:
+        security = normalize_security(security)
         current = self.context.portfolio.quantity(security)
         desired = current + int(amount)
         event = self.context.orders.target_quantity(security, desired)
         return self._jq_order(security, event, desired)
 
     def order_value(self, security: str, value: float, *args: Any, **kwargs: Any) -> Any:
+        security = normalize_security(security)
         price = self.context.market.current_price(security)
         current_value = self.context.portfolio.quantity(security) * (price or 0.0)
         target_value = current_value + float(value)
@@ -186,17 +204,20 @@ class JoinQuantRuntime:
         return self._jq_order(security, event, desired)
 
     def order_target(self, security: str, amount: float, *args: Any, **kwargs: Any) -> Any:
+        security = normalize_security(security)
         desired = int(amount)
         event = self.context.orders.target_quantity(security, desired)
         return self._jq_order(security, event, desired)
 
     def order_target_value(self, security: str, value: float, *args: Any, **kwargs: Any) -> Any:
+        security = normalize_security(security)
         price = self.context.market.current_price(security)
         desired = self._desired_quantity(float(value), price)
         event = self.context.orders.target_value(security, float(value))
         return self._jq_order(security, event, desired)
 
     def order_target_percent(self, security: str, percent: float, *args: Any, **kwargs: Any) -> Any:
+        security = normalize_security(security)
         value = self._total_value() * float(percent)
         price = self.context.market.current_price(security)
         desired = self._desired_quantity(value, price)
@@ -213,13 +234,20 @@ class JoinQuantRuntime:
         current = int(self.context.portfolio.quantity(security))
         delta = int(desired) - current
         return JQOrder(
-            security=security,
+            security=self._display_symbol(security),
             order_id=event.order_id,
             amount=delta,
             filled=delta,
             price=self.context.market.current_price(security),
             status=OrderStatus.held,
         )
+
+    def _display_symbol(self, symbol: str) -> str:
+        """按策略侧写法回报代码（ETF 保留 511880.XSHG 这类别名）。"""
+
+        market = getattr(self.context, "market", None)
+        display = getattr(market, "display_symbol", None)
+        return display(symbol) if callable(display) else symbol
 
     def _total_value(self) -> float:
         wrapped = getattr(self.context.portfolio, "total_value", None)
@@ -261,7 +289,10 @@ class JoinQuantRuntime:
             else ["open", "close", "high", "low", "volume", "amount"]
         )
         single = isinstance(security, str)
-        symbols = [security] if single else list(security)
+        symbols = [
+            normalize_security(item)
+            for item in ([security] if single else list(security))
+        ]
         end = end_date if end_date is not None else self._current_date()
 
         if (
@@ -355,7 +386,7 @@ class JoinQuantRuntime:
     ):
         fields = [field] if isinstance(field, str) else list(field)
         symbols = (
-            list(security_list)
+            [normalize_security(item) for item in security_list]
             if security_list is not None
             else list(self.context.market.symbols)
         )
@@ -395,6 +426,7 @@ class JoinQuantRuntime:
         frame = self._all_securities
         if frame is None:
             symbols = list(self.context.market.symbols)
+            etf_symbols = set(getattr(self.context.market, "etf_symbols", ()) or ())
             rows = []
             index = []
             for symbol in symbols:
@@ -413,19 +445,26 @@ class JoinQuantRuntime:
                     "name": name,
                     "start_date": start_value,
                     "end_date": end,
-                    "type": "stock",
+                    "type": "fund" if symbol in etf_symbols else "stock",
                 })
                 index.append(symbol)
             frame = pd.DataFrame(rows, index=pd.Index(index))
             self._all_securities = frame
-        if date is None:
-            return frame
-        as_of = pd.Timestamp(date)
-        starts = pd.to_datetime(frame["start_date"], errors="coerce")
-        ends = pd.to_datetime(frame["end_date"], errors="coerce")
-        keep = (starts.isna() | (starts <= as_of)) & (
-            ends.isna() | (ends >= as_of)
+        keep = pd.Series(True, index=frame.index)
+        wanted = (
+            {str(item) for item in types}
+            if types is not None and not isinstance(types, str)
+            else ({types} if types is not None else None)
         )
+        if wanted and "all" not in wanted:
+            keep &= frame["type"].isin(wanted)
+        if date is not None:
+            as_of = pd.Timestamp(date)
+            starts = pd.to_datetime(frame["start_date"], errors="coerce")
+            ends = pd.to_datetime(frame["end_date"], errors="coerce")
+            keep &= (starts.isna() | (starts <= as_of)) & (
+                ends.isna() | (ends >= as_of)
+            )
         return frame[keep]
 
     def get_all_trade_days(self):
@@ -438,6 +477,7 @@ class JoinQuantRuntime:
         return [day.date() for day in days]
 
     def get_security_info(self, security: str):
+        security = normalize_security(security)
         start, end = self.context.market.listing_dates(security)
         master_start = self.master.start_date(security) if self.master else None
         name = self.master.name(security) if self.master else self.context.market.name(security)
@@ -588,7 +628,10 @@ class JoinQuantRuntime:
     def get_industry(self, security, date=None, **kwargs: Any):
         if self.industry is None:
             raise NotImplementedError("行业数据目录未配置；请传入 IndustryStore")
-        symbols = [security] if isinstance(security, str) else list(security)
+        symbols = [
+            normalize_security(item)
+            for item in ([security] if isinstance(security, str) else list(security))
+        ]
         as_of = date if date is not None else self._current_date()
         return self.industry.industries(symbols, as_of)
 
@@ -616,7 +659,12 @@ class JoinQuantRuntime:
         panel = getattr(engine, "panels", {}).get("listed_status") if engine else None
         if panel is None:
             raise NotImplementedError("当前数据版本没有 listed_status，无法取 is_st")
-        symbols = [security_list] if isinstance(security_list, str) else list(security_list)
+        symbols = [
+            normalize_security(item)
+            for item in (
+                [security_list] if isinstance(security_list, str) else list(security_list)
+            )
+        ]
         frame = panel
         if start_date is not None:
             frame = frame.loc[frame.index >= pd.Timestamp(start_date)]
@@ -664,7 +712,7 @@ class JoinQuantRuntime:
             status = OrderStatus.held
         price = self.context.market.current_price(order.symbol)
         return JQOrder(
-            security=order.symbol,
+            security=self._display_symbol(order.symbol),
             order_id=order.order_id,
             amount=amount,
             filled=filled,
@@ -827,7 +875,7 @@ class _CurrentData:
         self._master = master
 
     def __getitem__(self, symbol: str) -> "_SecurityData":
-        return _SecurityData(self._market, symbol, self._master)
+        return _SecurityData(self._market, normalize_security(symbol), self._master)
 
 
 class _SecurityData:
