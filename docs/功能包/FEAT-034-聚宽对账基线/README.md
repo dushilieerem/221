@@ -99,7 +99,7 @@ python -m app.cli.joinquant_parity compare --case fixed_basket_hold
 |---|---|---|---|---|
 | `dividend_v3_10w` | 10 万 | 59.5% / 56.9% | 397.5% / 211.7% | `output/joinquant-parity/dividend_v3_10w/20261103T083458Z/report.md` |
 | `dividend_v3_100w` | 100 万 | 59.2% / 56.9% | 478.6% / 230.3% | `output/joinquant-parity/dividend_v3_100w/20261103T083508Z/report.md` |
-| `pb_v3` | 10 万 | 57.9% / 62.8%（ROA 修正前 56.3% / 60.1%） | 519.6% / 252.5% | `output/joinquant-parity/pb_v3/20261103T134811Z/report.md` |
+| `pb_v3` | 10 万 | 66.2% / 66.7%（ROA 修正前 56.3% / 60.1%） | 519.6% / 278.6% | `output/joinquant-parity/pb_v3/20261104T042038Z/report.md` |
 | `fcf_v3` | 10 万 | 57.7% / 65.8% | 573.0% / 217.1% | `output/joinquant-parity/fcf_v3/20261103T175827Z/report.md` |
 
 四个用例的 L0 全部通过，首个严格分歧都在 L1 的选股集合/建仓日；L5 五项指标全部不满足容差。
@@ -107,7 +107,7 @@ python -m app.cli.joinquant_parity compare --case fixed_basket_hold
 **已定位的口径问题**
 
 - `indicator.roa` 在聚宽是「单季净利润（含少数）/ 平均总资产 × 100」，RE 原先直接用源表累计 ROA。2026-11-03 改为单季口径后，与聚宽导出的秩相关 0.89 → **0.996**，两位小数一致率 93.7%；但破净 v3 持仓重合只从 56.3% 升到 57.9%，说明它不是收益差的主因。
-- `calc_factors` 自定义 FF8：8 个布尔项与集中度只有 **57%** 完全一致（秩相关 0.68），是下一步逐字段排查对象，导出脚本见 `tests/parity/probes/jq_pb_v3_ff8_export.py`。
+- `calc_factors` 自定义 FF8：聚宽 jqfactor 的依赖项是**单季度**口径，源表 `pershare_index` / 利润表流量字段是年内累计。2026-11-04 改为按财报重算单季度 ROE（单季净利/平均全部权益）、ROA（单季净利/平均总资产）、毛利率（单季营业收入−营业成本），`total_profit`/`financial_expense` 按年内差分。用聚宽导出逐值核对：8 项布尔一致率 74%–99% → **88%–99%**，依赖原值中位偏差 0%–2.3%。破净 v3 持仓重合 62.2% → **66.2%**（按金标口径），收益 220.4% → 278.6%。
 - `indicator.gross_profit_margin` 秩相关 0.94，但两位小数只有 33% 一致，极值处差异可达数倍，尚未确认是单季/累计口径还是营业成本定义不同。
 - 破净 v3 的 ETF 现金管理（511880）：2026-11-04 已接入事件引擎（`extra_symbols` + 视图 `free/etf_daily`，聚宽代码归一、卖出免印花税），短窗口已验证可正常买卖；全区间重跑待下一轮。
 
