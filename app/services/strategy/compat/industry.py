@@ -115,6 +115,12 @@ class IndustryStore:
         self._history: tuple[list[pd.Timestamp], dict[pd.Timestamp, pd.DataFrame]] | None = (
             _load_history(Path(override)) if override else None
         )
+        # 正式 PIT 数据集（derived/industry_membership_history）：存在时优先于
+        # latest_only 的 industry_daily；按天懒加载并缓存。
+        membership = Path(data_dir).parent / "derived" / "industry_membership_history"
+        self._membership_dir = membership if any(membership.glob("year=*")) else None
+        self._membership_dates: list[str] | None = None
+        self._membership_cache: dict[str, pd.DataFrame] = {}
 
     def industries(
         self,
@@ -123,6 +129,8 @@ class IndustryStore:
     ) -> dict[str, dict[str, dict[str, str]]]:
         if self._history is not None:
             return self._history_industries(symbols, as_of)
+        if self._membership_dir is not None:
+            return self._membership_industries(symbols, as_of)
         if self._derived_dir.is_dir():
             return self._derived_industries(symbols, as_of)
         columns = self._columns_for()
@@ -177,6 +185,77 @@ class IndustryStore:
         if snapshot is None or snapshot.empty:
             return {}
         rows = snapshot.reindex(symbols)
+        result: dict[str, dict[str, dict[str, str]]] = {}
+        for symbol, row in rows.iterrows():
+            payload: dict[str, dict[str, str]] = {}
+            for level, code_column, name_column in (
+                ("sw_l1", "sw_l1_code", "sw_l1_name"),
+                ("sw_l2", "sw_l2_code", "sw_l2_name"),
+            ):
+                code = row.get(code_column)
+                if code is None or pd.isna(code):
+                    continue
+                name = row.get(name_column)
+                payload[level] = {
+                    "industry_code": _normalize_industry_code(code),
+                    "industry_name": (
+                        str(name)
+                        if name is not None and not pd.isna(name)
+                        else str(code)
+                    ),
+                }
+            if payload:
+                result[str(symbol)] = payload
+        return result
+
+    def _membership_frame(self, as_of: str | object) -> pd.DataFrame | None:
+        """取 ``derived/industry_membership_history`` 中不晚于 as_of 的快照。"""
+
+        if self._membership_dir is None:
+            return None
+        if self._membership_dates is None:
+            pattern = str(self._membership_dir / "year=*" / "*.parquet")
+            connection = duckdb.connect()
+            try:
+                rows = connection.execute(
+                    f"SELECT DISTINCT date FROM read_parquet('{pattern}')"
+                ).fetchdf()
+            finally:
+                connection.close()
+            # date 列是 ISO 字符串，字典序即时间序。
+            self._membership_dates = sorted(str(value) for value in rows["date"])
+        target = pd.Timestamp(as_of).strftime("%Y-%m-%d")
+        position = bisect_right(self._membership_dates, target) - 1
+        if position < 0:
+            return None
+        key = self._membership_dates[position]
+        cached = self._membership_cache.get(key)
+        if cached is not None:
+            return cached
+        pattern = str(self._membership_dir / "year=*" / "*.parquet")
+        connection = duckdb.connect()
+        try:
+            frame = connection.execute(
+                "SELECT symbol, sw_l1_code, sw_l1_name, sw_l2_code, sw_l2_name "
+                f"FROM read_parquet('{pattern}') WHERE date = '{key}'"
+            ).fetchdf()
+        finally:
+            connection.close()
+        if frame.empty:
+            return None
+        frame = frame.drop_duplicates("symbol").set_index("symbol")
+        if len(self._membership_cache) > 64:
+            self._membership_cache.clear()
+        self._membership_cache[key] = frame
+        return frame
+
+    def _membership_industries(
+        self, symbols: list[str], as_of: str | object
+    ) -> dict[str, dict[str, dict[str, str]]]:
+        frame = self._membership_frame(as_of)
+        if frame is None or frame.empty:
+            return {}
+        rows = frame.reindex(symbols)
         result: dict[str, dict[str, dict[str, str]]] = {}
         for symbol, row in rows.iterrows():
             payload: dict[str, dict[str, str]] = {}
@@ -266,6 +345,16 @@ class IndustryStore:
             return [
                 str(symbol)
                 for symbol, code in zip(snapshot.index, codes)
+                if _normalize_industry_code(code) == target
+            ]
+        if self._membership_dir is not None:
+            frame = self._membership_frame(as_of)
+            if frame is None or frame.empty:
+                return []
+            codes = frame.get("sw_l1_code", pd.Series(dtype=object))
+            return [
+                str(symbol)
+                for symbol, code in zip(frame.index, codes)
                 if _normalize_industry_code(code) == target
             ]
         target_date = pd.Timestamp(as_of).normalize()
