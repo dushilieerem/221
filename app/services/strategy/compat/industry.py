@@ -47,6 +47,26 @@ def _column_symbol(name: str) -> str | None:
     return parts[1] if len(parts) >= 3 else None
 
 
+def _normalize_symbol(code: object) -> str:
+    """``000001.XSHE`` -> ``000001.SZ``；其它保持原样。"""
+
+    text = str(code).strip()
+    for suffix, mapped in ((".XSHG", ".SH"), (".XSHE", ".SZ"), (".XBSE", ".BJ")):
+        if text.upper().endswith(suffix):
+            return text[: -len(suffix)] + mapped
+    return text
+
+
+def _normalize_code_value(value: object) -> object:
+    """CSV 里 801780 会读成浮点 ``801780.0``，还原成 ``801780``。"""
+
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value).strip()
+
+
 def _load_history(
     path: Path,
 ) -> tuple[list[pd.Timestamp], dict[pd.Timestamp, pd.DataFrame]] | None:
@@ -58,10 +78,17 @@ def _load_history(
         frame = pd.read_parquet(path)
     else:
         frame = pd.read_csv(path, encoding="utf-8-sig")
+    if "symbol" not in frame.columns and "code" in frame.columns:
+        frame = frame.rename(columns={"code": "symbol"})
     required = {"date", "symbol", "sw_l1_code"}
     missing = required - set(frame.columns)
     if missing:
         raise ValueError(f"行业历史文件缺少列: {sorted(missing)}")
+    # 聚宽导出的代码是 000001.XSHE，与引擎的 000001.SZ 对齐。
+    frame["symbol"] = frame["symbol"].map(_normalize_symbol)
+    for column in ("sw_l1_code", "sw_l2_code"):
+        if column in frame.columns:
+            frame[column] = frame[column].map(_normalize_code_value)
     frame["date"] = pd.to_datetime(frame["date"]).dt.normalize()
     frame = frame.drop_duplicates(["date", "symbol"], keep="last")
     by_date = {
@@ -162,7 +189,7 @@ class IndustryStore:
                     continue
                 name = row.get(name_column)
                 payload[level] = {
-                    "industry_code": str(code),
+                    "industry_code": _normalize_industry_code(code),
                     "industry_name": (
                         str(name)
                         if name is not None and not pd.isna(name)
@@ -212,8 +239,16 @@ class IndustryStore:
             if code is None or pd.isna(code):
                 continue
             name = name if name is not None and not pd.isna(name) else str(code)
+            # 聚宽返回不带 .SI 后缀的 801xxx；策略里直接拿它和 '801780' 这类
+            # 字面量比较，带后缀会静默失配（例如银行/地产剔除永远不生效）。
+            normalized = _normalize_industry_code(code)
+            if not normalized:
+                continue
             result[str(row.symbol)] = {
-                "sw_l1": {"industry_code": str(code), "industry_name": str(name)}
+                "sw_l1": {
+                    "industry_code": normalized,
+                    "industry_name": str(name),
+                }
             }
         return result
 

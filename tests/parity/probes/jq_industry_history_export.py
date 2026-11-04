@@ -97,6 +97,15 @@ def main():
         if index % 10 == 0:
             print("进度 {}/{}，累计 {} 行".format(index, len(dates), len(rows)))
     frame = pd.DataFrame(rows)
+    if "code" in frame.columns:
+        frame = frame.rename(columns={"code": "symbol"})
+    for column in ("sw_l1_code", "sw_l2_code", "jq_l1_code", "jq_l2_code"):
+        if column in frame.columns:
+            frame[column] = frame[column].map(
+                lambda value: "" if value is None or pd.isna(value) else str(int(value))
+                if isinstance(value, float) and float(value).is_integer()
+                else str(value)
+            )
     frame.to_csv(OUTPUT, index=False, encoding="utf-8-sig")
     print("已写出 {}：{} 行".format(OUTPUT, len(frame)))
 
