@@ -64,31 +64,23 @@ Parquet provider。任一步失败，服务都不会进入可用状态。
 默认健康检查地址为 `http://127.0.0.1:9527/api/health`。当前部署约束为单实例、单
 Worker；后台脚本的默认日志为 `logs/app.log`，PID 文件为 `run/app.pid`。
 
-## API 与批量回测
+## API
 
 主要接口：
 
 ```text
 POST /api/backtest/factor
 POST /api/backtest/strategy
-POST /api/ai/strategy-transcriptions
-POST /api/internal/factor-backtest-batches
-GET  /api/factor-backtest-batch-tasks/{task_id}
-GET  /api/factor-backtest-batches
+POST /api/ai/post-summaries
 GET  /api/factor-libraries
 GET  /api/strategies
 ```
 
-批量 CLI 只调用运行中的 HTTP 服务：
+因子批量回测与 AI 因子/策略生成、回测解读、策略转写已于 2026-11-05 移交 SVQuant，RE 侧代码与路由已删除；历史文档见 `docs/归档/已移交-SVQuant/`。
 
-```bash
-python -m app.cli.factor_backtest_batch run --as-of YYYY-MM-DD
-python -m app.cli.factor_backtest_batch run --as-of YYYY-MM-DD --wait
-```
-
-AI 功能共用的 Provider 地址、API Key 和模型名可配置在 `config.yaml` 的 `ai.base_url`、
-`ai.api_key` 与 `ai.model` 中。`config.yaml` 已加入 `.gitignore`，不会提交到仓库；也可继续使用
-`AI_FACTOR_*`、`AI_STRATEGY_*`、`AI_TRANSCRIPTION_*` 或 `AI_BACKTEST_INTERPRETATION_*` 环境变量覆盖对应配置。
+帖子摘要兜底的 Provider 地址、API Key 和模型名可配置在 `config.yaml` 的 `ai.base_url`、
+`ai.api_key` 与 `ai.model` 中。`config.yaml` 已加入 `.gitignore`，不会提交到仓库；也可用
+`AI_FACTOR_API_KEY` / `AI_FACTOR_BASE_URL` / `AI_FACTOR_MODEL_ALIAS` 环境变量覆盖。
 
 ## 开发与测试
 

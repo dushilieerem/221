@@ -6,6 +6,7 @@
 > 配置为 `app.config`，通用工具为 `app.utils`；不增加 domain/application/infrastructure。
 > 下文中的旧目录和旧分层仅作历史设计追溯，不再作为新代码约束；既有业务规则和历史验证记录保留。
 > 详见根目录 FEAT-030/06-app-layout.md 与 ADR-029。FEAT-029 因子来源加载目标保持不变。
+> 2026-11-05：因子批量回测已移交 SVQuant 并从 RE 删除，文中涉及 `FactorBacktestBatch*` 的段落仅作历史记录。
 
 - 状态：开发中
 - 所属 Initiative：INIT-001 投研核心

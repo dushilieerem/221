@@ -314,50 +314,14 @@ def _restore_cache_value(value, *, datetime_index: bool = True):
     }
 
 
-def _factor_request_from_spec(spec: FactorBacktestSpec) -> FactorBacktestRequest:
-    """为批量缓存复用现有 HTTP 投影器构造等价 DTO。"""
-    payload = {
-        "factor_code": spec.factor_code,
-        "library_name": (
-            spec.library_names[0]
-            if len(spec.library_names) == 1
-            else list(spec.library_names)
-        ),
-        "factor_name": spec.factor_name,
-        "start": spec.start,
-        "end": spec.end,
-        "portfolio_type": spec.portfolio_type,
-        "rebalance_days": spec.rebalance_days,
-        "groups": spec.groups,
-        "benchmark": spec.benchmark,
-        "commission_rate": spec.commission_rate,
-        "stamp_tax": spec.stamp_tax,
-        "slippage_rate": spec.slippage_rate,
-        "filter_limit_up": spec.filter_limit_up,
-        "filter_suspended": spec.filter_suspended,
-        "winsorize": spec.winsorize,
-        "standardize": spec.standardize,
-        "analysis_level": spec.analysis_level,
-        "ic_horizons": list(spec.ic_horizons),
-    }
-    if spec.universe_snapshot is not None:
-        payload["universe_snapshot"] = spec.universe_snapshot
-    else:
-        payload["universe"] = str(spec.universe)
-    if spec.benchmark_snapshot is not None:
-        payload.pop("benchmark", None)
-        payload["benchmark_snapshot"] = spec.benchmark_snapshot
-    return FactorBacktestRequest(**payload)
-
-
 def _factor_standard_report(
     execution: FactorBacktestResult,
     response: FactorBacktestResponse,
 ) -> dict:
     """生成 API 与批量任务共享的标准报告缓存载荷。
 
-    只写缓存命中路径真正用得到的东西：交互式入口读 ``http_response``，
-    批量入口从 ``equity_curve`` / ``quantile_metrics`` / ``predictive_metrics``
+    只写缓存命中路径真正用得到的东西：HTTP 入口读 ``http_response``，标准报告
+    恢复路径从 ``equity_curve`` / ``quantile_metrics`` / ``predictive_metrics``
     / ``meta`` 取标量。``factor_values`` 与 ``positions`` 是日期×标的的完整
     宽表（全 A 十年约 2×1200 万格），既没有消费者，又会让 ``_cache_value``
     逐格编码再 gzip 数百 MB 文本，长历史上比回测本身还慢，因此不再写入。
@@ -439,44 +403,6 @@ def _factor_execution_from_standard_report(
         data_release_id=standard.get("data_release_id"),
         actual_end=actual_end,
     )
-
-
-def _run_cached_standard_factor_backtest(
-    spec: FactorBacktestSpec,
-    execute,
-    *,
-    data_context=None,
-) -> FactorBacktestResult:
-    """批量入口的缓存策略；计算仍由传入的统一 executor 回调完成。"""
-    if not _cache_enabled():
-        return execute()
-    try:
-        cache = _factor_cache()
-        key = _factor_cache_key(spec, cache, data_context=data_context)
-        cached = cache.get(key)
-        if cached is not None:
-            execution = _factor_execution_from_standard_report(spec, cached)
-            if execution is not None:
-                return execution
-        with cache.lock(key) as acquired:
-            cached = cache.get(key)
-            if cached is not None:
-                execution = _factor_execution_from_standard_report(spec, cached)
-                if execution is not None:
-                    return execution
-    except Exception:  # noqa: BLE001 - 缓存故障不得改变回测可用性
-        return execute()
-    execution = execute()
-    try:
-        response = _serialize_factor_execution(
-            _factor_request_from_spec(execution.spec),
-            execution,
-        )
-        if acquired and response.error is None:
-            cache.set(key, _factor_standard_report(execution, response))
-    except Exception:  # noqa: BLE001 - 写缓存/投影失败不重复计算
-        pass
-    return execution
 
 
 def _run_cached_factor_backtest(

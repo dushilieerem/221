@@ -11,7 +11,7 @@
 > FEAT-030 当前实现：协调器保持目录、窗口、重试与投影职责，因子 Experiment 改调 BacktestEngine。
 > Profile 解除强制过滤；API/CLI 透传四项可选处理；批次身份加入新执行版本。
 > 当次任务摘要、缓存及日志保留过滤诊断，SQLite schema 不变且不清理历史。
-> [完整设计](../../../../SVQuant/docs/功能包/FEAT-030-因子回测流程重构/README.md) 已实施；下面的兼容 Executor 只表示旧导入，
+> [完整设计](../../../../../SVQuant/docs/功能包/FEAT-030-因子回测流程重构/README.md) 已实施；下面的兼容 Executor 只表示旧导入，
 > 标准任务执行边界是 BacktestEngine。
 
 ## 模块边界

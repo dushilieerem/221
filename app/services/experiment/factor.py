@@ -11,9 +11,7 @@ import math
 
 import pandas as pd
 
-from app.services.data.engine import DataEngine
 from app.services.metric.engine import MetricEngine
-from app.models.data import Panel
 from app.models.metric import MetricContext
 from app.services.results.manager import ResultManager
 
@@ -81,28 +79,6 @@ def _predictive_summary(
     }
 
 
-def _apply_factor_batch_filters(
-    factor_values: pd.DataFrame,
-    panel: Panel,
-    config: ConfigManager,
-) -> pd.DataFrame:
-    """旧内部调用兼容；有效池构造统一交给 QuantCore DataEngine。
-
-    不再按 ``factor_batch.filters_enabled`` 短路：退市剔除恒开启，即使四个
-    可选开关都没开也必须构造掩码。
-    """
-
-    info = DataEngine().build_filter_mask(
-        panel,
-        filter_suspended=bool(config.get("filter_suspended", False)),
-        filter_limit_up=bool(config.get("filter_limit_up", False)),
-    )
-    eligible = info["mask"].reindex(
-        index=factor_values.index, columns=factor_values.columns
-    ).fillna(False).astype(bool)
-    return factor_values.mask(~eligible)
-
-
 def _industry_equity_analysis(
     factor_values: pd.DataFrame,
     forward_returns: pd.DataFrame,
@@ -155,7 +131,6 @@ def _industry_equity_analysis(
 
 
 __all__ = [
-    "_apply_factor_batch_filters",
     "_daily_ic_series",
     "_industry_equity_analysis",
     "_predictive_summary",

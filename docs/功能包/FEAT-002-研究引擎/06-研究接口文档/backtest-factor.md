@@ -192,8 +192,6 @@ GET /api/backtest/factor/9f1c...
 
 不传成本参数时结果与扣成本前逐位一致，既有回测结论不受影响。`meta` 会回显 `commission_rate` / `stamp_tax` / `slippage_rate` 与 `cost_model`，便于结果自证。
 
-**批量回测**（`POST /api/internal/factor-backtest-batches` 与 `python -m app.cli.factor_backtest_batch`）同样接受 `commission_rate` / `stamp_tax` / `slippage_rate`，口径与单因子完全一致；三者已进入批次身份（`profile_hash`），改动费率会生成新批次而不是复用旧结果。
-
 > **缓存**：成本参数已进入计算身份（`computation_payload`）。此前它们被固定为 0，若沿用旧口径，不同费率的请求会共用缓存键并互相返回错误结果。同时 `execution_version` 升到 `factor-execution-v7`，旧缓存与库里已存结果按新口径重算。
 
 ### 样本过滤

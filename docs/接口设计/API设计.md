@@ -25,7 +25,7 @@ http://<host>:<server.port>/api
 | HTTP | 含义 |
 |---|---|
 | `200` | 查询成功或同步策略回测返回 |
-| `202` | 因子/批量任务已接收，后续轮询 |
+| `202` | 因子任务已接收，后续轮询 |
 | `404` | 资产、任务或批次不存在/已不可查询 |
 | `422` | 请求 Schema 校验失败 |
 | `429` | 回测任务队列容量已满；按 `Retry-After` 处理 |
@@ -62,17 +62,6 @@ http://<host>:<server.port>/api
 | DELETE | `/api/backtest/factor/{run_id}` | 请求取消因子任务 | [因子回测 API](../功能包/FEAT-002-研究引擎/06-研究接口文档/backtest-factor.md) |
 | POST | `/api/backtest/strategy` | 执行策略回测并同步返回结果 | [策略回测 API](../功能包/FEAT-002-研究引擎/06-研究接口文档/backtest-strategy.md) |
 
-### 批量因子回测
-
-| 方法 | 路径 | 功能 | 详细契约 |
-|---|---|---|---|
-| POST | `/api/internal/factor-backtest-batches` | 创建批量任务，返回 `202` | [FEAT-027 批量回测](../功能包/FEAT-027-因子批量回测/README.md) |
-| GET | `/api/factor-backtest-batch-tasks/{task_id}` | 查询进程内批量任务状态 | [FEAT-027 批量回测](../功能包/FEAT-027-因子批量回测/README.md) |
-| GET | `/api/factor-backtest-batches` | 分页查询批次，可筛日期和状态 | [FEAT-027 批量回测](../功能包/FEAT-027-因子批量回测/README.md) |
-| GET | `/api/factor-backtest-batches/{batch_id}` | 查询批次概要 | [FEAT-027 批量回测](../功能包/FEAT-027-因子批量回测/README.md) |
-| GET | `/api/factor-backtest-batches/{batch_id}/factors` | 查询批次中的因子运行 | [FEAT-027 批量回测](../功能包/FEAT-027-因子批量回测/README.md) |
-| GET | `/api/factor-backtest-batches/factors/{library_name}/{factor_name}/history` | 查询单因子历史 | [FEAT-027 批量回测](../功能包/FEAT-027-因子批量回测/README.md) |
-
 ### 模拟盘结算（内部）
 
 | 方法 | 路径 | 功能 | 详细契约 |
@@ -97,18 +86,17 @@ http://<host>:<server.port>/api
 
 | 方法 | 路径 | 功能 | 详细契约 |
 |---|---|---|---|
-| POST | `/api/ai/factor-generations` | 生成并校验因子草稿 | [AI 因子生成](../功能包/FEAT-002-研究引擎/06-研究接口文档/ai-factor-generations.md) |
-| POST | `/api/ai/strategy-generations` | 生成并校验向量化策略草稿 | [AI 策略生成](../功能包/FEAT-002-研究引擎/06-研究接口文档/ai-strategy-generations.md) |
-| POST | `/api/ai/strategy-transcriptions` | 聚宽策略转写与差异报告 | [AI 策略转写](../功能包/FEAT-002-研究引擎/06-研究接口文档/ai-strategy-transcriptions.md) |
-| POST | `/api/ai/backtest-interpretations` | 解读回测结果快照 | [AI 回测解读](../功能包/FEAT-002-研究引擎/06-研究接口文档/ai-backtest-interpretations.md) |
+| POST | `/api/ai/post-summaries` | 社区帖子结构化摘要（临时兜底） | 本页；见 [已移交功能说明](../归档/已移交-SVQuant/README.md) |
+
+AI 因子生成、策略生成、回测解读与策略转写已于 2026-11-05 移交 SVQuant，RE 只保留帖子摘要兜底，待 SVQuant 移除 fallback 后删除。`ai.*` 配置仍用于该接口。
 
 ---
 
 ## 4. 异步任务约定
 
-因子回测和批量回测的提交端点返回 `202 Accepted`，并提供任务 ID/轮询地址。客户端应：
+因子回测的提交端点返回 `202 Accepted`，并提供任务 ID/轮询地址。客户端应：
 
-1. 保存响应中的 `run_id` 或 `task_id`。
+1. 保存响应中的 `run_id`。
 2. 按 `poll_url` 查询状态；若响应有 `Retry-After`，遵循建议的重试间隔。
 3. 在任务成功、失败或取消后停止轮询。
 4. 不将进程内单次任务 ID 当作跨服务重启的持久历史 ID。
@@ -124,6 +112,6 @@ http://<host>:<server.port>/api
 ## 6. 权限、幂等与限流
 
 - 权限要求：当前没有 API 身份认证或权限中间件；请通过受控网络提供服务。
-- 幂等性：因子请求和批量批次按各自任务键/批次键执行去重或复用；普通 GET 查询天然只读；`POST /api/data/reload` 只重新装载当前已发布 release，不修改行情文件，重复调用等价。详细语义见对应接口文档。
+- 幂等性：因子请求按任务键执行去重或复用；普通 GET 查询天然只读；`POST /api/data/reload` 只重新装载当前已发布 release，不修改行情文件，重复调用等价。详细语义见对应接口文档。
 - 限流：未实现通用请求速率限制。回测任务由有界 Manager 控制并发/队列，队列满时返回 `429`。
 - 安全边界：允许提交代码的回测端点只面向受信任调用方；当前没有执行沙箱。

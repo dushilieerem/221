@@ -1,8 +1,7 @@
 """在进程内运行 SVQuant 侧对账用例。
 
 走 ``app.services.strategy.backtest.run_strategy_backtest``（HTTP 路由调用的
-同一服务函数），不要求 FastAPI 服务在线。这是开发期对账工具，因此与
-``factor_backtest_batch`` 的"只调 HTTP"约定不同。
+同一服务函数），不要求 FastAPI 服务在线。这是开发期对账工具。
 """
 
 from __future__ import annotations

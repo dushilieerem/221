@@ -1,25 +1,13 @@
-"""AI 草稿与回测解读路由。"""
+"""AI 帖子摘要路由。
+
+因子生成、策略生成、回测解读与策略转写已移交 SVQuant；RE 只保留社区
+帖子摘要的兜底接口，等 SVQuant 移除 RE fallback 后再删除。
+"""
 
 from fastapi import APIRouter
 
-from app.api.ai_factor import generate_factor
-from app.api.ai_interpretation import interpret_backtest
-from app.api.ai_strategy import generate_strategy
-from app.api.ai_strategy_transcription import transcribe_strategy
 from app.api.ai_post_summary import summarize_post
 from app.schemas.post_summary import PostSummaryRequest, PostSummaryResponse
-from app.schemas.strategy_transcription import (
-    StrategyTranscriptionRequest,
-    StrategyTranscriptionResponse,
-)
-from app.schemas.backtest import (
-    BacktestInterpretationRequest,
-    BacktestInterpretationResponse,
-    FactorGenerationRequest,
-    FactorGenerationResponse,
-    StrategyGenerationRequest,
-    StrategyGenerationResponse,
-)
 
 
 router = APIRouter()
@@ -28,30 +16,6 @@ router = APIRouter()
 @router.post("/ai/post-summaries", response_model=PostSummaryResponse)
 def generate_post_summary(req: PostSummaryRequest) -> PostSummaryResponse:
     return summarize_post(req)
-
-
-@router.post("/ai/factor-generations", response_model=FactorGenerationResponse)
-def generate_factor_draft(req: FactorGenerationRequest) -> FactorGenerationResponse:
-    return generate_factor(req)
-
-
-@router.post("/ai/strategy-generations", response_model=StrategyGenerationResponse)
-def generate_strategy_draft(req: StrategyGenerationRequest) -> StrategyGenerationResponse:
-    return generate_strategy(req)
-
-
-@router.post("/ai/strategy-transcriptions", response_model=StrategyTranscriptionResponse)
-def transcribe_joinquant_strategy(
-    req: StrategyTranscriptionRequest,
-) -> StrategyTranscriptionResponse:
-    return transcribe_strategy(req)
-
-
-@router.post("/ai/backtest-interpretations", response_model=BacktestInterpretationResponse)
-def interpret_backtest_result(
-    req: BacktestInterpretationRequest,
-) -> BacktestInterpretationResponse:
-    return interpret_backtest(req)
 
 
 __all__ = ["router"]

@@ -1,6 +1,6 @@
 # FEAT-027：因子批量回测与指标仓库
 
-> [FEAT-030 当前实现](../../../../SVQuant/docs/功能包/FEAT-030-因子回测流程重构/README.md)：每个因子任务改调同一个 BacktestEngine，
+> [FEAT-030 当前实现](../../../../../SVQuant/docs/功能包/FEAT-030-因子回测流程重构/README.md)：每个因子任务改调同一个 BacktestEngine，
 > 取消强制过滤，四项可选处理默认关闭，触发 API/CLI 支持显式配置。
 > 两槽 FIFO、重试、历史 schema 保持；告警仅留在当次结果/缓存/日志，不持久化进批量历史。
 > 以下描述当前批量实现；完整验收仍以 FEAT-030 Verification 为准。

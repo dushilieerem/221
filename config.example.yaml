@@ -49,7 +49,6 @@ cache:
   max_bytes: 10737418240
 
 storage:
-  factor_backtest_database: ./app/assets/factors/factor_backtest.db
   output_path: ./output
 
 # 以下是回测默认参数，HTTP 请求仍以 API schema 约定为准。

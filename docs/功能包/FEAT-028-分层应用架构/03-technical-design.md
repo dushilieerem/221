@@ -1,3 +1,5 @@
+> 2026-11-05：因子批量回测已移交 SVQuant 并从 RE 删除，本文涉及批量的段落仅作历史记录。
+
 # Technical Design：ResearchEngine 分层应用架构
 
 > 2026-08-28 架构修订：用户已确认 ADR-029 的常规 FastAPI 分层。

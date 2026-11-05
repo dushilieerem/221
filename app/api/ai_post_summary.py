@@ -1,4 +1,4 @@
-"""复用因子生成的模型通道生成社区摘要；不读取帖子库，不执行代码。"""
+"""使用共享模型通道生成社区摘要；不读取帖子库，不执行代码。"""
 import json
 from fastapi import HTTPException
 from app.api import llm_provider

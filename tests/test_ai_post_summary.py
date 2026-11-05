@@ -1,7 +1,8 @@
 import json
 from fastapi.testclient import TestClient
 from app.main import app
-from app.api import ai_factor, ai_post_summary, llm_provider
+from app.api import ai_post_summary, llm_provider
+from app.config import get_runtime_settings
 
 client = TestClient(app)
 PAYLOAD = {"title": "虚构种植记录", "body": "周一种薄荷，周三浇水，周五靠窗的一盆长得更快。观察不足，无法确定原因。"}
@@ -24,7 +25,7 @@ def test_summary_reuses_factor_provider_and_preserves_usage(monkeypatch):
     assert response.status_code == 200
     data = response.json()
     assert data["summary_source"] == "llm" and data["tokens_in"] == 32 and data["tokens_out"] == 12
-    assert seen[0][0] == ai_factor._settings_from_env()
+    assert seen[0][0] == llm_provider.generation_provider_settings(get_runtime_settings())
     assert data["model"] == "shared-generation-model"
     assert "test-summary-secret" not in response.text
     assert "test-summary-secret" not in str(seen[0][1])

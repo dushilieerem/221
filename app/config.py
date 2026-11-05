@@ -181,7 +181,6 @@ class RuntimeSettings:
     factor_index: Path
     strategy_dir: Path
     strategy_index: Path
-    factor_backtest_database: Path
     output_path: Path
     ai_base_url: str
     ai_api_key: str | None = field(repr=False)
@@ -267,14 +266,6 @@ def _from_manager(manager: ConfigManager, config_path: Path) -> RuntimeSettings:
         assets.get("strategy_index"),
         base=base_dir,
         default=base_dir / "app/assets/strategies/index.yaml",
-    )
-    factor_backtest_database = _path(
-        storage.get(
-            "factor_backtest_database",
-            assets.get("factor_backtest_database"),
-        ),
-        base=base_dir,
-        default=base_dir / "app/assets/factors/factor_backtest.db",
     )
     output_path = _path(
         storage.get("output_path", manager.get("output_path")),
@@ -367,7 +358,6 @@ def _from_manager(manager: ConfigManager, config_path: Path) -> RuntimeSettings:
         factor_index=factor_index,
         strategy_dir=strategy_dir,
         strategy_index=strategy_index,
-        factor_backtest_database=factor_backtest_database,
         output_path=output_path,
         ai_base_url=(
             ai_base_url or "https://ark.cn-beijing.volces.com/api/coding/v3"
