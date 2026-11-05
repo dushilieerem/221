@@ -271,13 +271,13 @@ def _from_manager(manager: ConfigManager, config_path: Path) -> RuntimeSettings:
     max_workers = _int(
         runtime.get("max_workers", application.get("max_workers")),
         "runtime.max_workers",
-        2,
+        6,
         minimum=1,
     )
     max_queue_size = _int(
         runtime.get("max_queue_size", application.get("max_queue_size")),
         "runtime.max_queue_size",
-        8,
+        24,
         minimum=0,
     )
     cache_ttl_days = _int(
@@ -286,7 +286,7 @@ def _from_manager(manager: ConfigManager, config_path: Path) -> RuntimeSettings:
     cache_max_bytes = _int(
         cache.get("max_bytes"),
         "cache.max_bytes",
-        10 * 1024**3,
+        30 * 1024**3,
         minimum=0,
     )
     port = _int(server.get("port"), "server.port", 9527, minimum=1)

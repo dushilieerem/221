@@ -41,7 +41,7 @@ class Experiment(ABC, Generic[TResult]):
 ```
 
 Manager 使用普通 `queue.Queue` 和有界 semaphore。`lane` 只是元数据，不参与排序。
-Manager 的 worker 从唯一 FIFO 队列取任务；单实例配置为 `max_workers=2`，队列容量由
+Manager 的 worker 从唯一 FIFO 队列取任务；单实例默认 `max_workers=6`（按服务器资源可调），队列容量由
 `SVQUANT_EXPERIMENT_MAX_QUEUE_SIZE` 控制，默认 8。
 
 具体实验为：

@@ -11,8 +11,9 @@ server:
   cors_origins: []
 
 runtime:
-  max_workers: 2
-  max_queue_size: 8
+  # 单进程线程数；按服务器 CPU/内存调整。多 Uvicorn Worker 会破坏进程内任务状态，不要调。
+  max_workers: 6
+  max_queue_size: 24
   log_level: INFO
 
 # 所有 AI 功能共用的 OpenAI 兼容服务配置；API Key 填在本地 config.yaml。
@@ -41,7 +42,7 @@ cache:
   enabled: true
   dir: ./.runtime/backtest-cache
   ttl_days: 30
-  max_bytes: 10737418240
+  max_bytes: 32212254720
 
 storage:
   output_path: ./output

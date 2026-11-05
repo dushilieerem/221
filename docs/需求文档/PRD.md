@@ -185,7 +185,7 @@ AI 因子生成、策略生成、回测解读、策略转写和社区帖子摘�
 
 ### 性能
 
-服务未在仓库中声明 QPS、P95 或最大数据规模 SLA。回测并发和排队容量通过 `runtime.max_workers` 与 `runtime.max_queue_size` 配置，默认分别为 2 和 8。
+服务未在仓库中声明 QPS、P95 或最大数据规模 SLA。回测并发和排队容量通过 `runtime.max_workers` 与 `runtime.max_queue_size` 配置，默认分别为 6 和 24。
 
 ### 稳定性
 
