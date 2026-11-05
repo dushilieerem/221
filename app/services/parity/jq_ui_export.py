@@ -386,3 +386,92 @@ def _write_csv(path: Path, rows: list[dict[str, Any]], columns: list[str]) -> No
         writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
+
+
+def import_returns(
+    source: str | Path,
+    case: CaseSpec,
+    *,
+    initial_cash: float | None = None,
+    output_dir: str | Path | None = None,
+) -> dict[str, Any]:
+    """只导入收益曲线（``result_1.csv``），不要求成交与持仓。
+
+    用于策略组尚未提供三件套时的收益层对账：写出 ``daily.csv`` 与
+    ``meta.json``，``positions.csv`` / ``orders.csv`` 不生成。
+    """
+
+    path = Path(source)
+    if not path.is_file():
+        raise ParityError(f"收益曲线文件不存在: {path}")
+    equity_rows = _read_equity(path)
+    if not equity_rows:
+        raise ParityError(f"{path}: 未解析到时间/策略收益行")
+
+    equity_rows.sort(key=lambda row: row["date"])
+    rows: list[dict[str, Any]] = []
+    previous = None
+    for row in equity_rows:
+        cumulative = 1.0 + float(row["cumulative_return"]) / 100.0
+        returns = 0.0 if previous in (None, 0) else cumulative / previous - 1.0
+        rows.append({"time": row["date"], "returns": returns})
+        previous = cumulative
+
+    initial = initial_cash if initial_cash is not None else case.jq.get("initial_cash")
+    if initial is None:
+        initial = _infer_initial_cash(equity_rows)
+    if initial is None:
+        raise ParityError("缺少初始资金：请在 case.yaml 的 jq.initial_cash 声明")
+
+    target = Path(output_dir) if output_dir is not None else golden_dir(case)
+    target.mkdir(parents=True, exist_ok=True)
+    _write_csv(target / "daily.csv", rows, ["time", "returns"])
+
+    cumulative = equity_rows[-1]["cumulative_return"]
+    meta = {
+        "schema_version": 1,
+        "backtest_id": case.jq.get("backtest_id"),
+        "exported_at": datetime.fromtimestamp(
+            path.stat().st_mtime, tz=timezone.utc
+        ).isoformat(timespec="seconds"),
+        "initial_cash": float(initial),
+        "mode": "returns_only",
+        "source": {"directory": str(path.parent), "result": path.name},
+        "cumulative_return_reported": cumulative,
+    }
+    (target / "meta.json").write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+    return {
+        "case": case.case_id,
+        "output": str(target),
+        "mode": "returns_only",
+        "trading_days": len(rows),
+        "first_date": rows[0]["time"],
+        "last_date": rows[-1]["time"],
+        "initial_cash": float(initial),
+        "cumulative_return_reported": cumulative,
+        "warnings": ["只有收益曲线：L1–L3 不参与比对"],
+    }
+
+
+def _infer_initial_cash(equity_rows: list[dict[str, Any]]) -> float | None:
+    """用前几日的当日盈亏 / 当日收益率反推初始资金。"""
+
+    implied: list[float] = []
+    previous = None
+    for row in equity_rows[:20]:
+        cumulative = 1.0 + float(row["cumulative_return"]) / 100.0
+        if previous not in (None, 0):
+            daily = cumulative / previous - 1.0
+            pnl = float(row.get("pnl") or 0.0)
+            if abs(daily) > 1e-4 and pnl:
+                implied.append(abs(pnl / daily))
+        previous = cumulative
+        if len(implied) >= 5:
+            break
+    if not implied:
+        return None
+    implied.sort()
+    return float(implied[len(implied) // 2])

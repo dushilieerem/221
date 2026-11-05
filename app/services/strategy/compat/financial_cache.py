@@ -17,17 +17,17 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 _CACHE: dict[tuple[str, str, tuple[str, ...]], pd.DataFrame] = {}
+#: 表目录解析结果缓存；逐日查询时不要再对 5000+ 个文件做两次 glob。
+_DIRECTORY_CACHE: dict[tuple[str, str], Path] = {}
 
 _BASE_COLUMNS = ("Symbol", "m_timetag", "m_anntime")
 
 
-def load_statement(
-    root: str | Path,
-    statement: str,
-    columns: list[str] | tuple[str, ...] | None = None,
-) -> pd.DataFrame:
-    """读取整张财务表（全部历史），按根目录/表/列缓存。"""
-
+def _resolve_directory(root: str | Path, statement: str) -> Path:
+    key = (str(Path(root).resolve()), statement)
+    cached = _DIRECTORY_CACHE.get(key)
+    if cached is not None:
+        return cached
     directory = Path(root) / "3_financial_data" / statement
     if not any(directory.glob("*.parquet")):
         # 新发布视图的 compat 目录只含策略直接读取的几张表；股本、分红等
@@ -38,6 +38,18 @@ def load_statement(
             directory = fallback
     if not any(directory.glob("*.parquet")):
         raise FileNotFoundError(f"财务表未下载: {directory}")
+    _DIRECTORY_CACHE[key] = directory
+    return directory
+
+
+def load_statement(
+    root: str | Path,
+    statement: str,
+    columns: list[str] | tuple[str, ...] | None = None,
+) -> pd.DataFrame:
+    """读取整张财务表（全部历史），按根目录/表/列缓存。"""
+
+    directory = _resolve_directory(root, statement)
 
     requested = tuple(sorted(set(columns or ())))
     key = (str(Path(root).resolve()), statement, requested)
@@ -76,6 +88,7 @@ def visible(frame: pd.DataFrame, as_of: str | pd.Timestamp) -> pd.DataFrame:
 
 def clear_cache() -> None:
     _CACHE.clear()
+    _DIRECTORY_CACHE.clear()
 
 
 __all__ = ["load_statement", "visible", "clear_cache"]

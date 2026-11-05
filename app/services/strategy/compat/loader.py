@@ -58,10 +58,18 @@ class JoinQuantStrategyAdapter:
         return self._runtime
 
 
+def _import_placeholder(match: re.Match[str]) -> str:
+    """把导入行替换成同缩进的 ``pass``，避免空 ``try``/``if`` 块造成语法错误。"""
+
+    line = match.group(0)
+    indent = line[: len(line) - len(line.lstrip())]
+    return f"{indent}pass  # 聚宽导入由兼容层注入"
+
+
 def strip_joinquant_imports(source: str) -> str:
     """移除 jqdata/jqfactor/jqlib 导入行，便于静态护栏检查。"""
 
-    return _IMPORT_PATTERN.sub("", source)
+    return _IMPORT_PATTERN.sub(_import_placeholder, source)
 
 
 def load_joinquant_strategy(

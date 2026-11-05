@@ -35,6 +35,12 @@ def render_markdown(
 ) -> str:
     lines: list[str] = [f"# 聚宽对账报告：{result.case_id}", ""]
     lines.append(f"- 状态：**{result.status}**")
+    present = {layer.layer for layer in result.layers}
+    if not {"L1", "L2", "L3"} & present:
+        lines.append(
+            "- 对账范围：**只有收益曲线**（L0 参数/日历、L4 收益、L5 指标）；"
+            "无成交与持仓，选股、成交、持仓三层未比较"
+        )
     lines.append(f"- 生成时间：{datetime.now(timezone.utc).isoformat(timespec='seconds')}")
     if provenance:
         for key, value in provenance.items():

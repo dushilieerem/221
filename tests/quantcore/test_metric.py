@@ -3,6 +3,7 @@
 import math
 
 import numpy as np
+import pytest
 import pandas as pd
 
 from app.models.metric import MetricContext
@@ -145,3 +146,30 @@ def test_metric_engine_register_many_accepts_mapping():
 
     engine = MetricEngine(register_defaults=False, metrics={"alias": _TypedConstantMetric()})
     assert engine.calculate_one("constant", _ctx()) == 1.0
+
+
+def test_drawdown_intervals_start_at_true_peak():
+    """回撤区间的峰值必须取进入回撤前的新高，而不是第一个下跌日。
+
+    回归：策略/因子响应里的 drawdowns 表曾经用第一个下跌日的净值当峰值，
+    导致区间深度小于指标层的 max_drawdown（本次诊断的 10.80% vs 11.5589%）。
+    """
+
+    import pandas as pd
+
+    from app.models.metric import MetricContext
+    from app.services.factor.result_serializers import _compute_drawdowns
+    from app.services.metric.engine import MetricEngine
+
+    dates = pd.date_range("2024-01-02", periods=5, freq="B")
+    equity = pd.Series([100.0, 101.0, 99.0, 92.0, 103.0], index=dates)
+
+    intervals = _compute_drawdowns(equity)
+    metric = MetricEngine().calculate_all(MetricContext(equity_curve=equity))
+
+    assert intervals, "应当至少有一个回撤区间"
+    worst = intervals[0]
+    assert worst.start == "2024-01-03"  # 101 的新高日
+    assert worst.trough is not None
+    assert worst.depth == pytest.approx((92.0 - 101.0) / 101.0, rel=1e-12)
+    assert worst.depth == pytest.approx(metric["max_drawdown"], rel=1e-9)

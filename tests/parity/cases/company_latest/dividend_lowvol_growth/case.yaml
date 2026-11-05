@@ -1,0 +1,46 @@
+schema_version: 1
+name: dividend_lowvol_growth
+description: 红利低波+红利成长（最新版）：双池各 5 只、月频、行业分散。收益层对账：只有聚宽导出的收益曲线，L1–L3 暂不比对。
+
+jq:
+  backtest_id: "company-latest-dividend_lowvol_growth"
+  frequency: day
+  run_time: "09:30"
+  start: "2016-09-30"
+  end: "2026-09-30"
+  initial_cash: 1000000
+  benchmark: "000015.XSHG"
+  options:
+    use_real_price: true
+    slippage: 0.002
+    commission: 0.0001
+    stamp_tax: 0.0005
+    min_commission: 5
+
+svquant:
+  engine_mode: event
+  strategy_source: jq_strategy.py
+  strategy_dialect: joinquant
+  timed_execution: true
+  execution_timing: next_open
+  execution_price_source: unadjusted
+  universe: CSI_ALL
+  benchmark: CSI300
+  initial_capital: 1000000
+  commission_rate: 0.0001
+  stamp_tax: 0.0005
+  min_commission: 5
+  slippage_rate: 0.002
+
+comparison:
+  price_basis: real
+  # 只有收益曲线：只比参数/日历、每日与累计收益、收益指标。
+  layers: [L0, L4, L5]
+  strict_layers: [L0, L4, L5]
+  acceptance: diagnostic
+  # 上证红利指数当前没有行情数据，收益层比对用沪深300 代替。
+  benchmark_equivalent: CSI300
+
+tolerances:
+  return_abs: 1.0e-3
+  metric_rel: 1.0e-3

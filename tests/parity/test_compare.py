@@ -145,3 +145,17 @@ def test_first_holding_date_divergence_is_dated_for_ordering():
         if item.field == "first_holding_date" and item.symbol == SYMBOL_A
     )
     assert row.date == min(row.expected, row.actual)
+
+
+def test_returns_only_case_skips_trade_layers():
+    """只有收益曲线时，L1–L3 不应被构建，也不能因为空帧而误判通过。"""
+    case = dataclasses.replace(
+        make_case(),
+        comparison={"price_basis": "real", "layers": ["L0", "L4", "L5"]},
+    )
+    jq, svq = make_runs()
+
+    result = compare_runs(jq, svq, case)
+
+    assert [layer.layer for layer in result.layers] == ["L0", "L4", "L5"]
+    assert case.strict_layers == {"L0", "L4", "L5"}

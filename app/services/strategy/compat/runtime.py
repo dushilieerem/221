@@ -17,6 +17,7 @@ import logging
 from types import SimpleNamespace
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from app.services.strategy.compat.factors import FactorStore
@@ -35,6 +36,22 @@ from app.services.strategy.compat.query import (
 )
 
 _SUPPORTED_FREQUENCIES = {"daily", "1d", "day"}
+
+#: 聚宽交易所后缀 -> 本仓库后缀。策略里写死的 ``511880.XSHG`` 这类代码必须
+#: 在进入引擎前转换，否则面板取不到列、会静默返回 NaN。
+_JQ_SUFFIX = {"XSHG": "SH", "XSHE": "SZ", "XBSE": "BJ"}
+
+
+def normalize_security(code: Any) -> Any:
+    """把聚宽代码换成引擎使用的交易所代码；其它输入原样返回。"""
+
+    if not isinstance(code, str):
+        return code
+    base, separator, suffix = code.rpartition(".")
+    if not separator:
+        return code
+    mapped = _JQ_SUFFIX.get(suffix.upper())
+    return f"{base}.{mapped}" if mapped else code
 
 
 class GlobalState(SimpleNamespace):
@@ -105,6 +122,9 @@ class JoinQuantRuntime:
         self.industry = industry
         self.index_prices = index_prices
         self.finance = finance if finance is not None else FinanceNamespace()
+        # get_all_securities 每天都会被策略调用；逐标的查主数据再拼 5000 行
+        # DataFrame 要做几万次调用，这里只建一次基础表，日期过滤走布尔掩码。
+        self._all_securities: pd.DataFrame | None = None
 
     def bind(self, context) -> None:
         self.context = context
@@ -168,12 +188,14 @@ class JoinQuantRuntime:
     # ------------------------------------------------------------ 下单
 
     def order(self, security: str, amount: float, *args: Any, **kwargs: Any) -> Any:
+        security = normalize_security(security)
         current = self.context.portfolio.quantity(security)
         desired = current + int(amount)
         event = self.context.orders.target_quantity(security, desired)
         return self._jq_order(security, event, desired)
 
     def order_value(self, security: str, value: float, *args: Any, **kwargs: Any) -> Any:
+        security = normalize_security(security)
         price = self.context.market.current_price(security)
         current_value = self.context.portfolio.quantity(security) * (price or 0.0)
         target_value = current_value + float(value)
@@ -182,17 +204,20 @@ class JoinQuantRuntime:
         return self._jq_order(security, event, desired)
 
     def order_target(self, security: str, amount: float, *args: Any, **kwargs: Any) -> Any:
+        security = normalize_security(security)
         desired = int(amount)
         event = self.context.orders.target_quantity(security, desired)
         return self._jq_order(security, event, desired)
 
     def order_target_value(self, security: str, value: float, *args: Any, **kwargs: Any) -> Any:
+        security = normalize_security(security)
         price = self.context.market.current_price(security)
         desired = self._desired_quantity(float(value), price)
         event = self.context.orders.target_value(security, float(value))
         return self._jq_order(security, event, desired)
 
     def order_target_percent(self, security: str, percent: float, *args: Any, **kwargs: Any) -> Any:
+        security = normalize_security(security)
         value = self._total_value() * float(percent)
         price = self.context.market.current_price(security)
         desired = self._desired_quantity(value, price)
@@ -209,13 +234,20 @@ class JoinQuantRuntime:
         current = int(self.context.portfolio.quantity(security))
         delta = int(desired) - current
         return JQOrder(
-            security=security,
+            security=self._display_symbol(security),
             order_id=event.order_id,
             amount=delta,
             filled=delta,
             price=self.context.market.current_price(security),
             status=OrderStatus.held,
         )
+
+    def _display_symbol(self, symbol: str) -> str:
+        """按策略侧写法回报代码（ETF 保留 511880.XSHG 这类别名）。"""
+
+        market = getattr(self.context, "market", None)
+        display = getattr(market, "display_symbol", None)
+        return display(symbol) if callable(display) else symbol
 
     def _total_value(self) -> float:
         wrapped = getattr(self.context.portfolio, "total_value", None)
@@ -257,7 +289,10 @@ class JoinQuantRuntime:
             else ["open", "close", "high", "low", "volume", "amount"]
         )
         single = isinstance(security, str)
-        symbols = [security] if single else list(security)
+        symbols = [
+            normalize_security(item)
+            for item in ([security] if single else list(security))
+        ]
         end = end_date if end_date is not None else self._current_date()
 
         if (
@@ -280,7 +315,7 @@ class JoinQuantRuntime:
         source_fields = [
             aliases.get(field, field)
             for field in requested
-            if field not in {"high_limit", "low_limit"}
+            if field not in {"high_limit", "low_limit", "paused"}
         ]
         raw = self.context.market.history(
             symbols,
@@ -296,6 +331,14 @@ class JoinQuantRuntime:
                 frames[field] = self.context.market.limit_panel(
                     field, symbols, count=count, start=start_date, end=end
                 )
+                continue
+            if field == "paused":
+                # 聚宽返回 1/0；状态面板缺失时按 0 处理（不误判停牌）。
+                paused = self.context.market.paused_panel(
+                    symbols, count=count, start=start_date, end=end
+                )
+                if paused is not None:
+                    frames[field] = paused
                 continue
             source = aliases.get(field, field)
             if source in raw:
@@ -343,7 +386,7 @@ class JoinQuantRuntime:
     ):
         fields = [field] if isinstance(field, str) else list(field)
         symbols = (
-            list(security_list)
+            [normalize_security(item) for item in security_list]
             if security_list is not None
             else list(self.context.market.symbols)
         )
@@ -380,35 +423,49 @@ class JoinQuantRuntime:
     # ------------------------------------------------------------ 元数据
 
     def get_all_securities(self, types=None, date=None) -> pd.DataFrame:
-        symbols = list(self.context.market.symbols)
-        as_of = pd.Timestamp(date) if date is not None else None
-        rows = []
-        index = []
-        for symbol in symbols:
-            start, end = self.context.market.listing_dates(symbol)
-            master_start = self.master.start_date(symbol) if self.master else None
-            start_value = master_start or start
-            if isinstance(start_value, pd.Timestamp):
-                start_value = start_value.date()
-            if as_of is not None:
-                if start_value is not None and pd.Timestamp(start_value) > as_of:
-                    continue
-                if end is not None and pd.Timestamp(end) < as_of:
-                    continue
-            name = (
-                self.master.name(symbol)
-                if self.master is not None
-                else self.context.market.name(symbol)
+        frame = self._all_securities
+        if frame is None:
+            symbols = list(self.context.market.symbols)
+            etf_symbols = set(getattr(self.context.market, "etf_symbols", ()) or ())
+            rows = []
+            index = []
+            for symbol in symbols:
+                start, end = self.context.market.listing_dates(symbol)
+                master_start = self.master.start_date(symbol) if self.master else None
+                start_value = master_start or start
+                if isinstance(start_value, pd.Timestamp):
+                    start_value = start_value.date()
+                name = (
+                    self.master.name(symbol)
+                    if self.master is not None
+                    else self.context.market.name(symbol)
+                )
+                rows.append({
+                    "display_name": name,
+                    "name": name,
+                    "start_date": start_value,
+                    "end_date": end,
+                    "type": "fund" if symbol in etf_symbols else "stock",
+                })
+                index.append(symbol)
+            frame = pd.DataFrame(rows, index=pd.Index(index))
+            self._all_securities = frame
+        keep = pd.Series(True, index=frame.index)
+        wanted = (
+            {str(item) for item in types}
+            if types is not None and not isinstance(types, str)
+            else ({types} if types is not None else None)
+        )
+        if wanted and "all" not in wanted:
+            keep &= frame["type"].isin(wanted)
+        if date is not None:
+            as_of = pd.Timestamp(date)
+            starts = pd.to_datetime(frame["start_date"], errors="coerce")
+            ends = pd.to_datetime(frame["end_date"], errors="coerce")
+            keep &= (starts.isna() | (starts <= as_of)) & (
+                ends.isna() | (ends >= as_of)
             )
-            rows.append({
-                "display_name": name,
-                "name": name,
-                "start_date": start_value,
-                "end_date": end,
-                "type": "stock",
-            })
-            index.append(symbol)
-        return pd.DataFrame(rows, index=pd.Index(index))
+        return frame[keep]
 
     def get_all_trade_days(self):
         return self.get_trade_days()
@@ -420,6 +477,7 @@ class JoinQuantRuntime:
         return [day.date() for day in days]
 
     def get_security_info(self, security: str):
+        security = normalize_security(security)
         start, end = self.context.market.listing_dates(security)
         master_start = self.master.start_date(security) if self.master else None
         name = self.master.name(security) if self.master else self.context.market.name(security)
@@ -461,6 +519,31 @@ class JoinQuantRuntime:
             as_of = self._current_date()
         as_of = pd.Timestamp(as_of).strftime("%Y-%m-%d")
         return self.fundamentals.query(q, as_of=as_of)
+
+    def get_history_fundamentals(
+        self,
+        security=None,
+        fields=None,
+        watch_date=None,
+        count: int = 1,
+        interval: str = "1q",
+        stat_by_year: bool = False,
+        **kwargs: Any,
+    ):
+        """聚宽 ``get_history_fundamentals``：按观察日取最近 N 期财务数据。"""
+
+        if self.fundamentals is None:
+            raise NotImplementedError("财务数据目录未配置")
+        if stat_by_year:
+            raise NotImplementedError("get_history_fundamentals(stat_by_year=True) 暂未支持")
+        symbols = [security] if isinstance(security, str) else list(security or [])
+        if not symbols:
+            return pd.DataFrame(columns=["code", "statDate"])
+        if watch_date is None:
+            watch_date = self.context.previous_date or self._current_date()
+        return self.fundamentals.history(
+            list(fields or []), symbols, watch_date=watch_date, count=int(count)
+        )
 
     def get_factor_values(
         self,
@@ -545,9 +628,18 @@ class JoinQuantRuntime:
     def get_industry(self, security, date=None, **kwargs: Any):
         if self.industry is None:
             raise NotImplementedError("行业数据目录未配置；请传入 IndustryStore")
-        symbols = [security] if isinstance(security, str) else list(security)
+        symbols = [
+            normalize_security(item)
+            for item in ([security] if isinstance(security, str) else list(security))
+        ]
         as_of = date if date is not None else self._current_date()
         return self.industry.industries(symbols, as_of)
+
+    def get_industry_stocks(self, industry_code, date=None, **kwargs: Any):
+        if self.industry is None:
+            raise NotImplementedError("行业数据目录未配置；请传入 IndustryStore")
+        as_of = date if date is not None else self._current_date()
+        return self.industry.stocks(industry_code, as_of)
 
     def get_extras(
         self,
@@ -567,14 +659,20 @@ class JoinQuantRuntime:
         panel = getattr(engine, "panels", {}).get("listed_status") if engine else None
         if panel is None:
             raise NotImplementedError("当前数据版本没有 listed_status，无法取 is_st")
-        symbols = [security_list] if isinstance(security_list, str) else list(security_list)
-        frame = panel.reindex(columns=symbols)
+        symbols = [
+            normalize_security(item)
+            for item in (
+                [security_list] if isinstance(security_list, str) else list(security_list)
+            )
+        ]
+        frame = panel
         if start_date is not None:
             frame = frame.loc[frame.index >= pd.Timestamp(start_date)]
         if end_date is not None:
             frame = frame.loc[frame.index <= pd.Timestamp(end_date)]
         if count is not None:
             frame = frame.iloc[-int(count):]
+        frame = frame.reindex(columns=symbols)
         status = frame.astype("object")
         result = status.apply(lambda column: column.map(
             lambda value: False if pd.isna(value) else str(value).strip() in {"ST", "*ST"}
@@ -614,7 +712,7 @@ class JoinQuantRuntime:
             status = OrderStatus.held
         price = self.context.market.current_price(order.symbol)
         return JQOrder(
-            security=order.symbol,
+            security=self._display_symbol(order.symbol),
             order_id=order.order_id,
             amount=amount,
             filled=filled,
@@ -720,7 +818,9 @@ class JoinQuantRuntime:
             "calc_factors": self.calc_factors,
             "get_index_stocks": self.get_index_stocks,
             "get_industry": self.get_industry,
+            "get_industry_stocks": self.get_industry_stocks,
             "get_extras": self.get_extras,
+            "get_history_fundamentals": self.get_history_fundamentals,
             "cancel_order": self.cancel_order,
             "get_orders": self.get_orders,
             "get_open_orders": self.get_open_orders,
@@ -775,7 +875,7 @@ class _CurrentData:
         self._master = master
 
     def __getitem__(self, symbol: str) -> "_SecurityData":
-        return _SecurityData(self._market, symbol, self._master)
+        return _SecurityData(self._market, normalize_security(symbol), self._master)
 
 
 class _SecurityData:
@@ -961,30 +1061,59 @@ def _long_frames(
     *,
     skip_paused: bool = False,
 ) -> pd.DataFrame:
-    """多标的 ``panel=False`` 长表：一次 melt/merge，避免逐标的构造。"""
+    """多标的 ``panel=False`` 长表：一次构造，避免逐字段 melt + merge。
+
+    聚宽策略经常按日对全市场取长表（如涨停黑名单），原先的
+    ``melt`` + ``merge`` 在 26×5000 的窗口上要 3 秒；改为列优先拉平后
+    直接拼装，同一规模约 20 毫秒。
+    """
 
     available = [field for field in fields if field in frames]
-    if not available:
-        return pd.DataFrame(columns=["time", "code", *fields])
-    symbol_index = pd.Index(symbols)
-    merged: pd.DataFrame | None = None
+    sliced: list[tuple[str, pd.DataFrame]] = []
+    index: pd.Index | None = None
     for field in available:
-        frame = frames[field].reindex(columns=symbol_index)
+        frame = frames[field]
         if frame.empty:
             continue
-        long = (
-            frame.rename_axis("time")
-            .reset_index()
-            .melt(id_vars="time", var_name="code", value_name=field)
-        )
-        if merged is None:
-            merged = long
-        else:
-            merged = merged.merge(
-                long, on=["time", "code"], how="outer", sort=False
-            )
-    if merged is None:
+        if index is None:
+            index = frame.index
+        elif not frame.index.equals(index):
+            # 行索引不一致时对齐到场内共同的行序，保持与 merge 一致的外连接语义。
+            index = index.union(frame.index)
+        sliced.append((field, frame))
+    available = [field for field, _ in sliced]
+    if not sliced or index is None:
         return pd.DataFrame(columns=["time", "code", *fields])
+    symbol_index = pd.Index(symbols)
+    matrices: dict[str, np.ndarray] = {}
+    numeric = True
+    for field, frame in sliced:
+        if not frame.index.equals(index):
+            frame = frame.reindex(index)
+        frame = frame.reindex(columns=symbol_index)
+        if not all(pd.api.types.is_numeric_dtype(dtype) for dtype in frame.dtypes):
+            numeric = False
+            break
+        matrices[field] = frame.to_numpy(dtype=np.float64, copy=False)
+    if numeric:
+        length = len(index)
+        data: dict[str, Any] = {
+            "time": np.repeat(index.to_numpy(), len(symbol_index)),
+            "code": np.tile(symbol_index.to_numpy(), length),
+        }
+        for field, matrix in matrices.items():
+            data[field] = matrix.ravel()
+        merged = pd.DataFrame(data)
+    else:
+        pieces = []
+        for field, frame in sliced:
+            if not frame.index.equals(index):
+                frame = frame.reindex(index)
+            series = frame.reindex(columns=symbol_index).stack()
+            series.name = field
+            pieces.append(series)
+        merged = pd.concat(pieces, axis=1).reset_index()
+        merged.columns = ["time", "code", *available]
     if skip_paused:
         merged = merged.dropna(subset=available, how="all")
     return merged[["time", "code", *available]].reset_index(drop=True)

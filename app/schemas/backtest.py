@@ -199,6 +199,9 @@ class StrategyBacktestRequest(BaseModel):
     #: 按时点调度：策略可用 schedule.daily(cb, time="14:50") 注册盘中回调；
     #: 成交价取下单时点的盘中价，15:00 之后的订单挂到次日开盘。
     timed_execution: bool = False
+    #: 额外并入行情面板的 ETF 代码（如货币 ETF 511880 做现金管理）。
+    #: ETF 不在股票池数据里，引擎会从视图的 free/etf_daily 单独加载。
+    extra_symbols: list[str] = Field(default_factory=list)
     initial_capital: float = Field(1_000_000.0, gt=0)
     #: 返回持仓权重（前端画持仓图用）
     include_positions: bool = False
@@ -422,6 +425,12 @@ class StrategyBacktestMeta(BaseModel):
     strategy_id: Optional[str] = None
     strategy_version: Optional[str] = None
     code_hash: Optional[str] = None
+    #: 本次回测实际绑定的行情发布；与因子回测同口径，供报告自证数据版本。
+    data_release_id: Optional[str] = None
+    #: 请求 + 数据发布的规范化指纹（不含 run_id），同一输入可复现同一结果。
+    spec_hash: Optional[str] = None
+    #: 本次任务 id；同步接口也会返回，便于把报告与运行日志对应起来。
+    run_id: Optional[str] = None
     #: 本次请求的过滤开关回显；事件模式下前三个由撮合层常开拒单覆盖
     filter_suspended: bool = False
     filter_st: bool = False

@@ -1,0 +1,44 @@
+schema_version: 1
+name: free_cash_flow
+description: 自由现金流轮动（最新版 v3）：399101 股票池、20 只、月频。收益层对账：只有聚宽导出的收益曲线，L1–L3 暂不比对。
+
+jq:
+  backtest_id: "company-latest-free_cash_flow"
+  frequency: day
+  run_time: "09:30"
+  start: "2016-09-30"
+  end: "2026-09-30"
+  initial_cash: 1000000
+  benchmark: "000300.XSHG"
+  options:
+    use_real_price: true
+    slippage: 0.002
+    commission: 0.0003
+    stamp_tax: 0.001
+    min_commission: 5
+
+svquant:
+  engine_mode: event
+  strategy_source: jq_strategy.py
+  strategy_dialect: joinquant
+  timed_execution: true
+  execution_timing: next_open
+  execution_price_source: unadjusted
+  universe: CSI_ALL
+  benchmark: CSI300
+  initial_capital: 1000000
+  commission_rate: 0.0003
+  stamp_tax: 0.001
+  min_commission: 5
+  slippage_rate: 0.002
+
+comparison:
+  price_basis: real
+  # 只有收益曲线：只比参数/日历、每日与累计收益、收益指标。
+  layers: [L0, L4, L5]
+  strict_layers: [L0, L4, L5]
+  acceptance: diagnostic
+
+tolerances:
+  return_abs: 1.0e-3
+  metric_rel: 1.0e-3

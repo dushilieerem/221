@@ -863,7 +863,18 @@ def run_strategy_backtest(
     manager: ExperimentManager,
 ) -> StrategyBacktestResponse:
     """同步等待应用级 Manager 中的策略回测。"""
-    return submit_strategy_backtest(req, manager).result()
+    handle = submit_strategy_backtest(req, manager)
+    return _attach_run_id(handle.result(), handle.run_id)
+
+
+def _attach_run_id(
+    response: StrategyBacktestResponse, run_id: str
+) -> StrategyBacktestResponse:
+    """把任务 id 回填到 meta；错误响应的 meta 为 None 时跳过。"""
+
+    if response.meta is not None:
+        response.meta.run_id = run_id
+    return response
 
 
 async def run_strategy_backtest_async(
@@ -873,7 +884,8 @@ async def run_strategy_backtest_async(
 ) -> StrategyBacktestResponse:
     """HTTP 层使用的异步等待门面。"""
     handle = submit_strategy_backtest(req, manager)
-    return await asyncio.wrap_future(handle.future)
+    response = await asyncio.wrap_future(handle.future)
+    return _attach_run_id(response, handle.run_id)
 
 
 def _run_event_strategy_backtest(

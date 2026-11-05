@@ -1,0 +1,49 @@
+schema_version: 1
+name: pb_v3
+description: 破净组合 v3：五因子合成 Top8、行业上限 2、三补单窗口（2016-09-30 ~ 2026-09-30，聚宽分钟回测）
+
+jq:
+  backtest_id: "value-v3-pb_v3"
+  frequency: minute
+  run_time: "09:30"
+  start: "2016-09-30"
+  end: "2026-09-30"
+  initial_cash: 100000
+  benchmark: "000300.XSHG"
+  options:
+    use_real_price: true
+    slippage: 0.001
+    commission: 0.00012
+    stamp_tax: 0.001
+    min_commission: 5
+
+svquant:
+  engine_mode: event
+  strategy_source: jq_strategy.py
+  strategy_dialect: joinquant
+  timed_execution: true
+  execution_timing: next_open
+  execution_price_source: unadjusted
+  universe: CSI_ALL
+  benchmark: CSI300
+  initial_capital: 100000
+  commission_rate: 0.00012
+  stamp_tax: 0.001
+  min_commission: 5
+  slippage_rate: 0.001
+  # 货币 ETF 现金管理：ETF 不在股票池数据里，从视图 free/etf_daily 单独并入面板。
+  extra_symbols: ["511880.SH"]
+
+comparison:
+  price_basis: real
+  layers: [L0, L1, L2, L3, L4, L5]
+  strict_layers: [L0, L1, L2, L3, L4, L5]
+  acceptance: diagnostic
+
+tolerances:
+  quantity: 0
+  price_abs: 0.02
+  cash_abs: 0.01
+  equity_rel: 1.0e-6
+  return_abs: 1.0e-3
+  metric_rel: 1.0e-3

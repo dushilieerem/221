@@ -121,11 +121,25 @@ class CaseSpec:
         return str(self.comparison.get("price_basis", "hfq")).lower()
 
     @property
+    def layers(self) -> set[str]:
+        """本轮启用的比对层；只有收益曲线的金标只声明 L0/L4/L5。"""
+
+        raw = self.comparison.get("layers")
+        if raw is None:
+            return {"L0", "L1", "L2", "L3", "L4", "L5"}
+        selected = {str(item).upper() for item in raw}
+        unknown = selected - {"L0", "L1", "L2", "L3", "L4", "L5"}
+        if unknown:
+            raise ValueError(f"未知的比对层: {sorted(unknown)}")
+        return selected
+
+    @property
     def strict_layers(self) -> set[str]:
         raw = self.comparison.get("strict_layers")
         if raw is None:
-            return {"L0", "L1", "L2", "L3", "L4", "L5"}
-        return {str(item).upper() for item in raw}
+            return set(self.layers)
+        # 只声明了部分层时，strict 也只能落在启用的层上。
+        return {str(item).upper() for item in raw} & self.layers
 
     def strategy_path(self, side: str, default_name: str):
         """``side`` 为 ``jq`` 或 ``svquant``；相对路径按用例目录解析。"""

@@ -24,13 +24,13 @@ FINANCIAL_MAP: dict[tuple[str, str], tuple[str, str]] = {
     ("balance", "total_assets"): ("balance", "tot_assets"),
     ("balance", "total_liability"): ("balance", "tot_liab"),
     ("balance", "total_owner_equities"): ("balance", "total_equity"),
-    ("income", "operating_revenue"): ("income", "revenue"),
+    # operating_revenue / np_parent_company_owners 是年内累计，源数据是单季度，
+    # 由 _derive_income_fields 按年内累加派生（见 FINANCIAL_EXPRESSIONS）。
     ("income", "net_profit"): ("income", "net_profit_incl_min_int_inc"),
-    ("income", "np_parent_company_owners"): ("income", "net_profit_excl_min_int_inc"),
     ("cash_flow", "net_operate_cash_flow"): ("cashflow", "net_cash_flows_oper_act"),
     ("cash_flow", "fix_intan_other_asset_acqui_cash"): ("cashflow", "cash_pay_acq_const_fiolta"),
     ("indicator", "eps"): ("pershare_index", "s_fa_eps_basic"),
-    ("indicator", "roa"): ("pershare_index", "roa"),
+    # indicator.roa 在聚宽是「单季净利润 / 平均总资产」，由 _single_quarter_roa 派生。
     ("indicator", "roe"): ("pershare_index", "equity_roe"),
     ("indicator", "inc_return"): ("pershare_index", "equity_roe"),
     ("indicator", "gross_profit_margin"): ("pershare_index", "gross_margin"),
@@ -41,6 +41,8 @@ FINANCIAL_MAP: dict[tuple[str, str], tuple[str, str]] = {
 
 #: 由利润表原始列派生的聚宽字段；净利润一律按**归母**口径（聚宽 indicator 表口径）。
 FINANCIAL_EXPRESSIONS: dict[tuple[str, str], tuple[str, str]] = {
+    ("income", "operating_revenue"): ("income", "营业额年内累计"),
+    ("income", "np_parent_company_owners"): ("income", "归母净利润年内累计"),
     ("income", "adjusted_profit_to_profit"): (
         "income",
         "扣非归母净利润(累计) / 归母净利润(累计)",
@@ -60,6 +62,8 @@ FINANCIAL_EXPRESSIONS: dict[tuple[str, str], tuple[str, str]] = {
 #: ``net_profit_excl_min_int_inc`` 与 ``deducted_net_profit`` 是单季度口径，
 #: 累计值必须按年内累加，不能与累计净利润直接相除。
 EXPRESSION_COLUMNS: dict[tuple[str, str], tuple[str, ...]] = {
+    ("income", "operating_revenue"): ("revenue",),
+    ("income", "np_parent_company_owners"): ("net_profit_excl_min_int_inc",),
     ("income", "adjusted_profit_to_profit"): (
         "net_profit_incl_min_int_inc_after",
         "net_profit_excl_min_int_inc",
@@ -73,6 +77,19 @@ EXPRESSION_COLUMNS: dict[tuple[str, str], tuple[str, ...]] = {
     ),
 }
 
+
+def _to_single_quarter(frame: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    """把年内累计的现金流量字段差分成单季度；年初首期保持原值。"""
+
+    data = frame.copy()
+    year = data["m_timetag"].astype(str).str[:4]
+    for column in dict.fromkeys(columns):
+        if column not in data.columns:
+            continue
+        values = pd.to_numeric(data[column], errors="coerce")
+        previous = values.groupby([data["Symbol"], year]).shift(1)
+        data[column] = (values - previous).where(previous.notna(), values)
+    return data
 
 def _derive_income_fields(frame: pd.DataFrame) -> pd.DataFrame:
     """在利润表全量可见行上派生聚宽口径字段（索引与入参一致）。
@@ -97,6 +114,12 @@ def _derive_income_fields(frame: pd.DataFrame) -> pd.DataFrame:
     cum = parent_cum.to_numpy(dtype=float)
 
     out = pd.DataFrame(index=data.index)
+    if "revenue" in data.columns:
+        out["operating_revenue"] = pd.to_numeric(
+            data["revenue"], errors="coerce"
+        ).groupby([data["Symbol"], period.str[:4]]).cumsum().to_numpy(dtype=float)
+    if "net_profit_excl_min_int_inc" in data.columns:
+        out["np_parent_company_owners"] = cum
     if "net_profit_incl_min_int_inc_after" in data.columns:
         deducted = pd.to_numeric(
             data["net_profit_incl_min_int_inc_after"], errors="coerce"
@@ -141,6 +164,7 @@ class FundamentalStore:
         self.fin = self.root / "3_financial_data"
         self.valuation = self.root / "5_technical_derived" / "valuation"
         self._valuation_cache: dict[str, pd.DataFrame] = {}
+        self._roa_cache: dict[str, pd.Series] = {}
 
     def query(self, q: Query, *, as_of: str) -> pd.DataFrame:
         as_of_key = as_of.replace("-", "")
@@ -151,9 +175,26 @@ class FundamentalStore:
         needed.extend(_condition_fields(q.where))
         needed = list(dict.fromkeys(needed))
 
+        # 聚宽 indicator 的 roa / inc_return / 两个同比字段都是**单季度**口径，
+        # 源表是累计值或厂商比率，统一由此处按财报重算。
+        derived_indicator_names = {
+            "roa",
+            "inc_return",
+            "inc_total_revenue_year_on_year",
+            "inc_net_profit_year_on_year",
+        }
+        needed_indicators = {
+            field.name
+            for field in needed
+            if field.table == "indicator" and field.name in derived_indicator_names
+        }
         financial = [
             field for field in needed
             if field.name != "code"
+            and not (
+                field.table == "indicator"
+                and field.name in derived_indicator_names
+            )
             and (
                 (field.table, field.name) in FINANCIAL_MAP
                 or (field.table, field.name) in FINANCIAL_EXPRESSIONS
@@ -173,11 +214,24 @@ class FundamentalStore:
             val = self._valuation_frame(as_of_key)
             frame = val if frame.empty else frame.merge(val, on="symbol", how="inner")
 
+        indicators = (
+            self._single_quarter_indicators(as_of_key)
+            if needed_indicators
+            else pd.DataFrame()
+        )
+        if frame.empty and not indicators.empty:
+            frame = indicators.reset_index().rename(columns={"Symbol": "symbol"})
         if frame.empty:
             return pd.DataFrame(columns=["code", *[f.name for f in q.fields]])
 
         for table in code_tables:
             frame[f"{table}.code"] = frame["symbol"]
+
+        if needed_indicators and not indicators.empty:
+            aligned = indicators.reindex(frame["symbol"]).reset_index(drop=True)
+            for name in needed_indicators:
+                if name in aligned.columns:
+                    frame[f"indicator.{name}"] = aligned[name].to_numpy(dtype=float)
 
         if q.where is not None:
             frame = frame[evaluate(frame, q.where)]
@@ -262,6 +316,198 @@ class FundamentalStore:
         if merged is None:
             return pd.DataFrame()
         return merged
+
+    def history(
+        self,
+        fields: list[Field],
+        securities: list[str],
+        *,
+        watch_date: str | pd.Timestamp,
+        count: int,
+    ) -> pd.DataFrame:
+        """聚宽 ``get_history_fundamentals`` 的最小实现。
+
+        返回 ``code / statDate / <字段>`` 长表，只包含 ``watch_date`` 当日已公告的
+        最近 ``count`` 个报告期；合并报表（``report_type=0``）只有一套，无需区分。
+        """
+
+        as_of = pd.Timestamp(watch_date).strftime("%Y%m%d")
+        by_statement: dict[str, list[Field]] = {}
+        for field in fields:
+            mapped = FINANCIAL_MAP.get((field.table, field.name))
+            if mapped is None:
+                raise KeyError(f"get_history_fundamentals 未映射字段: {field.table}.{field.name}")
+            by_statement.setdefault(mapped[0], []).append(field)
+
+        merged: pd.DataFrame | None = None
+        wanted = set(securities)
+        for statement, items in by_statement.items():
+            raw_columns = [FINANCIAL_MAP[(f.table, f.name)][1] for f in items]
+            frame = visible(load_statement(self.root, statement, raw_columns), as_of)
+            if frame.empty:
+                continue
+            frame = frame.loc[frame["Symbol"].isin(wanted)]
+            if frame.empty:
+                continue
+            frame = frame.sort_values(["Symbol", "m_timetag"], kind="stable")
+            if statement == "cashflow":
+                # 聚宽 get_history_fundamentals(interval='1q') 返回单季度流量，
+                # 源表是年内累计，先按年内差分。
+                frame = _to_single_quarter(frame, raw_columns)
+            frame = frame.groupby("Symbol", group_keys=False).tail(int(count))
+            output = pd.DataFrame({"code": frame["Symbol"].to_numpy()})
+            output["statDate"] = [
+                f"{str(value)[:4]}-{str(value)[4:6]}-{str(value)[6:8]}"
+                for value in frame["m_timetag"]
+            ]
+            for field in items:
+                mapped = FINANCIAL_MAP[(field.table, field.name)]
+                output[field.name] = pd.to_numeric(
+                    frame[mapped[1]], errors="coerce"
+                ).to_numpy(dtype=float)
+            merged = output if merged is None else merged.merge(
+                output, on=["code", "statDate"], how="inner"
+            )
+        if merged is None:
+            return pd.DataFrame(columns=["code", "statDate"])
+        return merged.reset_index(drop=True)
+
+    def _single_quarter_indicators(self, as_of: str) -> pd.DataFrame:
+        """聚宽 indicator 的单季度口径派生字段。
+
+        已与聚宽 ``get_fundamentals`` 导出的全市场逐值核对（2019-01-02）：
+        - ``roa`` = 单季净利润（含少数）/ 平均总资产 × 100
+        - ``inc_return`` = 单季**扣非**归母净利 / 平均归母净资产 × 100
+        - ``inc_total_revenue_year_on_year`` = 单季营收同比
+        - ``inc_net_profit_year_on_year`` = 单季归母净利同比
+        """
+
+        cached = self._roa_cache.get(as_of)
+        if cached is not None:
+            return cached
+        income = visible(
+            load_statement(
+                self.root,
+                "income",
+                [
+                    "revenue",
+                    "net_profit_incl_min_int_inc",
+                    "net_profit_excl_min_int_inc",
+                    "deducted_net_profit",
+                ],
+            ),
+            as_of,
+        )
+        try:
+            balance = visible(
+                load_statement(
+                    self.root,
+                    "balance",
+                    ["tot_assets", "tot_shrhldr_eqy_excl_min_int"],
+                ),
+                as_of,
+            )
+        except FileNotFoundError:
+            # 精简数据集（单测夹具）只有利润表时，仍然可以给同比字段；
+            # 需要净资产的 roa / inc_return 保持 NaN。
+            balance = pd.DataFrame(columns=[
+                "Symbol", "m_timetag", "tot_assets",
+                "tot_shrhldr_eqy_excl_min_int",
+            ])
+        if income.empty:
+            empty = pd.DataFrame()
+            self._roa_cache[as_of] = empty
+            return empty
+
+        income = income.sort_values(["Symbol", "m_timetag"], kind="stable").copy()
+        income = income.drop_duplicates(["Symbol", "m_timetag"], keep="last")
+        year = income["m_timetag"].astype(str).str[:4]
+        net_incl = pd.to_numeric(
+            income["net_profit_incl_min_int_inc"], errors="coerce"
+        )
+        prev_incl = net_incl.groupby(income["Symbol"]).shift(1)
+        prev_year = year.groupby(income["Symbol"]).shift(1)
+        same_year = prev_year.notna() & (prev_year == year)
+        single_incl = net_incl.where(~same_year, net_incl - prev_incl)
+
+        net_parent = pd.to_numeric(
+            income["net_profit_excl_min_int_inc"], errors="coerce"
+        )
+        deducted = pd.to_numeric(income["deducted_net_profit"], errors="coerce")
+        revenue = pd.to_numeric(income["revenue"], errors="coerce")
+        income["_roa_net"] = single_incl.to_numpy()
+        # 同比按「去年同一报告期」对齐，不用固定 4 行 shift：报告期缺失时
+        # 后者会错位。
+        period = income["m_timetag"].astype(str)
+        prior_period = (period.str[:4].astype(int) - 1).astype(str) + period.str[4:]
+        key = pd.MultiIndex.from_arrays([income["Symbol"], period])
+        prior_key = pd.MultiIndex.from_arrays([income["Symbol"], prior_period])
+
+        def year_on_year(values: pd.Series) -> pd.Series:
+            lookup = pd.Series(values.to_numpy(dtype=float), index=key)
+            prior = lookup.reindex(prior_key)
+            prior_values = prior.to_numpy(dtype=float)
+            current = values.to_numpy(dtype=float)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                ratio = np.where(
+                    np.isfinite(prior_values) & (prior_values != 0),
+                    (current - prior_values) / np.abs(prior_values) * 100.0,
+                    np.nan,
+                )
+            return pd.Series(ratio, index=income.index)
+
+        income["_net_yoy"] = year_on_year(net_parent)
+        income["_rev_yoy"] = year_on_year(revenue)
+        income["_deducted"] = deducted.to_numpy()
+        latest = income.drop_duplicates("Symbol", keep="last").set_index("Symbol")
+
+        balance = balance.sort_values(["Symbol", "m_timetag"], kind="stable").copy()
+        balance = balance.drop_duplicates(["Symbol", "m_timetag"], keep="last")
+        if balance.empty:
+            balance = pd.DataFrame(
+                {"Symbol": [], "_assets": [], "_equity": []}
+            )
+        else:
+            balance["_assets"] = pd.to_numeric(balance["tot_assets"], errors="coerce")
+            balance["_equity"] = pd.to_numeric(
+                balance["tot_shrhldr_eqy_excl_min_int"], errors="coerce"
+            )
+        balance["_prev_assets"] = balance.groupby("Symbol")["_assets"].shift(1)
+        balance["_prev_equity"] = balance.groupby("Symbol")["_equity"].shift(1)
+        latest_balance = (
+            balance.drop_duplicates("Symbol", keep="last").set_index("Symbol")
+            if not balance.empty
+            else pd.DataFrame(index=latest.index, columns=["_assets", "_equity", "_prev_assets", "_prev_equity"])
+        )
+        if not balance.empty:
+            latest_balance = latest_balance.reindex(latest.index)
+
+        assets = latest_balance["_assets"]
+        average_assets = (assets + latest_balance["_prev_assets"]) / 2.0
+        average_assets = average_assets.where(average_assets > 0, assets)
+        equity = latest_balance["_equity"]
+        average_equity = (equity + latest_balance["_prev_equity"]) / 2.0
+        average_equity = average_equity.where(average_equity > 0, equity)
+
+        result = pd.DataFrame({
+            "roa": latest["_roa_net"] / average_assets * 100.0,
+            "inc_return": latest["_deducted"] / average_equity * 100.0,
+            "inc_total_revenue_year_on_year": latest["_rev_yoy"],
+            "inc_net_profit_year_on_year": latest["_net_yoy"],
+        })
+        result = result.replace([np.inf, -np.inf], np.nan).astype(float)
+        if len(self._roa_cache) > 64:
+            self._roa_cache.clear()
+        self._roa_cache[as_of] = result
+        return result
+
+    def _single_quarter_roa(self, as_of: str) -> pd.Series:
+        """兼容旧调用：返回 ``_single_quarter_indicators`` 的 roa 列。"""
+
+        frame = self._single_quarter_indicators(as_of)
+        if frame.empty:
+            return pd.Series(dtype=float)
+        return frame["roa"]
 
     def _valuation_frame(self, as_of: str) -> pd.DataFrame:
         if not self.valuation.is_dir():

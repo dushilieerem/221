@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+from pathlib import Path
 
 from app.config import RuntimeSettings
 from app.services.data.engine import DataEngine
@@ -43,9 +44,15 @@ def reload_data_release(
     """
 
     with _RELOAD_LOCK:
+        # 用「未解析符号链接」的配置路径重新校验：视图轮换时链接已指向新
+        # 发布，而 settings.data_dir 是启动时解析出的旧绝对路径。
+        target_dir = settings.data_dir_configured or settings.data_dir
+        target_manifest = (
+            settings.data_manifest_configured or settings.data_manifest
+        )
         manifest = validate_data_manifest(
-            settings.data_dir,
-            manifest_path=settings.data_manifest,
+            target_dir,
+            manifest_path=target_manifest,
             expected_data_version=settings.expected_data_version,
             expected_manifest_sha256=settings.expected_manifest_sha256,
             verify_hashes=settings.verify_data_hashes,
@@ -94,6 +101,11 @@ class DataReleaseWatcher:
     def check_once(self) -> bool:
         """执行一次发布检查；完成切换时返回 ``True``。"""
 
+        # 配置里的 data.dir 可能是符号链接（如 views/current/ifind）。视图轮换
+        # 后链接指向新目录，但 provider 持有的是启动时解析出的旧绝对路径，
+        # 旧目录被清理后签名永远不变——必须先比较解析后的路径。
+        if self._linked_release_changed():
+            return self._reload()
         provider = getattr(self._engine, "provider", None)
         signature_of = getattr(provider, "current_release_signature", None)
         if provider is None or not callable(signature_of):
@@ -115,6 +127,35 @@ class DataReleaseWatcher:
             return False
         logger.info(
             "已切换到新行情 release: version=%s release_id=%s",
+            manifest.data_version,
+            self._engine.release_id,
+        )
+        self._pending_signature = None
+        return True
+
+    def _linked_release_changed(self) -> bool:
+        """配置路径（符号链接）解析后与已装载目录不一致即为视图轮换。"""
+
+        configured = (
+            getattr(self._settings, "data_dir_configured", None)
+            or getattr(self._settings, "data_dir", None)
+        )
+        active = getattr(self._engine, "data_dir", None)
+        if configured is None or active is None:
+            return False
+        try:
+            return Path(configured).resolve() != Path(active).resolve()
+        except OSError:  # 路径暂时不可用（写入中/权限），下一轮再判断
+            return False
+
+    def _reload(self) -> bool:
+        try:
+            manifest = reload_data_release(self._engine, self._settings)
+        except (DataManifestError, OSError, ValueError, RuntimeError) as exc:
+            logger.warning("配置路径已切换到新视图但重载未成功，保持当前 release: %s", exc)
+            return False
+        logger.info(
+            "已按配置路径切换行情 release: version=%s release_id=%s",
             manifest.data_version,
             self._engine.release_id,
         )

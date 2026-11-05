@@ -46,6 +46,7 @@ def build_request(case: CaseSpec) -> StrategyBacktestRequest:
             execution_price_source=str(config.get("execution_price_source", "adjusted")),
             strategy_dialect=str(config.get("strategy_dialect", "native")),
             timed_execution=bool(config.get("timed_execution", False)),
+            extra_symbols=list(config.get("extra_symbols", []) or []),
         )
     except ValueError as exc:
         raise ParityError(f"回测请求参数非法: {exc}") from exc

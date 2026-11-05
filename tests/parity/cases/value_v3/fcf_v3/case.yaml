@@ -1,0 +1,47 @@
+schema_version: 1
+name: fcf_v3
+description: 自由现金流轮动 v3：20 只、月频、1/4 月空仓（2016-09-30 ~ 2026-09-30，聚宽分钟回测）
+
+jq:
+  backtest_id: "value-v3-fcf_v3"
+  frequency: minute
+  run_time: "09:30"
+  start: "2016-09-30"
+  end: "2026-09-30"
+  initial_cash: 100000
+  benchmark: "000300.XSHG"
+  options:
+    use_real_price: true
+    slippage: 0.002
+    commission: 0.0003
+    stamp_tax: 0.001
+    min_commission: 5
+
+svquant:
+  engine_mode: event
+  strategy_source: jq_strategy.py
+  strategy_dialect: joinquant
+  timed_execution: true
+  execution_timing: next_open
+  execution_price_source: unadjusted
+  universe: CSI_ALL
+  benchmark: CSI300
+  initial_capital: 100000
+  commission_rate: 0.0003
+  stamp_tax: 0.001
+  min_commission: 5
+  slippage_rate: 0.002
+
+comparison:
+  price_basis: real
+  layers: [L0, L1, L2, L3, L4, L5]
+  strict_layers: [L0, L1, L2, L3, L4, L5]
+  acceptance: diagnostic
+
+tolerances:
+  quantity: 0
+  price_abs: 0.02
+  cash_abs: 0.01
+  equity_rel: 1.0e-6
+  return_abs: 1.0e-3
+  metric_rel: 1.0e-3

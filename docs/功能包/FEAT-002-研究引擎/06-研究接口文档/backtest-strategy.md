@@ -31,7 +31,7 @@ Web 端需要展示调仓或成交过程时，使用 `include_execution_timeline
 | `universe` | string | `CSI500` | 股票池。 |
 | `universe_snapshot` | object/null | `null` | WebApp 已鉴权并解析的静态证券池快照；仅向量化模式支持，且与 `universe` 至多传一个。 |
 | `start` / `end` | string/null | `null` | 回测区间，格式 `YYYY-MM-DD`。 |
-| `benchmark` | enum | `CSI300` | `CSI300`、`CSI500`、`CSI1000` 或 `SSE50`。 |
+| `benchmark` | enum | `CSI300` | `CSI300` 或 `CSI500`（请求模型目前只接受这两个值）。 |
 | `benchmark_snapshot` | object/null | `null` | WebApp 已鉴权并解析的固定权重组合基准快照；仅向量化模式支持，且与 `benchmark` 至多传一个。 |
 | `commission_rate` | number | `0.0` | 佣金率。向量化按换手率计提；事件按每笔成交额计提。 |
 | `slippage_rate` | number | `0.0` | 滑点率。向量化与佣金同项相加按换手计提；事件模式下**调整成交价**（买入向上、卖出向下）。 |
@@ -40,6 +40,7 @@ Web 端需要展示调仓或成交过程时，使用 `include_execution_timeline
 | `execution_timing` | enum | `next_close` | `same_close` \| `next_close` \| `next_open`；信号恒在 T 日收盘产生，控制何时、以什么价成交。详见「成交时点语义」。 |
 | `execution_price_source` | enum | `adjusted` | 仅事件模式：`adjusted` 用复权价成交与估值；`unadjusted` 用未复权价成交、估值、整手与费用，信号历史仍用复权价，持仓按复权比例每日缩放。详见「成交价来源」。 |
 | `timed_execution` | boolean | `false` | 仅事件模式：按时点调度。策略用 `schedule.daily(cb, time="14:50")` 注册盘中回调，成交价取下单时点的盘中价；15:00 之后的订单挂到次日开盘。详见「时点调度」。 |
+| `extra_symbols` | string[] | `[]` | 仅事件模式：额外并入行情面板的 ETF 代码（如货币基金 `511880.SH`）。ETF 不在股票池数据里，引擎从视图的 `free/etf_daily` 单独加载，参与撮合与估值但不算股票（`get_all_securities(['stock'])` 会排除）；卖出不收印花税。 |
 | `initial_capital` | number | `1000000` | 初始资金。 |
 | `include_positions` | boolean | `false` | 返回持仓权重快照。 |
 | `include_rebalance_logs` | boolean | `false` | 仅向量化模式返回目标权重变化日志；事件模式请使用 `include_execution_timeline`。 |
@@ -96,6 +97,16 @@ Web 端需要展示调仓或成交过程时，使用 `include_execution_timeline
 盘中成交价优先读 `high_frequency/1min`（按日文件、`(date, "HH:MM", symbol)`）；该日期没有分钟数据时，上午时点回退到日线开盘价、下午时点回退到日线收盘价。`assumptions.execution` 为 `timed`，`assumptions.intraday_price` 为 `1m` 或 `daily_open_close_fallback`。
 
 该语义来自聚宽日频回测实测：09:31 与 14:50 的市价单按当时的 `last_price` 成交，15:10 的订单状态为 `new`、当日不成交。仅支持 `engine_mode="event"`。
+
+## 额外 ETF 标的
+
+事件模式默认只交易股票池里的标的。策略需要持有货币 ETF 做现金管理时（例如破净 v3 的 `511880.XSHG`），用 `extra_symbols` 显式声明：
+
+- 行情来自视图的 `free/etf_daily`（ETF 不并入 `ifind/market_data` 股票池），按 `symbol + time` 与股票面板 join；
+- 策略里的聚宽代码（`511880.XSHG`）会被统一转换成 `511880.SH` 再查面板，持仓与订单回报仍按策略侧写法返回，保证策略内的字符串比较成立；
+- ETF 参与撮合、估值与涨跌停（按 10%），但 `get_all_securities(['stock'])` 不会返回它们；卖出不收印花税。
+
+区间内 ETF 没有行情时对应列为空，引擎按停牌处理（不能成交）；缺少数据集时直接报错，不会静默跳过。
 
 ## 交易成本语义
 
@@ -400,6 +411,7 @@ Web 端需要展示调仓或成交过程时，使用 `include_execution_timeline
 | 年度收益（`annual_returns`） | `year`、`return_value` | 自然年份及该年首末有效净值点计算的收益率。 |
 | 元信息（`meta`） | `strategy`、`universe`、`benchmark`、`engine_mode` | 实际执行的策略类名、股票池、基准和回测引擎模式。 |
 | 已保存策略元信息（`meta`） | `strategy_id`、`strategy_version`、`code_hash` | 仅通过 `strategy_id` 运行时有值：策略 ID、实际使用版本和源码 SHA-256 哈希；直接提交源码时均为 `null`。 |
+| 运行标识（`meta`） | `data_release_id`、`spec_hash`、`run_id` | `data_release_id` 为本次实际绑定的行情发布（与因子回测同口径）；`spec_hash` 是「请求参数 + 数据发布」的 SHA-256，不含运行期 id，同一输入可复现；`run_id` 为本次任务 id（同步接口同样返回），用于把报告与运行日志对应。三者都由引擎真实返回，调用方不应从页面 `current` 推断。 |
 | 过滤开关回显（`meta`） | `filter_suspended`、`filter_st`、`filter_limit_up`、`filter_limit_down` | 本次请求的四个过滤开关原样回显。 |
 | 过滤诊断（`meta.filter_status`） | `is_suspended`、`is_st`、`is_limit_up`、`is_limit_down` | 四项过滤各自的执行状态：`disabled`（开关关闭或字段缺失且被跳过）、`skipped_missing_field`（字段缺失，放行）、`enabled` / `enabled_partial`（生效，后者表示部分状态值缺失并按放行处理）；事件模式下前三个常为 `matcher_always_on`，表示由撮合层无条件拦截、不受开关影响。 |
 | 持仓快照（`positions`） | `date`、`holdings` | `holdings` 是 `{symbol, name, weight}` 数组。`symbol` 为带交易所后缀的代码（如 `000001.SZ`），`name` 为证券名称，`weight` 为目标持仓权重。 |

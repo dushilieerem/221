@@ -79,9 +79,21 @@ def golden_dir(case: CaseSpec) -> Path:
     return Path(case.path) / "expected"
 
 
+#: 需要成交/持仓才能比的层；只有收益的金标不声明这些层。
+_TRADE_LAYERS = {"L1", "L2", "L3"}
+
+
+def _needs_trades(case: CaseSpec) -> bool:
+    return bool(case.layers & _TRADE_LAYERS)
+
+
 def golden_available(case: CaseSpec) -> bool:
     directory = golden_dir(case)
-    return (directory / "daily.csv").is_file() and (directory / "positions.csv").is_file()
+    if not (directory / "daily.csv").is_file():
+        return False
+    if _needs_trades(case) and not (directory / "positions.csv").is_file():
+        return False
+    return True
 
 
 def load_golden(case: CaseSpec) -> GoldenRun:
@@ -104,7 +116,20 @@ def load_golden(case: CaseSpec) -> GoldenRun:
             raise ParityError(f"{meta_path}: meta.json 必须是对象")
 
     daily = _normalize_daily(_read_csv(directory / "daily.csv"), case, meta)
-    positions = _normalize_positions(_read_csv(directory / "positions.csv"))
+    positions_path = directory / "positions.csv"
+    if positions_path.is_file():
+        positions = _normalize_positions(_read_csv(positions_path))
+    elif _needs_trades(case):
+        raise ParityError(f"金标缺少 positions.csv: {positions_path}")
+    else:
+        positions = pd.DataFrame(
+            {
+                "date": pd.Series(dtype="datetime64[ns]"),
+                "symbol": pd.Series(dtype="object"),
+                "quantity": pd.Series(dtype="float64"),
+                "closeable": pd.Series(dtype="float64"),
+            }
+        )
     fills = _normalize_orders(_read_optional(directory / "orders.csv"))
 
     balances_path = directory / "balances.csv"

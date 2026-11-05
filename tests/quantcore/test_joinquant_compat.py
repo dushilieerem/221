@@ -593,3 +593,263 @@ def test_compat_log_handles_message_without_placeholders(caplog):
         logger.warn("仓位 %.1f%%", 19.8)
     assert "skip sell at low limit 002921.SZ 联诚精密" in caplog.text
     assert "仓位 19.8%" in caplog.text
+
+
+def test_history_fundamentals_returns_single_quarter_cashflow(tmp_path):
+    """聚宽 get_history_fundamentals 返回单季度流量；源表是年内累计。"""
+    from app.services.strategy.compat.financial_cache import clear_cache
+    from app.services.strategy.compat.fundamentals import FundamentalStore
+    from app.services.strategy.compat.query import cash_flow
+
+    clear_cache()
+    root = tmp_path / "3_financial_data" / "cashflow"
+    root.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "Symbol": ["600000.SH"] * 4,
+            "m_timetag": ["20240331", "20240630", "20240930", "20241231"],
+            "m_anntime": ["20240425", "20240825", "20241025", "20250425"],
+            # 年内累计：Q1 1、H1 3、Q3 6、全年 10。
+            "net_cash_flows_oper_act": [1.0, 3.0, 6.0, 10.0],
+        }
+    ).to_parquet(root / "600000.SH.parquet")
+
+    store = FundamentalStore(root=tmp_path)
+    frame = store.history(
+        [cash_flow.net_operate_cash_flow],
+        ["600000.SH"],
+        watch_date="2025-04-30",
+        count=4,
+    )
+
+    assert frame["statDate"].tolist() == [
+        "2024-03-31", "2024-06-30", "2024-09-30", "2024-12-31",
+    ]
+    assert frame["net_operate_cash_flow"].tolist() == [1.0, 2.0, 3.0, 4.0]
+    clear_cache()
+
+
+def test_finance_income_statement_returns_cumulative_fields(tmp_path):
+    from app.services.strategy.compat.finance import FinanceNamespace
+    from app.services.strategy.compat.financial_cache import clear_cache
+    from app.services.strategy.compat.query import Field, Query
+
+    clear_cache()
+    income_dir = tmp_path / "3_financial_data" / "income"
+    income_dir.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "Symbol": ["600000.SH"],
+            "m_timetag": ["20241231"],
+            "m_anntime": ["20250425"],
+            "revenue": [10.0],
+            "total_operating_cost": [7.0],
+            "less_taxes_surcharges_ops": [0.5],
+            "sale_expense": [0.5],
+            "less_gerl_admin_exp": [1.0],
+            "research_expenses": [0.2],
+            "financial_expense": [0.1],
+            "less_impair_loss_assets": [float("nan")],
+            "net_profit_excl_min_int_inc": [3.0],
+        }
+    ).to_parquet(income_dir / "600000.SH.parquet")
+
+    namespace = FinanceNamespace(tmp_path)
+    table = "finance.STK_INCOME_STATEMENT"
+    q = Query(
+        fields=[
+            Field(table, "code"),
+            Field(table, "total_operating_revenue"),
+            Field(table, "operating_cost"),
+            Field(table, "np_parent_company_owners"),
+        ]
+    ).filter(Field(table, "code").in_(["600000.SH"]))
+
+    frame = namespace.run_query(q)
+
+    row = frame.iloc[0]
+    assert row["total_operating_revenue"] == pytest.approx(10.0)
+    # 营业总成本 7 减去税金/销售/管理/研发/财务（减值缺失按 0）。
+    assert row["operating_cost"] == pytest.approx(7.0 - 0.5 - 0.5 - 1.0 - 0.2 - 0.1)
+    assert row["np_parent_company_owners"] == pytest.approx(3.0)
+    clear_cache()
+
+
+def test_industry_store_lists_stocks_by_sw_code(tmp_path):
+    """get_industry_stocks 按申万一级代码取成分，忽略 .SI 后缀。"""
+    from app.services.strategy.compat.industry import IndustryStore
+
+    data_dir = tmp_path / "ifind"
+    data_dir.mkdir()
+    derived = tmp_path / "derived" / "industry_daily" / "year=2024"
+    derived.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "date": ["2024-01-02", "2024-01-02", "2024-01-02"],
+            "symbol": ["600519.SH", "000858.SZ", "000001.SZ"],
+            "sw_l1_code": ["801120.SI", "801120.SI", "801780.SI"],
+            "sw_l1_name": ["食品饮料", "食品饮料", "银行"],
+            "ths_code": ["S34", "S34", "S48"],
+        }
+    ).to_parquet(derived / "part.parquet")
+
+    store = IndustryStore(data_dir)
+
+    assert store.stocks("801120", "2024-01-02") == ["600519.SH", "000858.SZ"]
+    assert store.stocks("801780.SI", "2024-01-02") == ["000001.SZ"]
+    assert store.stocks("801999", "2024-01-02") == []
+    # 非快照日取之前最近一个快照。
+    assert store.stocks("801120", "2024-03-01") == ["600519.SH", "000858.SZ"]
+
+
+def test_strip_imports_keeps_try_block_valid():
+    """被移除的导入位于 try 块时，不能留下空块。"""
+    from app.services.strategy.compat.loader import strip_joinquant_imports
+
+    source = """
+def f():
+    try:
+        from jqfactor import get_factor_values
+    except Exception:
+        return None
+    return get_factor_values
+"""
+
+    cleaned = strip_joinquant_imports(source)
+
+    compile(cleaned, "<strategy>", "exec")
+    assert "pass  # 聚宽导入由兼容层注入" in cleaned
+
+
+PAUSED_PROBE = """
+def initialize(context):
+    g.paused = None
+    run_daily(probe, time='09:31')
+
+def probe(context):
+    if g.paused is not None:
+        return
+    frame = get_price('000001.SZ', start_date='2024-01-02', end_date='2024-01-04',
+                      fields=['close', 'paused'], panel=False)
+    g.paused = frame['paused'].tolist()
+"""
+
+
+def test_get_price_exposes_paused_flag():
+    adjusted, unadjusted = _panels()
+    adjusted["up_and_down_status"] = pd.DataFrame(
+        {SYMBOL: ["非涨跌停", "停牌", "非涨跌停"]}, index=DATES
+    )
+    engine = EventBacktestEngine(
+        adjusted,
+        EventBacktestConfig(
+            initial_capital=100_000.0,
+            commission_rate=0.0,
+            min_commission=0.0,
+            stamp_tax_rate=0.0,
+            slippage_rate=0.0,
+            execution_price_source="unadjusted",
+            timed_execution=True,
+        ),
+        execution_panels=unadjusted,
+        intraday_price=lambda date, time, symbol: 10.1 if time == "09:31" else None,
+    )
+    strategy = load_joinquant_strategy(PAUSED_PROBE)
+    engine.run(strategy)
+
+    assert strategy.runtime.g.paused == [0, 1, 0]
+
+
+def test_query_supports_field_to_field_comparison():
+    """聚宽 filter 里允许 valuation.code == balance.code。"""
+    from app.services.strategy.compat.query import (
+        Field, Query, evaluate,
+    )
+
+    q = Query(fields=[Field("valuation", "code")]).filter(
+        Field("valuation", "code") == Field("balance", "code")
+    )
+    frame = pd.DataFrame(
+        {
+            "valuation.code": ["000001.SZ", "600000.SH"],
+            "balance.code": ["000001.SZ", "000002.SZ"],
+        }
+    )
+    filtered = frame[evaluate(frame, q.where)]
+    assert filtered["valuation.code"].tolist() == ["000001.SZ"]
+
+
+def _income_fixture(tmp_path):
+    """两只股票、十个季度；revenue 是单季，成本费用是年内累计（与生产一致）。"""
+    from app.services.strategy.compat.financial_cache import clear_cache
+
+    clear_cache()
+    income_dir = tmp_path / "3_financial_data" / "income"
+    income_dir.mkdir(parents=True)
+    periods = [
+        "20220331", "20220630", "20220930", "20221231",
+        "20230331", "20230630", "20230930", "20231231",
+        "20240331", "20240630",
+    ]
+    years = [2022, 2022, 2022, 2022, 2023, 2023, 2023, 2023, 2024, 2024]
+    quarters = [1, 2, 3, 4, 1, 2, 3, 4, 1, 2]
+    ann = [f"{year}{month}" for year, month in zip(
+        [2022, 2022, 2022, 2023, 2023, 2023, 2023, 2024, 2024, 2024],
+        ["0425", "0825", "1025", "0425", "0425", "0825", "1025", "0425", "0425", "0825"],
+    )]
+    rows = []
+    expected = {}
+    for symbol, base in (("600000.SH", 10.0), ("600001.SH", 20.0)):
+        running = {}
+        cumulative_cost = []
+        for index, period in enumerate(periods):
+            single = base * (1 + index * 0.1)
+            running[years[index]] = running.get(years[index], 0.0) + single
+            cumulative = running[years[index]]
+            # 费用占营收 20%，营业成本固定为营收的 60%，毛利率恒为 40%。
+            cumulative_cost.append(cumulative * 0.6)
+            rows.append(
+                {
+                    "Symbol": symbol,
+                    "m_timetag": period,
+                    "m_anntime": ann[index],
+                    "revenue": single,
+                    "total_operating_cost": running[years[index]] * 0.8,
+                    "less_taxes_surcharges_ops": cumulative * 0.1,
+                    "sale_expense": cumulative * 0.05,
+                    "less_gerl_admin_exp": cumulative * 0.05,
+                    "research_expenses": 0.0,
+                    "financial_expense": 0.0,
+                    "less_impair_loss_assets": float("nan"),
+                    "net_profit_excl_min_int_inc": base * 0.2,
+                    "deducted_net_profit": base * 0.15,
+                }
+            )
+        # 最新一期 20240630：TTM = 本期累计 + 上年年报 - 上年同期累计。
+        expected[symbol] = cumulative_cost[9] + cumulative_cost[7] - cumulative_cost[5]
+    for symbol in ("600000.SH", "600001.SH"):
+        pd.DataFrame(rows).query("Symbol == @symbol").to_parquet(
+            income_dir / f"{symbol}.parquet"
+        )
+    return tmp_path, expected
+
+
+def test_vectorized_financial_factors_match_formulas(tmp_path):
+    from app.services.strategy.compat.factors import FactorStore
+    from app.services.strategy.compat.financial_cache import clear_cache
+
+    root, expected_cost = _income_fixture(tmp_path)
+    store = FactorStore(root=root, data_engine=object())
+
+    cost = store.compute("operating_cost_ttm", ["600000.SH"], as_of="2024-08-30")
+    assert cost["600000.SH"] == pytest.approx(expected_cost["600000.SH"])
+
+    non_recurring = store.compute(
+        "non_recurring_gain_loss", ["600000.SH"], as_of="2024-08-30"
+    )
+    assert non_recurring["600000.SH"] == pytest.approx(10.0 * 0.05)
+
+    degm = store.compute("DEGM", ["600000.SH"], as_of="2024-08-30")
+    # 毛利率恒为 40%，同比为 0。
+    assert degm["600000.SH"] == pytest.approx(0.0, abs=1e-12)
+    clear_cache()

@@ -36,6 +36,8 @@ class EventBacktestEngine:
         intraday_price=None,
         first_previous_date: object | None = None,
         active_start: object | None = None,
+        etf_symbols: set[str] | None = None,
+        symbol_aliases: dict[str, str] | None = None,
     ) -> None:
         missing = self.required_fields - panels.keys()
         if missing:
@@ -52,6 +54,12 @@ class EventBacktestEngine:
         else:
             self.dates = self._full_dates
         self.symbols = list(self.panels["close"].columns)
+        # 额外并入面板的 ETF：它们参与撮合与估值，但不算「股票」，
+        # get_all_securities(['stock']) 需要把它们排除。
+        self.etf_symbols = frozenset(etf_symbols or ())
+        # 策略里写死的代码（如 511880.XSHG）与引擎代码（511880.SH）之间的
+        # 别名；持仓与订单一律按策略侧的写法回报，保证字符串比较成立。
+        self.symbol_aliases = dict(symbol_aliases or {})
         if self.dates.empty:
             raise ValueError("事件回测没有可用交易日")
         # 首次/末次有效报价：聚宽兼容层的 get_all_securities 会逐标的查询，
@@ -59,6 +67,16 @@ class EventBacktestEngine:
         self._listing_bounds: (
             dict[str, tuple[pd.Timestamp | None, pd.Timestamp | None]] | None
         ) = None
+        # 逐日行缓存：宽表 ``frame.at[date, symbol]`` 的标量访问在策略高频
+        # 查询（current_data / 涨跌停状态）下会退化成 O(列) 的 pandas 定位，
+        # 每个交易日只把当天需要的行转成 dict，后续都是 O(1)。
+        self._row_cache: dict[tuple[int, pd.Timestamp], dict[str, object]] = {}
+        # 状态面板（ST / 停牌）的布尔矩阵缓存：宽表字符串比较按列很慢，
+        # 首次使用时整表向量化一次，之后每天只做 numpy 切片。
+        self._status_matrix_cache: dict[
+            tuple[str, str | tuple[str, ...]],
+            tuple[pd.Index, pd.Index, np.ndarray],
+        ] = {}
         # 聚宽 get_orders/get_open_orders 需要回看已处理订单与成交量。
         self._all_orders: list[EventOrder] = []
         self._all_fills: list[EventFill] = []
@@ -124,6 +142,21 @@ class EventBacktestEngine:
             else frozenset()
         )
 
+    def _run_params(self):
+        """聚宽 ``context.run_params`` 的最小实现（日频区间回测）。"""
+
+        from types import SimpleNamespace
+
+        dates = getattr(self, "dates", None)
+        start = dates[0].date() if dates is not None and len(dates) else None
+        end = dates[-1].date() if dates is not None and len(dates) else None
+        return SimpleNamespace(
+            type="simple_backtest",
+            frequency="day",
+            start_date=start,
+            end_date=end,
+        )
+
     def run(self, strategy) -> EventBacktestResult:
         if self.config.timed_execution:
             return self._run_timed(strategy)
@@ -132,6 +165,7 @@ class EventBacktestEngine:
         orders = OrderService()
         context = StrategyContext(data, orders, PortfolioView(ledger))
         context.market = _MarketView(self)
+        context.run_params = self._run_params()
         strategy.initialize(context)
         self._reset_order_history()
         all_orders = self._all_orders
@@ -143,6 +177,7 @@ class EventBacktestEngine:
         for index, date in enumerate(self.dates):
             timestamp = pd.Timestamp(date)
             self._current_date = timestamp
+            self._row_cache.clear()
             previous = self._previous_date(index)
             context.previous_date = previous.date() if previous is not None else None
             ledger.begin_session()
@@ -185,8 +220,7 @@ class EventBacktestEngine:
                     "reason_code": "DELISTED",
                 })
 
-            close_prices = self._mark_close.loc[date]
-            total_value = ledger.cash + sum(ledger.positions.get(symbol, 0) * float(close_prices[symbol]) for symbol in self.symbols if pd.notna(close_prices[symbol]))
+            total_value = self._portfolio_value(ledger, timestamp)
             equity.append(total_value)
             snapshots.append(PositionSnapshot(context.current_dt, ledger.cash, dict(ledger.positions), dict(ledger.sellable), total_value))
             events.append({"type": "SESSION_CLOSE", "timestamp": context.current_dt})
@@ -230,6 +264,7 @@ class EventBacktestEngine:
         orders = OrderService()
         context = StrategyContext(data, orders, PortfolioView(ledger))
         context.market = _MarketView(self)
+        context.run_params = self._run_params()
         strategy.initialize(context)
 
         registered = {normalize_time(item) for item in context.schedule.times()}
@@ -250,6 +285,7 @@ class EventBacktestEngine:
         for index, date in enumerate(self.dates):
             timestamp = pd.Timestamp(date)
             self._current_date = timestamp
+            self._row_cache.clear()
             previous = self._previous_date(index)
             context.previous_date = previous.date() if previous is not None else None
             ledger.begin_session()
@@ -301,12 +337,7 @@ class EventBacktestEngine:
 
             close_time = max("15:00", times[-1]) if times else "15:00"
             context.current_dt = self._at(timestamp, close_time)
-            close_prices = self._mark_close.loc[date]
-            total_value = ledger.cash + sum(
-                ledger.positions.get(symbol, 0) * float(close_prices[symbol])
-                for symbol in self.symbols
-                if pd.notna(close_prices[symbol])
-            )
+            total_value = self._portfolio_value(ledger, timestamp)
             equity.append(total_value)
             snapshots.append(PositionSnapshot(
                 context.current_dt,
@@ -494,6 +525,7 @@ class EventBacktestEngine:
         orders = OrderService(prefix=order_prefix)
         context = StrategyContext(data, orders, PortfolioView(ledger))
         context.market = _MarketView(self)
+        context.run_params = self._run_params()
         # 与区间回测一致：initialize 时尚未开放任何行情。
         strategy.initialize(context)
         merge_state(context.state, persisted_state)
@@ -697,7 +729,13 @@ class EventBacktestEngine:
         price = self._execution_price(price, side)
         value = quantity * price
         commission = max(value * self.config.commission_rate, self.config.min_commission)
-        stamp_tax = value * self.config.stamp_tax_rate if side == "sell" else 0.0
+        # ETF（基金份额）卖出不收印花税；聚宽 set_order_cost(type='fund') 同样不设。
+        tax_exempt = order.symbol in self.etf_symbols
+        stamp_tax = (
+            value * self.config.stamp_tax_rate
+            if side == "sell" and not tax_exempt
+            else 0.0
+        )
         if side == "buy":
             current_quantity = ledger.positions.get(order.symbol, 0)
             current_cost = ledger.average_cost.get(order.symbol, 0.0)
@@ -762,6 +800,39 @@ class EventBacktestEngine:
 
         return 0 if self.config.execution_timing == "same_close" else 1
 
+    def _row_values(
+        self, frame: pd.DataFrame | None, date: pd.Timestamp | None
+    ) -> dict[str, object] | None:
+        """把某一日整行转成 dict 并缓存；日期切换时清空。"""
+
+        if frame is None or date is None:
+            return None
+        key = (id(frame), date)
+        values = self._row_cache.get(key)
+        if values is None:
+            if date not in frame.index:
+                return None
+            values = frame.loc[date].to_dict()
+            if len(self._row_cache) > 64:
+                self._row_cache.clear()
+            self._row_cache[key] = values
+        return values
+
+    def _portfolio_value(self, ledger, date: pd.Timestamp) -> float:
+        """按收盘价估值：只遍历持仓，避免每天对全市场做 Series 标量定位。"""
+
+        row = self._row_values(self._mark_close, date)
+        total = float(ledger.cash)
+        if row is None:
+            return total
+        for symbol, quantity in ledger.positions.items():
+            if not quantity:
+                continue
+            price = row.get(symbol)
+            if price is not None and pd.notna(price):
+                total += float(quantity) * float(price)
+        return total
+
     def _price(self, symbol: str, date: pd.Timestamp) -> float | None:
         """当日成交参考价。
 
@@ -789,9 +860,12 @@ class EventBacktestEngine:
         self, symbol: str, date: pd.Timestamp, field: str
     ) -> float | None:
         frame = self._price_panels.get(field)
-        if frame is None or symbol not in frame.columns or date not in frame.index:
+        if frame is None or symbol not in frame.columns:
             return None
-        value = frame.at[date, symbol]
+        values = self._row_values(frame, date)
+        if values is None:
+            return None
+        value = values.get(symbol)
         return float(value) if pd.notna(value) and value > 0 else None
 
     def _price_at_time(
@@ -995,26 +1069,32 @@ class EventBacktestEngine:
             return None
         previous = self._full_dates[location - 1]
         frame = self._price_panels.get("close")
-        if frame is None or symbol not in frame.columns or previous not in frame.index:
+        if frame is None or symbol not in frame.columns:
             return None
-        value = frame.at[previous, symbol]
+        values = self._row_values(frame, previous)
+        if values is None:
+            return None
+        value = values.get(symbol)
         return float(value) if pd.notna(value) and value > 0 else None
 
     def _panel_text(self, panel: str, symbol: str) -> str | None:
         frame = self.panels.get(panel)
-        date = self._current_date
-        if frame is None or date is None:
+        if frame is None or symbol not in frame.columns:
             return None
-        if symbol not in frame.columns or date not in frame.index:
+        values = self._row_values(frame, self._current_date)
+        if values is None:
             return None
-        value = frame.at[date, symbol]
+        value = values.get(symbol)
         return None if pd.isna(value) else str(value).strip()
 
     def _status_matches(self, date: pd.Timestamp, symbol: str, pattern: str) -> bool:
         frame = self.panels.get("up_and_down_status")
-        if frame is None or symbol not in frame.columns or date not in frame.index:
+        if frame is None or symbol not in frame.columns:
             return False
-        value = frame.at[date, symbol]
+        values = self._row_values(frame, date)
+        if values is None:
+            return False
+        value = values.get(symbol)
         if pd.isna(value):
             return False
         text = str(value).strip()
@@ -1036,6 +1116,60 @@ class _MarketView:
 
     def __init__(self, engine: EventBacktestEngine) -> None:
         self._engine = engine
+
+    def _status_matrix(
+        self, name: str, values: str | tuple[str, ...]
+    ) -> tuple[pd.Index, pd.Index, np.ndarray] | None:
+        """把状态面板（字符串）一次性转成布尔矩阵并缓存。
+
+        状态面板是 Arrow 字符串宽表（2600×5900），任何按列的字符串比较
+        都要几秒；回测里每天都会按窗口取一次，必须预先向量化成 numpy。
+        """
+
+        engine = self._engine
+        key = (name, values)
+        cached = engine._status_matrix_cache.get(key)
+        if cached is not None:
+            return cached
+        panel = engine.panels.get(name)
+        if panel is None:
+            return None
+        mask = (
+            panel.isin(list(values))
+            if isinstance(values, tuple)
+            else panel.eq(values)
+        )
+        cached = (mask.index, mask.columns, mask.to_numpy(dtype=bool))
+        engine._status_matrix_cache[key] = cached
+        return cached
+
+    def _status_frame(
+        self,
+        cached: tuple[pd.Index, pd.Index, np.ndarray],
+        symbols: list[str],
+        *,
+        count: int | None = None,
+        start: object | None = None,
+        end: object | None = None,
+    ) -> pd.DataFrame:
+        """按行窗口与标的投影布尔矩阵；缺失标的按 False 处理。"""
+
+        index, columns, matrix = cached
+        positions = index
+        if start is not None:
+            positions = positions[positions >= pd.Timestamp(start)]
+        if end is not None:
+            positions = positions[positions <= pd.Timestamp(end)]
+        rows = index.get_indexer(positions)
+        if count is not None:
+            rows = rows[-int(count):]
+            positions = positions[-int(count):]
+        width = columns.get_indexer(pd.Index(symbols))
+        block = np.zeros((len(rows), len(width)), dtype=bool)
+        present = width >= 0
+        if rows.size and present.any():
+            block[:, present] = matrix[np.ix_(rows, width[present])]
+        return pd.DataFrame(block, index=positions, columns=symbols)
 
     def current_price(self, symbol: str) -> float | None:
         engine = self._engine
@@ -1064,6 +1198,24 @@ class _MarketView:
     def previous_close(self, symbol: str) -> float | None:
         return self._engine._previous_close(symbol)
 
+    def paused_panel(
+        self,
+        symbols: list[str],
+        *,
+        count: int | None = None,
+        start: object | None = None,
+        end: object | None = None,
+    ) -> pd.DataFrame | None:
+        """历史停牌标记（1=停牌），供聚宽 ``get_price(fields=['paused'])`` 使用。"""
+
+        cached = self._status_matrix("up_and_down_status", "停牌")
+        if cached is None:
+            return None
+        block = self._status_frame(
+            cached, symbols, count=count, start=start, end=end
+        )
+        return block.astype(np.int64)
+
     def status_text(self, symbol: str) -> str | None:
         return self._engine._panel_text("up_and_down_status", symbol)
 
@@ -1076,6 +1228,15 @@ class _MarketView:
     @property
     def symbols(self) -> list[str]:
         return list(self._engine.symbols)
+
+    @property
+    def etf_symbols(self) -> frozenset[str]:
+        return self._engine.etf_symbols
+
+    def display_symbol(self, symbol: str) -> str:
+        """引擎代码 -> 策略侧写法（只有 ETF 别名会被改写）。"""
+
+        return self._engine.symbol_aliases.get(symbol, symbol)
 
     def trade_days(
         self,
@@ -1122,14 +1283,16 @@ class _MarketView:
                 frame = self._engine.panels.get(field)
             if frame is None:
                 continue
-            subset = frame.reindex(columns=pd.Index(symbols))
+            # 先按行切片再投影列：面板是「全历史 × 全市场」，双轴同时 reindex
+            # 每次都要搬运上千万个单元格；行切片后只剩几十行。
+            subset = frame
             if start is not None:
                 subset = subset.loc[subset.index >= pd.Timestamp(start)]
             if end is not None:
                 subset = subset.loc[subset.index <= pd.Timestamp(end)]
             if count is not None:
                 subset = subset.iloc[-int(count):]
-            result[field] = subset
+            result[field] = subset.reindex(columns=pd.Index(symbols))
         return result
 
     def limit_panel(
@@ -1143,7 +1306,7 @@ class _MarketView:
     ) -> pd.DataFrame:
         """按昨收与板块规则生成涨跌停价面板（未复权口径）。"""
 
-        close = self._engine._mark_close.reindex(columns=pd.Index(symbols))
+        close = self._engine._mark_close
         if start is not None:
             close = close.loc[close.index >= pd.Timestamp(start)]
         if end is not None:
@@ -1151,7 +1314,8 @@ class _MarketView:
         if count is not None:
             # 多取一行用于昨收；count=1 时不必构造整段历史面板。
             close = close.iloc[-(int(count) + 1):]
-        previous = close.shift(1)
+        # 行切片之后再投影列，避免每次都对「全历史 × 全市场」做双轴 reindex。
+        previous = close.reindex(columns=pd.Index(symbols)).shift(1)
         codes = pd.Series(
             [str(symbol).split(".")[0] for symbol in previous.columns],
             index=previous.columns,
@@ -1159,22 +1323,23 @@ class _MarketView:
         ratio = pd.Series(0.10, index=previous.columns)
         ratio[codes.str.startswith(("300", "301", "688"))] = 0.20
         ratio[codes.str.startswith(("4", "8", "920"))] = 0.30
-        ratios = pd.DataFrame(
-            np.repeat(ratio.to_numpy()[None, :], len(previous), axis=0),
-            index=previous.index,
-            columns=previous.columns,
-        )
-        status = self._engine.panels.get("listed_status")
-        if status is not None:
-            # 先投影列再取行；对 2600×5900 的状态面板一次性双轴 reindex 很慢。
-            st = status.reindex(columns=previous.columns).reindex(
-                index=previous.index
+        ratio_values = np.broadcast_to(ratio.to_numpy(dtype=float), previous.shape)
+        cached = self._status_matrix("listed_status", ("ST", "*ST"))
+        if cached is not None:
+            block = self._status_frame(
+                cached,
+                symbols,
+                start=start,
+                end=end,
+                count=None if count is None else int(count) + 1,
+            ).reindex(index=previous.index, columns=previous.columns)
+            ratio_values = np.where(
+                block.fillna(False).to_numpy(dtype=bool), 0.05, ratio_values
             )
-            ratios = ratios.mask(st.isin(["ST", "*ST"]), 0.05)
-        values = (
-            previous * (1.0 + ratios)
-            if field == "high_limit"
-            else previous * (1.0 - ratios)
+        prices = previous.to_numpy(dtype=float)
+        factor = 1.0 + ratio_values if field == "high_limit" else 1.0 - ratio_values
+        values = pd.DataFrame(
+            prices * factor, index=previous.index, columns=previous.columns
         )
         if count is not None:
             values = values.iloc[-int(count):]

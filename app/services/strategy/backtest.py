@@ -7,7 +7,9 @@ QuantCore 引擎调用以及 API 响应组装。``runner.py`` 仅保留兼容门
 
 from __future__ import annotations
 
+import hashlib
 import inspect
+import json
 import os
 from pathlib import Path
 
@@ -84,6 +86,23 @@ def _instantiate_vectorized_strategy(strategy_class, panels):
             f"{strategy_class.__name__} 缺少可注入的行情字段参数: {', '.join(missing)}"
         )
     return strategy_class(*positional, **keyword)
+
+
+def _strategy_run_identity(req: StrategyBacktestRequest, data_engine) -> dict[str, str | None]:
+    """本次回测绑定的数据发布与规格指纹，供报告自证可复现。
+
+    与因子回测同口径：``spec_hash`` 覆盖请求参数与数据发布，不含运行期 id。
+    """
+
+    release_id = getattr(data_engine, "release_id", None) if data_engine is not None else None
+    payload = {
+        "request": req.model_dump(mode="json"),
+        "data_release_id": release_id,
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return {"data_release_id": release_id, "spec_hash": digest}
 
 
 def run_strategy_backtest(
@@ -397,6 +416,7 @@ def run_strategy_backtest(
             strategy_id=strategy_id,
             strategy_version=strategy_version,
             code_hash=code_hash,
+            **_strategy_run_identity(req, data_engine),
             filter_suspended=req.filter_suspended,
             filter_st=req.filter_st,
             filter_limit_up=req.filter_limit_up,
@@ -482,6 +502,29 @@ def _strategy_filter_info(data_engine, panels, req: StrategyBacktestRequest) -> 
     )
 
 
+def _preload_panels(panels, fields) -> None:
+    """并发预读字段面板；12 个字段串行加载约占启动时间的一半。"""
+
+    names = [field for field in fields if field in panels]
+    if len(names) <= 2:
+        return
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=min(4, len(names))) as pool:
+        list(pool.map(lambda field: panels[field], names))
+
+
+def _rename_symbols(frame: pd.DataFrame, mapping: dict[str, str]) -> pd.DataFrame:
+    """面板列名换成交易所代码；不复制数据块，避免 5000 列 rename 的开销。"""
+
+    columns = [mapping.get(str(column), column) for column in frame.columns]
+    if columns == list(frame.columns):
+        return frame
+    renamed = frame.copy(deep=False)
+    renamed.columns = columns
+    return renamed
+
+
 def _run_event_strategy_backtest(
     req: StrategyBacktestRequest,
     strategy_class,
@@ -530,34 +573,46 @@ def _run_event_strategy_backtest(
         panel_start = req.start
         warmup = req.strategy_dialect == "joinquant"
         if warmup:
+            # 聚宽策略的 get_price(count=N) 直接对应 N 个交易日的历史；红利这类
+            # 策略要看 780 个交易日（约 3.1 年），400 天预热会把窗口截断，
+            # 波动率等指标因此失真（实测 601288 的 780 日周波动率 0.0311 vs
+            # 聚宽 0.0246）。这里按最长常用窗口留足 1200 个自然日。
             panel_start = (
-                pd.Timestamp(req.start) - pd.Timedelta(days=400)
+                pd.Timestamp(req.start) - pd.Timedelta(days=1200)
             ).strftime("%Y-%m-%d")
         # 无条件加载 listed_status：退市剔除恒开启，不依赖 filter_st 开关。
+        # 聚宽策略还会 get_price(fields=['paused'])，需要逐日停牌状态。
         listed_status_available = True
         required_fields.add("listed_status")
-        try:
-            panels = data_engine.get_task_panels(
-                panel_start,
-                req.end,
-                fields=sorted(required_fields),
-                symbols=raw_symbols,
-            )
-        except KeyError:
-            # 当前数据版本没有 listed_status 时按因子回测的口径跳过该过滤，
-            # 其余字段照常加载；其余缺失字段仍然照常报错。
-            if "listed_status" not in required_fields:
+        if req.strategy_dialect == "joinquant":
+            required_fields.add("up_and_down_status")
+        while True:
+            try:
+                panels = data_engine.get_task_panels(
+                    panel_start,
+                    req.end,
+                    fields=sorted(required_fields),
+                    symbols=raw_symbols,
+                )
+                break
+            except KeyError:
+                # 当前数据版本没有状态字段时按因子回测的口径跳过对应过滤，
+                # 其余字段照常加载；其余缺失字段仍然照常报错。
+                if "up_and_down_status" in required_fields:
+                    required_fields.discard("up_and_down_status")
+                    continue
+                if "turnover" in required_fields:
+                    # 换手率是聚宽策略的可选字段，缺数据时按未提供处理。
+                    required_fields.discard("turnover")
+                    continue
+                if "listed_status" in required_fields:
+                    listed_status_available = False
+                    required_fields.discard("listed_status")
+                    continue
                 raise
-            listed_status_available = False
-            required_fields.discard("listed_status")
-            panels = data_engine.get_task_panels(
-                panel_start,
-                req.end,
-                fields=sorted(required_fields),
-                symbols=raw_symbols,
-            )
+        _preload_panels(panels, sorted(required_fields))
         event_panels = {
-            field: panels[field].rename(columns=symbol_mapping)
+            field: _rename_symbols(panels[field], symbol_mapping)
             for field in required_fields
         }
         index = data_engine.get_index(req.benchmark, req.start, req.end)
@@ -590,9 +645,44 @@ def _run_event_strategy_backtest(
             except FileNotFoundError as exc:
                 raise ValueError(str(exc)) from exc
             execution_panels = {
-                field: raw_execution[field].rename(columns=symbol_mapping)
+                field: _rename_symbols(raw_execution[field], symbol_mapping)
                 for field in ("open", "close")
             }
+
+        # 策略显式声明的 ETF（如货币基金 511880）单独并入面板：ETF 不在
+        # 股票池数据里，来自视图的 free/etf_daily，按 symbol + time join。
+        etf_symbols: set[str] = set()
+        etf_aliases: dict[str, str] = {}
+        if req.extra_symbols:
+            from app.services.data.etf import load_etf_panels
+            from app.services.strategy.compat.runtime import normalize_security
+
+            extra_symbols = {
+                normalize_security(symbol) for symbol in req.extra_symbols
+            }
+            if data_engine.data_dir is None:
+                raise ValueError("加载 ETF 行情需要行情目录")
+            etf_panels = load_etf_panels(
+                data_engine.data_dir,
+                sorted(extra_symbols),
+                start=panel_start,
+                end=req.end,
+            )
+            etf_symbols = set(extra_symbols)
+            # 策略里写死的 511880.XSHG 与引擎代码 511880.SH 的别名，
+            # 持仓和订单一律按策略侧写法回报。
+            etf_aliases = {
+                normalize_security(symbol): symbol for symbol in req.extra_symbols
+            }
+            for field, panel in etf_panels.items():
+                if field in event_panels:
+                    event_panels[field] = event_panels[field].join(
+                        panel.reindex(index=event_panels[field].index), how="left"
+                    )
+                if execution_panels is not None and field in execution_panels:
+                    execution_panels[field] = execution_panels[field].join(
+                        panel.reindex(index=execution_panels[field].index), how="left"
+                    )
 
         intraday_price = None
         data_dir = getattr(data_engine, "data_dir", None)
@@ -631,6 +721,8 @@ def _run_event_strategy_backtest(
             intraday_price=intraday_price,
             first_previous_date=first_previous_date,
             active_start=active_start,
+            etf_symbols=etf_symbols,
+            symbol_aliases=etf_aliases,
         ).run(strategy)
         equity = result.equity_curve
         metrics = metrics_to_dict(MetricEngine().calculate_all(MetricContext(
@@ -688,6 +780,7 @@ def _run_event_strategy_backtest(
                 universe=req.universe,
                 benchmark=req.benchmark, engine_mode="event", strategy_id=strategy_id,
                 strategy_version=strategy_version, code_hash=code_hash,
+                **_strategy_run_identity(req, data_engine),
                 filter_suspended=req.filter_suspended,
                 filter_st=req.filter_st,
                 filter_limit_up=req.filter_limit_up,

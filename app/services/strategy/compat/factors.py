@@ -38,11 +38,64 @@ class FactorStore:
         self.data_engine = data_engine if data_engine is not None else _default_data_engine()
         self._industry_names: pd.Series | None = None
         self._valuation_cache: dict[tuple[str, str], pd.Series] = {}
+        # 财务因子只随「已公告的报告集」变化，公告间隔内逐日重复计算是最大浪费。
+        self._signature_cache: dict[str, tuple[int, ...]] = {}
+        self._factor_cache: dict[tuple[str, tuple[int, ...]], pd.Series] = {}
+        # 单季度 ROE/ROA/毛利率面板按 as_of 缓存（同一公告快照下逐日相同）。
+        self._ratio_cache: dict[str, pd.DataFrame] = {}
+
+    #: 只依赖财报快照的因子；估值/价格类因子不能按财报签名缓存。
+    _FINANCIAL_FACTORS = frozenset(
+        {
+            "operating_revenue_growth_rate",
+            "np_parent_company_owners_growth_rate",
+            "np_parent_company_owners_ttm",
+            "non_recurring_gain_loss",
+            "DEGM",
+            "operating_cost_ttm",
+            "sale_expense_ttm",
+            "total_operating_revenue_per_share_ttm",
+        }
+    )
+
+    def _financial_signature(self, as_of: str) -> tuple[int, ...]:
+        """财报快照签名：行数 + 最近公告日；没有新公告时同一策略日间不变。"""
+
+        cached = self._signature_cache.get(as_of)
+        if cached is not None:
+            return cached
+        signature: list[int] = []
+        for statement in ("income", "pershare_index", "per_share"):
+            try:
+                frame = visible(load_statement(self.root, statement), as_of)
+            except FileNotFoundError:
+                signature.extend([-1, -1])
+                continue
+            announce = frame["m_anntime"].astype(str)
+            try:
+                latest = int(announce.max())
+            except (TypeError, ValueError):
+                latest = 0
+            signature.extend([len(frame), latest])
+        value = tuple(signature)
+        if len(self._signature_cache) > 256:
+            self._signature_cache.clear()
+        self._signature_cache[as_of] = value
+        return value
 
     def compute(self, factor: str, symbols: list[str], as_of: str) -> pd.Series:
         handler = getattr(self, f"_factor_{factor}", None)
         if handler is None:
             raise NotImplementedError(f"jqfactor 描述因子暂未实现: {factor}")
+        if factor in self._FINANCIAL_FACTORS:
+            key = (factor, self._financial_signature(as_of))
+            cached = self._factor_cache.get(key)
+            if cached is None:
+                cached = handler(symbols, as_of)
+                if len(self._factor_cache) > 4096:
+                    self._factor_cache.clear()
+                self._factor_cache[key] = cached
+            return cached.reindex(symbols)
         return handler(symbols, as_of).reindex(symbols)
 
     # ------------------------------------------------------------ 风格描述因子
@@ -71,36 +124,44 @@ class FactorStore:
         """毛利率 TTM 同比：最新 TTM 毛利率 / 去年同季 TTM 毛利率 - 1。"""
 
         rows = self._income_rows(as_of)
-        result: dict[str, float] = {}
-        for symbol, group in rows.groupby("Symbol"):
-            if self._is_financial(str(symbol)):
-                result[str(symbol)] = np.nan
-                continue
-            group = _prepare_periods(group)
-            total_cost = pd.to_numeric(group["total_operating_cost"], errors="coerce")
-            if total_cost.notna().sum() == 0 or float(total_cost.abs().max()) == 0:
-                result[str(symbol)] = np.nan
-                continue
-            revenue = pd.to_numeric(group["revenue"], errors="coerce")
-            cost = self._operating_cost_series(group)
-            latest = str(group.index.max())
-            prior = _prior_year_period(latest)
-            revenue_ttm = _ttm_sum(revenue)
-            prior_revenue_ttm = _ttm_sum(revenue, prior)
-            cost_ttm = _ttm_at(cost)
-            prior_cost_ttm = _ttm_at(cost, prior)
-            if any(pd.isna(x) for x in (revenue_ttm, prior_revenue_ttm, cost_ttm, prior_cost_ttm)):
-                result[str(symbol)] = np.nan
-                continue
-            if revenue_ttm == 0 or prior_revenue_ttm == 0:
-                result[str(symbol)] = np.nan
-                continue
-            margin = 1.0 - float(cost_ttm) / float(revenue_ttm)
-            prior_margin = 1.0 - float(prior_cost_ttm) / float(prior_revenue_ttm)
-            result[str(symbol)] = (
-                np.nan if prior_margin == 0 else margin / prior_margin - 1.0
-            )
-        return pd.Series(result, dtype=float)
+        if rows.empty:
+            return pd.Series(dtype=float)
+        latest = rows.drop_duplicates("Symbol", keep="last").set_index("Symbol")[
+            "m_timetag"
+        ]
+        index = latest.index
+        periods = latest.to_numpy().astype(str)
+        prior_periods = np.array([_prior_year_period(p) for p in periods])
+
+        revenue_wide = _wide_table(rows, "revenue")
+        cost_wide = _wide_table(
+            rows.assign(_cost=_operating_cost_column(rows)), "_cost"
+        )
+        total_wide = _wide_table(rows, "total_operating_cost")
+        revenue_ttm = _rolling_quarters(revenue_wide, 4)
+        revenue_now = _lookup(revenue_ttm, index.to_numpy(), periods)
+        revenue_prior = _lookup(revenue_ttm, index.to_numpy(), prior_periods)
+        cost_now = _ttm_values(cost_wide, index.to_numpy(), periods)
+        cost_prior = _ttm_values(cost_wide, index.to_numpy(), prior_periods)
+
+        empty_total = (
+            total_wide.isna().all(axis=1)
+            | (total_wide.abs().fillna(0.0).max(axis=1) == 0)
+        ).reindex(index).fillna(True).to_numpy(dtype=bool)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            margin = 1.0 - cost_now / revenue_now
+            prior_margin = 1.0 - cost_prior / revenue_prior
+            growth = margin / prior_margin - 1.0
+        invalid = np.asarray(empty_total, dtype=bool) | ~np.isfinite(growth)
+        invalid |= (revenue_now == 0) | (revenue_prior == 0) | (prior_margin == 0)
+        growth[invalid] = np.nan
+        result = pd.Series(growth, index=index, dtype=float)
+        financial = [
+            symbol for symbol in result.index if self._is_financial(str(symbol))
+        ]
+        if financial:
+            result.loc[financial] = np.nan
+        return result
 
     # ------------------------------------------------------------ 成长/规模
 
@@ -122,21 +183,14 @@ class FactorStore:
     def _factor_non_recurring_gain_loss(self, symbols, as_of):
         # 聚宽口径：最新报告期的归母净利润 - 扣非净利润（单季度字段）。
         rows = self._income_rows(as_of)
-        result: dict[str, float] = {}
-        for symbol, group in rows.groupby("Symbol"):
-            latest = group.sort_values("m_timetag").iloc[-1]
-            net = pd.to_numeric(
-                pd.Series([latest.get("net_profit_excl_min_int_inc")]), errors="coerce"
-            ).iloc[0]
-            deducted = pd.to_numeric(
-                pd.Series([latest.get("deducted_net_profit")]), errors="coerce"
-            ).iloc[0]
-            result[str(symbol)] = (
-                float(net) - float(deducted)
-                if pd.notna(net) and pd.notna(deducted)
-                else np.nan
-            )
-        return pd.Series(result, dtype=float)
+        if rows.empty:
+            return pd.Series(dtype=float)
+        latest = rows.drop_duplicates("Symbol", keep="last").set_index("Symbol")
+        net = pd.to_numeric(
+            latest["net_profit_excl_min_int_inc"], errors="coerce"
+        )
+        deducted = pd.to_numeric(latest["deducted_net_profit"], errors="coerce")
+        return (net - deducted).astype(float)
 
     def _factor_net_operate_cash_flow_ttm(self, symbols, as_of):
         return self._per_share("operating_cf_ttm", as_of)
@@ -150,20 +204,29 @@ class FactorStore:
 
     def _factor_operating_cost_ttm(self, symbols, as_of):
         # 营业成本 = 营业总成本 - 税金及附加 - 销售/管理/研发/财务费用 - 资产减值损失。
+        # 逐标的循环在 5000 只 × 每交易日多次调用时会退化到分钟级，这里整表向量化。
         rows = self._income_rows(as_of)
-        result: dict[str, float] = {}
-        for symbol, group in rows.groupby("Symbol"):
-            if self._is_financial(str(symbol)):
-                result[str(symbol)] = 0.0  # 银行/保险没有营业成本口径，聚宽返回 0
-                continue
-            group = _prepare_periods(group)
-            total_cost = pd.to_numeric(group["total_operating_cost"], errors="coerce")
-            if total_cost.notna().sum() == 0 or float(total_cost.abs().max()) == 0:
-                result[str(symbol)] = 0.0
-                continue
-            cost = self._operating_cost_series(group)
-            result[str(symbol)] = _ttm_at(cost)
-        return pd.Series(result, dtype=float)
+        if rows.empty:
+            return pd.Series(dtype=float)
+        latest = rows.drop_duplicates("Symbol", keep="last").set_index("Symbol")[
+            "m_timetag"
+        ]
+        periods = latest.to_numpy().astype(str)
+        total_wide = _wide_table(rows, "total_operating_cost")
+        cost_wide = _wide_table(rows.assign(_cost=_operating_cost_column(rows)), "_cost")
+        values = _ttm_values(cost_wide, latest.index.to_numpy(), periods)
+        result = pd.Series(values, index=latest.index, dtype=float)
+        # 银行/保险没有营业成本口径，聚宽返回 0；营业总成本全空或全 0 也按 0。
+        empty_total = total_wide.isna().all(axis=1) | (
+            total_wide.abs().fillna(0.0).max(axis=1) == 0
+        )
+        result[empty_total.reindex(result.index).fillna(True)] = 0.0
+        financial = [
+            symbol for symbol in result.index if self._is_financial(str(symbol))
+        ]
+        if financial:
+            result.loc[financial] = 0.0
+        return result
 
     def _factor_operating_profit_ttm(self, symbols, as_of):
         revenue = self._per_share("revenue_ttm", as_of)
@@ -292,6 +355,29 @@ class FactorStore:
         "total_non_current_liability": ("balance", "non_current_liabilities"),
     }
 
+    #: 聚宽 jqfactor 的这三项是**单季度**比率，源表的 pershare_index 是年内累计，
+    #: 必须按财报重算（口径已用聚宽 calc_factors 导出逐值核对）。
+    _SINGLE_QUARTER_RATIOS: dict[str, str] = {
+        "roe": "roe_single",
+        "roa": "roa_single",
+        "gross_profit_margin": "gross_margin_single",
+    }
+    #: 源表是年内累计的流量字段，jqfactor 取单季度值。
+    _CUMULATIVE_FLOWS: frozenset[str] = frozenset({"tot_profit", "financial_expense"})
+
+    _RATIO_INCOME_COLUMNS = (
+        "revenue",
+        "total_operating_cost",
+        "less_taxes_surcharges_ops",
+        "sale_expense",
+        "less_gerl_admin_exp",
+        "research_expenses",
+        "financial_expense",
+        "less_impair_loss_assets",
+        "net_profit_incl_min_int_inc",
+    )
+    _RATIO_BALANCE_COLUMNS = ("tot_assets", "total_equity")
+
     def dependency_series(
         self, dependency: str, symbols: list[str], as_of: str
     ) -> pd.Series:
@@ -305,12 +391,16 @@ class FactorStore:
         """一次算多个依赖；同一财务表只载入/排序一次。"""
 
         parsed: dict[tuple[str, str], list[tuple[str, int]]] = {}
+        derived: list[tuple[str, str, int]] = []
         for dependency in dependencies:
             base = dependency
             offset = 0
             match = re.fullmatch(r"(.+?)_(\d+)", dependency)
             if match is not None:
                 base, offset = match.group(1), int(match.group(2))
+            if base in self._SINGLE_QUARTER_RATIOS:
+                derived.append((base, dependency, offset))
+                continue
             source = self._DEPENDENCY_SOURCES.get(base)
             if source is None:
                 raise NotImplementedError(f"jqfactor 依赖暂未实现: {dependency}")
@@ -319,6 +409,17 @@ class FactorStore:
         result: dict[str, pd.Series] = {
             dependency: pd.Series(dtype=float) for dependency in dependencies
         }
+        ratio_frame: pd.DataFrame | None = None
+        if derived:
+            try:
+                ratio_frame = self._ratio_frame(as_of)
+            except FileNotFoundError:
+                # 精简数据集（单测夹具）只有 pershare_index 时回退到累计口径。
+                for base, dependency, offset in derived:
+                    parsed.setdefault(
+                        self._DEPENDENCY_SOURCES[base], []
+                    ).append((dependency, offset))
+                derived = []
         for (statement, column), items in parsed.items():
             frame = visible(load_statement(self.root, statement, [column]), as_of)
             if frame.empty:
@@ -328,6 +429,14 @@ class FactorStore:
                 .sort_values(["Symbol", "m_timetag"])
                 .copy()
             )
+            if statement == "income" and column in self._CUMULATIVE_FLOWS:
+                # 累计流量 -> 单季度：年初首期保持原值。
+                values = pd.to_numeric(frame[column], errors="coerce")
+                year = frame["m_timetag"].astype(str).str[:4]
+                previous = values.groupby([frame["Symbol"], year]).shift(1)
+                frame[column] = (values - previous).where(
+                    previous.notna(), values
+                )
             frame["_rank"] = frame.groupby("Symbol").cumcount(ascending=False)
             for dependency, offset in items:
                 picks = frame.loc[frame["_rank"] == offset]
@@ -336,7 +445,117 @@ class FactorStore:
                     .astype(float)
                     .reindex(symbols)
                 )
+        if derived and ratio_frame is not None:
+            result.update(
+                self._single_quarter_ratios(derived, symbols, ratio_frame)
+            )
         return result
+
+    def _single_quarter_ratios(
+        self,
+        items: list[tuple[str, str, int]],
+        symbols: list[str],
+        frame: pd.DataFrame,
+    ) -> dict[str, pd.Series]:
+        """按聚宽口径重算单季度 ROE / ROA / 毛利率，再按报告期回溯偏移。"""
+
+        result: dict[str, pd.Series] = {}
+        for base, dependency, offset in items:
+            column = self._SINGLE_QUARTER_RATIOS[base]
+            if frame.empty:
+                result[dependency] = pd.Series(dtype=float)
+                continue
+            picks = frame.loc[frame["_rank"] == offset]
+            result[dependency] = (
+                picks.set_index("Symbol")[column].astype(float).reindex(symbols)
+            )
+        return result
+
+    def _ratio_frame(self, as_of: str) -> pd.DataFrame:
+        """每个「标的 × 报告期」一行，含单季度 roe/roa/毛利率与回溯排名。"""
+
+        cached = self._ratio_cache.get(as_of)
+        if cached is not None:
+            return cached
+        income = visible(
+            load_statement(self.root, "income", list(self._RATIO_INCOME_COLUMNS)),
+            as_of,
+        )
+        balance = visible(
+            load_statement(self.root, "balance", list(self._RATIO_BALANCE_COLUMNS)),
+            as_of,
+        )
+        if income.empty or balance.empty:
+            empty = pd.DataFrame()
+            self._ratio_cache[as_of] = empty
+            return empty
+        income = (
+            income.drop_duplicates(["Symbol", "m_timetag"], keep="last")
+            .sort_values(["Symbol", "m_timetag"])
+            .reset_index(drop=True)
+        )
+        year = income["m_timetag"].astype(str).str[:4]
+
+        def single(series: pd.Series) -> pd.Series:
+            previous = series.groupby([income["Symbol"], year]).shift(1)
+            return (series - previous).where(previous.notna(), series)
+
+        net = single(
+            pd.to_numeric(income["net_profit_incl_min_int_inc"], errors="coerce")
+        )
+        revenue = pd.to_numeric(income["revenue"], errors="coerce")
+        total_cost = pd.to_numeric(income["total_operating_cost"], errors="coerce")
+        components = pd.Series(0.0, index=income.index)
+        for column in (
+            "less_taxes_surcharges_ops",
+            "sale_expense",
+            "less_gerl_admin_exp",
+            "research_expenses",
+            "financial_expense",
+            "less_impair_loss_assets",
+        ):
+            components = components.add(
+                pd.to_numeric(income[column], errors="coerce").fillna(0.0)
+            )
+        # 银行/保险不披露营业成本口径（销售/管理费用整行为空），聚宽同样给空值。
+        financial_like = income[["sale_expense", "less_gerl_admin_exp"]].isna().all(
+            axis=1
+        )
+        cogs_single = single((total_cost - components).where(~financial_like))
+        margin = (revenue - cogs_single) / revenue * 100.0
+
+        balance = (
+            balance.drop_duplicates(["Symbol", "m_timetag"], keep="last")
+            .sort_values(["Symbol", "m_timetag"])
+            .reset_index(drop=True)
+        )
+        assets = pd.to_numeric(balance["tot_assets"], errors="coerce")
+        equity = pd.to_numeric(balance["total_equity"], errors="coerce")
+        average_assets = (assets + assets.groupby(balance["Symbol"]).shift(1)) / 2.0
+        average_equity = (equity + equity.groupby(balance["Symbol"]).shift(1)) / 2.0
+        ratios = pd.DataFrame({
+            "Symbol": balance["Symbol"],
+            "m_timetag": balance["m_timetag"],
+            "_average_assets": average_assets,
+            "_average_equity": average_equity,
+        })
+
+        frame = pd.DataFrame({
+            "Symbol": income["Symbol"],
+            "m_timetag": income["m_timetag"],
+            "_net": net,
+            "_margin": margin,
+        }).merge(ratios, on=["Symbol", "m_timetag"], how="left")
+        frame["roa_single"] = frame["_net"] / frame["_average_assets"] * 100.0
+        frame["roe_single"] = frame["_net"] / frame["_average_equity"] * 100.0
+        frame["gross_margin_single"] = frame["_margin"]
+        frame = frame.replace([np.inf, -np.inf], np.nan)
+        frame["_rank"] = frame.groupby("Symbol").cumcount(ascending=False)
+        frame = frame[["Symbol", "_rank", *self._SINGLE_QUARTER_RATIOS.values()]]
+        if len(self._ratio_cache) > 32:
+            self._ratio_cache.clear()
+        self._ratio_cache[as_of] = frame
+        return frame
 
     # ------------------------------------------------------------ 数据访问
 
@@ -435,12 +654,17 @@ class FactorStore:
         """累计字段的 TTM：最新累计 + 上年年报 - 上年同期累计。"""
 
         rows = self._period_rows(statement, column, as_of)
-        result: dict[str, float] = {}
-        for symbol, group in rows.groupby("Symbol"):
-            series = group.set_index("m_timetag")[column].astype(float)
-            ttm = _ttm_at(series)
-            result[str(symbol)] = ttm
-        return pd.Series(result, dtype=float)
+        if rows.empty:
+            return pd.Series(dtype=float)
+        wide = _wide_table(rows, column)
+        # rows 已按 (Symbol, m_timetag) 排序，去重取最后一条就是最新报告期；
+        # 用 groupby(...).max() 在 object 列上会退化到纯 Python 聚合。
+        latest = rows.drop_duplicates("Symbol", keep="last").set_index("Symbol")[
+            "m_timetag"
+        ]
+        periods = latest.to_numpy().astype(str)
+        values = _ttm_values(wide, latest.index.to_numpy(), periods)
+        return pd.Series(values, index=latest.index, dtype=float)
 
     def _ttm_growth_from_cumulative(
         self, statement: str, column: str, as_of: str
@@ -449,7 +673,9 @@ class FactorStore:
         if rows.empty:
             return pd.Series(dtype=float)
         wide = _wide_table(rows, column)
-        latest = rows.groupby("Symbol")["m_timetag"].max()
+        latest = rows.drop_duplicates("Symbol", keep="last").set_index("Symbol")[
+            "m_timetag"
+        ]
         symbols = latest.index.to_numpy()
         latest_periods = latest.to_numpy().astype(str)
         prior_periods = np.array(
@@ -467,7 +693,9 @@ class FactorStore:
         if rows.empty:
             return pd.Series(dtype=float)
         wide = _wide_table(rows, column)
-        latest = rows.groupby("Symbol")["m_timetag"].max()
+        latest = rows.drop_duplicates("Symbol", keep="last").set_index("Symbol")[
+            "m_timetag"
+        ]
         symbols = latest.index.to_numpy()
         latest_periods = latest.to_numpy().astype(str)
         prior_periods = np.array(
@@ -532,6 +760,31 @@ class FactorStore:
             result = slope / mean_abs
         result[(counts_f < 4) | (mean_abs <= 0) | ~np.isfinite(result)] = np.nan
         return pd.Series(result, index=wide.index, dtype=float)
+
+
+def _operating_cost_column(rows: pd.DataFrame) -> pd.Series:
+    """整表计算营业成本（营业总成本扣除各项费用），行内运算。"""
+
+    total = pd.to_numeric(rows["total_operating_cost"], errors="coerce")
+    cost = total.copy()
+    for column in (
+        "less_taxes_surcharges_ops",
+        "sale_expense",
+        "less_gerl_admin_exp",
+        "research_expenses",
+        "financial_expense",
+        "less_impair_loss_assets",
+    ):
+        if column in rows.columns:
+            cost = cost - pd.to_numeric(rows[column], errors="coerce").fillna(0.0)
+    return cost.where(total.notna() & (total != 0), 0.0)
+
+
+def _rolling_quarters(wide: pd.DataFrame, periods: int) -> pd.DataFrame:
+    """单季度字段的滚动 N 期求和（按报告期排序）。"""
+
+    ordered = wide.sort_index(axis=1)
+    return ordered.T.rolling(periods, min_periods=periods).sum().T
 
 
 def _wide_table(rows: pd.DataFrame, column: str) -> pd.DataFrame:

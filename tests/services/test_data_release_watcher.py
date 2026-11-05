@@ -207,3 +207,41 @@ def test_data_reload_route_switches_release(tmp_path):
             reset_runtime_settings()
         else:
             configure_runtime_settings(previous_settings)
+
+
+def test_watcher_reloads_when_symlink_points_to_new_release(tmp_path):
+    """配置路径是符号链接时，视图轮换（重指链接）也应触发重载。"""
+
+    first = tmp_path / "rv-1"
+    second = tmp_path / "rv-2"
+    _write_close(first, [10.0, 11.0])
+    _write_manifest(first, "v1")
+    _write_close(second, [10.0, 11.0, 12.0])
+    _write_manifest(second, "v2")
+
+    current = tmp_path / "current"
+    current.symlink_to(first, target_is_directory=True)
+
+    engine = DataEngine()
+    # 生产环境里清单校验会把目录解析成绝对路径再交给 provider，
+    # 这里同样传入解析后的路径，模拟“进程持有旧发布路径”。
+    engine.load_parquet(first)
+    assert engine.get_task_panels(fields=["close"])["close"].iloc[-1, 0] == 11.0
+
+    # 生产环境下 settings.data_dir 是启动时解析后的绝对路径，
+    # 只有 data_dir_configured 保留未解析的符号链接。
+    settings = replace(
+        default_runtime_settings(),
+        data_dir=first,
+        data_manifest=first / "data_manifest.yaml",
+        data_dir_configured=current,
+        data_manifest_configured=current / "data_manifest.yaml",
+    )
+    watcher = DataReleaseWatcher(engine, settings)
+
+    # 指向新视图：即便旧目录还在，也应按配置路径切换。
+    current.unlink()
+    current.symlink_to(second, target_is_directory=True)
+
+    assert watcher.check_once() is True
+    assert engine.get_task_panels(fields=["close"])["close"].iloc[-1, 0] == 12.0
