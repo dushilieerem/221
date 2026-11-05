@@ -1,6 +1,6 @@
 # AI 策略转写（聚宽 → SVQuant）API
 
-> 状态：MVP 已实现。关联：[FEAT-033](../../FEAT-033-AI策略转写/README.md)。
+> 状态：MVP 已实现。关联：[FEAT-033](../FEAT-033-AI策略转写/README.md)。
 > 端点：`POST /api/ai/strategy-transcriptions`
 
 ## 1. 概述

@@ -16,22 +16,7 @@ from app.services.factor.runner import _factor_execution_from_standard_report, _
 from app.models.factor_backtest import FactorBacktestSpec
 
 ROOT = Path(__file__).resolve().parents[2]
-COORDINATOR = ROOT / "app" / "services" / "factor_backtest_batch" / "coordinator.py"
 FACTOR_ROUTE = ROOT / "app" / "api" / "routes" / "factor.py"
-
-
-def test_batch_coordinator_only_submits_unified_factor_experiment():
-    source = COORDINATOR.read_text(encoding="utf-8")
-    assert "FactorBacktestExperiment" in source
-    for forbidden in (
-        "FactorExperiment",
-        "FactorBacktestBatchExperiment",
-        "NativeEngine",
-        "_load_benchmark_equity",
-        "_compute_quantile_metrics",
-        "_run_factor_once",
-    ):
-        assert forbidden not in source
 
 
 def test_factor_resolution_belongs_to_factor_engine():
@@ -162,7 +147,7 @@ def test_default_asset_and_data_paths_survive_package_moves(monkeypatch):
     assert strategy_library_dir() == ROOT / "app/assets/strategies/libraries"
 
 
-def test_api_and_batch_share_standard_report_cache_payload():
+def test_standard_report_cache_payload_serves_http_and_restore():
     dates = pd.date_range("2026-01-02", periods=2, freq="B")
     equity = pd.Series([1.0, 1.1], index=dates)
     benchmark = pd.Series([1.0, 1.05], index=dates)
@@ -198,10 +183,10 @@ def test_api_and_batch_share_standard_report_cache_payload():
     payload = _factor_standard_report(execution, FactorBacktestResponse())
     restored = _factor_execution_from_standard_report(spec, payload)
 
-    # 缓存载荷写的是「命中路径真正读到的字段」：交互式入口读 http_response，
-    # 批量入口读 equity_curve / quantile_metrics / predictive_metrics / meta。
-    # factor_values 与 positions 是日期×标的的完整宽表，没有消费者，且逐格
-    # 编码再 gzip 会在长历史上比回测本身更慢，因此不得再写进去。
+    # 缓存载荷写的是「命中路径真正读到的字段」：HTTP 入口读 http_response，
+    # 标准报告恢复路径读 equity_curve / quantile_metrics / predictive_metrics
+    # / meta。factor_values 与 positions 是日期×标的的完整宽表，没有消费者，
+    # 且逐格编码再 gzip 会在长历史上比回测本身更慢，因此不得再写进去。
     standard = payload["standard"]
     assert "factor_values" not in standard
     assert "positions" not in standard

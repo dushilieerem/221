@@ -17,7 +17,6 @@ from app.config import (
     load_runtime_settings,
 )
 from app.logging import configure_logging
-from app.services.factor_backtest_batch.task_registry import FactorBacktestBatchTaskRegistry
 from app.services.experiment.manager import ExperimentManager
 from app.services.data.engine import DataEngine
 from app.services.data.manifest import validate_data_manifest
@@ -62,9 +61,6 @@ async def lifespan(application: FastAPI):
         )
         application.state.experiment_manager = manager
 
-    task_registry: FactorBacktestBatchTaskRegistry = (
-        application.state.factor_backtest_batch_task_registry
-    )
     data_engine: DataEngine = application.state.data_engine
 
     watcher_task: asyncio.Task | None = None
@@ -100,8 +96,6 @@ async def lifespan(application: FastAPI):
             watcher_task.cancel()
             with suppress(asyncio.CancelledError):
                 await watcher_task
-        # 协调线程可能正在等待 Manager 的因子 worker；必须先等它退出。
-        task_registry.shutdown(wait=True)
         manager.shutdown()
         data_engine.close()
 
@@ -124,10 +118,6 @@ def create_app(*, testing: bool = False) -> FastAPI:
     application.state.testing = testing
     application.state.data_engine = data_engine
     application.state.experiment_manager = manager
-    application.state.factor_backtest_batch_task_registry = FactorBacktestBatchTaskRegistry(
-        snapshot_db=settings.factor_backtest_database,
-        snapshot_retention_days=7,
-    )
     application.add_middleware(
         CORSMiddleware,
         allow_origins=list(settings.cors_origins),

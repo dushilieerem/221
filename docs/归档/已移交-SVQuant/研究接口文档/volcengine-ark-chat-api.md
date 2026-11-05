@@ -1,8 +1,8 @@
 # 项目使用的火山方舟 Chat API 调用说明
 
-> 本文以 `ResearchEngine/app/api/ai_factor.py` 的当前实现为准，只说明 AI 因子生成功能实际发送给火山方舟的请求。
+> 本文说明 ResearchEngine 调用火山方舟的请求格式。AI 生成类端点已移交 SVQuant；RE 侧目前只有 `app/api/ai_post_summary.py`（帖子摘要兜底）仍使用该 Provider。
 >
-> 更新日期：2026-08-13
+> 更新日期：2026-11-05
 
 ## 1. 实际请求地址
 

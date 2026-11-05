@@ -5,8 +5,7 @@
 
 ResearchEngine 是研究计算服务：接收代码与参数、执行回测、返回结构化结果；不管理用户、
 因子/策略资产或可靠的业务结果历史。每个进程由 `ExperimentManager` 管理回测线程池、
-有界队列和内部任务状态；FastAPI 只负责 HTTP 适配，不拥有回测线程池。开发期临时承载的
-AI 因子草稿端点只生成并静态校验代码，不执行回测，待 SaaS 应用层具备身份与资产治理后迁出。
+有界队列和内部任务状态；FastAPI 只负责 HTTP 适配，不拥有回测线程池。AI 生成与帖子摘要端点已于 2026-11-05 移交 SVQuant，RE 不再提供任何 AI 路由。
 
 ## 运行
 
@@ -33,10 +32,6 @@ cp config.example.yaml config.yaml
 | 系统 | POST | `/api/data/reload` | [行情发布与重载](06-研究接口文档/data-release.md) |
 | 因子目录 | GET | `/api/factor-libraries` | [因子库目录](06-研究接口文档/factor-libraries.md) |
 | 因子目录 | GET | `/api/factors/{library_name}` | [指定库因子列表](06-研究接口文档/factor-library-factors.md) |
-| AI 因子草稿 | POST | `/api/ai/factor-generations` | [AI 因子草稿生成](06-研究接口文档/ai-factor-generations.md) |
-| AI 策略草稿 | POST | `/api/ai/strategy-generations` | [AI 向量化策略草稿生成](06-研究接口文档/ai-strategy-generations.md) |
-| AI 策略转写 | POST | `/api/ai/strategy-transcriptions` | [聚宽策略转写与差异报告](06-研究接口文档/ai-strategy-transcriptions.md) |
-| AI 回测解读 | POST | `/api/ai/backtest-interpretations` | [AI 回测解读与优化建议](06-研究接口文档/ai-backtest-interpretations.md) |
 | 市场数据 | GET | `/api/market-data/symbols` | [股票代码列表](06-研究接口文档/market-data-symbols.md) |
 | 市场数据 | GET | `/api/market-data/daily/{symbol}` | [个股日线](06-研究接口文档/market-data-daily.md) |
 | 市场数据 | GET | `/api/market-data/indices` | [股指列表](06-研究接口文档/market-data-indices.md) |
@@ -100,11 +95,11 @@ GET /api/backtest/factor/{run_id}
 ```text
 app/
   main.py              FastAPI 应用工厂、lifespan + CORS
-  api/routes/           health/catalog/factor/strategy/batch 控制器
+  api/routes/           health/catalog/factor/strategy 控制器
   schemas/              Pydantic 请求/响应模型
-  services/             实验、因子、策略和因子批量业务
-  repositories/         目录、结果和批次持久化边界
-  database/             SQLite store
+  services/             实验、因子和策略业务
+  repositories/         目录与结果持久化边界
+  database/             数据访问实现
   quantcore/            data/factor/metric/backtest 基础设施
   assets/               因子/策略源码与 index.yaml
 ```

@@ -513,7 +513,7 @@ SQLite 因子库集中保存库、分类、稳定 `sv_id`、展示名称、说�
 - [`docs/02-架构文档/engine-design.md`](../../../../SVQuant/docs/架构与技术/engine-design.md)：Native/Event 回测引擎设计。
 - [`ResearchEngine/docs/03-功能文档/FEAT-002-研究引擎/`](../../功能包/FEAT-002-研究引擎/)：ResearchEngine 产品需求和技术设计包。
 - [`docs/03-功能文档/FEAT-003-回测适配层/`](../../../../SVQuant/docs/功能包/FEAT-003-回测适配层/README.md)：回测适配层设计。
-- [`ResearchEngine/docs/03-功能文档/FEAT-027-因子批量回测/`](../../功能包/FEAT-027-因子批量回测/)：批量因子回测设计。
+- [`ResearchEngine/docs/03-功能文档/FEAT-027-因子批量回测/`](../已移交-SVQuant/FEAT-027-因子批量回测/)：批量因子回测设计。
 - [`ResearchEngine/docs/03-功能文档/FEAT-028-分层应用架构/`](../../功能包/FEAT-028-分层应用架构/)：统一 `app.*` 命名空间和分层约束。
 - [`ResearchEngine/docs/03-功能文档/FEAT-029-因子注册/`](../../功能包/FEAT-029-因子注册/)：因子注册和 loader 演进。
 - [`docs/06-技术决策/ADR-019-为什么由ExperimentManager管理回测并发.md`](../../技术决策/ADR-019-为什么由ExperimentManager管理回测并发.md)：Manager 并发和生命周期。

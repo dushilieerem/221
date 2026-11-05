@@ -18,19 +18,14 @@
 | [FEAT-013-机器学习模型接口](FEAT-013-机器学习模型接口/README.md) | 机器学习模型接口 |
 | [FEAT-014-策略调仓日志](FEAT-014-策略调仓日志/README.md) | 调仓日志 |
 | [FEAT-015-个股日线API](FEAT-015-个股日线API/README.md) | 个股日线 |
-| [FEAT-016-AI因子生成API](FEAT-016-AI因子生成API/README.md) | AI 因子草稿 |
 | [FEAT-017-策略资产](FEAT-017-策略资产/README.md) | 策略资产 |
-| [FEAT-019-AI向量化策略生成API](FEAT-019-AI向量化策略生成API/README.md) | AI 策略草稿 |
-| [FEAT-020-AI回测解读](FEAT-020-AI回测解读/README.md) | AI 回测解读 |
 | [FEAT-021-指数成分API](FEAT-021-指数成分API/README.md) | 指数成分 |
 | [FEAT-022-经典策略迁移](FEAT-022-经典策略迁移/README.md) | 经典策略迁移 |
 | [FEAT-023-WorldQuantAlpha101](FEAT-023-WorldQuantAlpha101/README.md) | Alpha101 |
 | [FEAT-026-国泰君安Alpha191](FEAT-026-国泰君安Alpha191/README.md) | Alpha191 |
-| [FEAT-027-因子批量回测](FEAT-027-因子批量回测/README.md) | 批量回测 |
 | [FEAT-028-分层应用架构](FEAT-028-分层应用架构/README.md) | 分层改造 |
 | [FEAT-029-因子注册](FEAT-029-因子注册/README.md) | 因子注册 |
 | [FEAT-032-日终模拟盘](FEAT-032-日终模拟盘/README.md) | 日终结算（跨仓库能力） |
-| [FEAT-033-AI策略转写](FEAT-033-AI策略转写/README.md) | 聚宽策略转写 |
 | [FEAT-034-聚宽对账基线](FEAT-034-聚宽对账基线/README.md) | 与聚宽回测逐层对账 |
 
 ## 目录约定

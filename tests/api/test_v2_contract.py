@@ -4,7 +4,6 @@ from fastapi.testclient import TestClient
 from types import SimpleNamespace
 
 from app.main import create_app
-from app.services.factor_backtest_batch.task_registry import FactorBacktestBatchTaskRegistry
 from app.services.experiment.manager import ExperimentManager
 
 
@@ -19,7 +18,7 @@ class _TestDataEngine(SimpleNamespace):
         self.provider = None
 
 
-def test_app_main_owns_manager_and_batch_task_registry_lifecycle():
+def test_app_main_owns_manager_lifecycle():
     application = create_app(testing=True)
     application.state.experiment_manager.shutdown()
     data_engine = _TestDataEngine()
@@ -27,10 +26,7 @@ def test_app_main_owns_manager_and_batch_task_registry_lifecycle():
     application.state.experiment_manager = ExperimentManager()
     with TestClient(application) as client:
         assert isinstance(application.state.experiment_manager, ExperimentManager)
-        assert isinstance(
-            application.state.factor_backtest_batch_task_registry,
-            FactorBacktestBatchTaskRegistry,
-        )
+        assert not hasattr(application.state, "factor_backtest_batch_task_registry")
         assert not hasattr(application.state, "daily_factor_backtest")
         response = client.get("/api/health")
         assert response.status_code == 200

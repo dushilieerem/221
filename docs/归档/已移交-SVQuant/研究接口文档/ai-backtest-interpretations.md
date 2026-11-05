@@ -1,6 +1,6 @@
 # AI 回测解读与优化建议 API
 
-> 状态：受控 MVP，开发中。关联：[FEAT-020](../../FEAT-020-AI回测解读/README.md)。
+> 状态：受控 MVP，开发中。关联：[FEAT-020](../FEAT-020-AI回测解读/README.md)。
 >
 > 本页描述当前已实现行为。端点不执行回测、不修改策略或因子、不自动选择参数，也不输出投资建议。
 
@@ -24,7 +24,7 @@
 
 ### `POST /api/ai/backtest-interpretations`
 
-请求体必须为 JSON，未知字段返回 `422`。`result` 应直接使用 [因子回测](backtest-factor.md) 或[策略回测](backtest-strategy.md)的成功响应；`error` 必须为 `null`。
+请求体必须为 JSON，未知字段返回 `422`。`result` 应直接使用 [因子回测](../../../功能包/FEAT-002-研究引擎/06-研究接口文档/backtest-factor.md) 或[策略回测](../../../功能包/FEAT-002-研究引擎/06-研究接口文档/backtest-strategy.md)的成功响应；`error` 必须为 `null`。
 
 ```json
 {

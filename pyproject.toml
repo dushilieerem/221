@@ -42,7 +42,6 @@ dev = [
 ]
 
 [project.scripts]
-researchengine-factor-backtest-batch = "app.cli.factor_backtest_batch:main"
 researchengine-joinquant-parity = "app.cli.joinquant_parity:main"
 
 [tool.setuptools.packages.find]
