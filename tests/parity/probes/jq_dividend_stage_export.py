@@ -649,10 +649,16 @@ def _rows_of(day, codes, stage, values=None):
 
 
 def _top(series, fraction):
+    """按市值排序取前 fraction——必须是「按股息率降序」，不能直接用输入顺序。
+
+    策略里这一步是 `_stable_rank(dividend_yield, ascending=False).head(...)`；
+    早期版本误用 `series.head()`，导致 A 池后面的波动率/排名用了错误的候选集。
+    """
+
     if series is None or len(series) == 0:
         return series
     count = max(1, int(np.ceil(len(series) * fraction)))
-    return series.head(count)
+    return _stable_rank(series, ascending=False).head(count)
 
 
 def run_date(day, previous):

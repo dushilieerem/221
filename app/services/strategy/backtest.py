@@ -573,8 +573,12 @@ def _run_event_strategy_backtest(
         panel_start = req.start
         warmup = req.strategy_dialect == "joinquant"
         if warmup:
+            # 聚宽策略的 get_price(count=N) 直接对应 N 个交易日的历史；红利这类
+            # 策略要看 780 个交易日（约 3.1 年），400 天预热会把窗口截断，
+            # 波动率等指标因此失真（实测 601288 的 780 日周波动率 0.0311 vs
+            # 聚宽 0.0246）。这里按最长常用窗口留足 1200 个自然日。
             panel_start = (
-                pd.Timestamp(req.start) - pd.Timedelta(days=400)
+                pd.Timestamp(req.start) - pd.Timedelta(days=1200)
             ).strftime("%Y-%m-%d")
         # 无条件加载 listed_status：退市剔除恒开启，不依赖 filter_st 开关。
         # 聚宽策略还会 get_price(fields=['paused'])，需要逐日停牌状态。
