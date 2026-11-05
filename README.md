@@ -71,16 +71,11 @@ Worker；后台脚本的默认日志为 `logs/app.log`，PID 文件为 `run/app.
 ```text
 POST /api/backtest/factor
 POST /api/backtest/strategy
-POST /api/ai/post-summaries
 GET  /api/factor-libraries
 GET  /api/strategies
 ```
 
-因子批量回测与 AI 因子/策略生成、回测解读、策略转写已于 2026-11-05 移交 SVQuant，RE 侧代码与路由已删除；历史文档见 `docs/归档/已移交-SVQuant/`。
-
-帖子摘要兜底的 Provider 地址、API Key 和模型名可配置在 `config.yaml` 的 `ai.base_url`、
-`ai.api_key` 与 `ai.model` 中。`config.yaml` 已加入 `.gitignore`，不会提交到仓库；也可用
-`AI_FACTOR_API_KEY` / `AI_FACTOR_BASE_URL` / `AI_FACTOR_MODEL_ALIAS` 环境变量覆盖。
+因子批量回测与全部 AI 功能（因子/策略生成、回测解读、策略转写、帖子摘要）已于 2026-11-05 移交 SVQuant，RE 侧代码、路由与 `ai.*` 配置已删除；历史文档见 `docs/归档/已移交-SVQuant/`。
 
 ## 开发与测试
 

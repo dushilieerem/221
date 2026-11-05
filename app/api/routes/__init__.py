@@ -3,7 +3,6 @@
 from fastapi import APIRouter
 
 from app.api.routes import (
-    ai,
     catalog,
     data,
     factor,
@@ -18,7 +17,6 @@ router = APIRouter(prefix="/api")
 router.include_router(health.router)
 router.include_router(data.router)
 router.include_router(catalog.router)
-router.include_router(ai.router)
 router.include_router(factor.router)
 router.include_router(ml.router)
 router.include_router(strategy.router)

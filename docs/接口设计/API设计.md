@@ -82,14 +82,6 @@ http://<host>:<server.port>/api
   `DATA_RELEASE_MISMATCH`；422 请求或组合非法；500 内部错误。
 - 该接口只依赖内网信任边界，未实现服务间认证；不得暴露公网。
 
-### AI 辅助 API
-
-| 方法 | 路径 | 功能 | 详细契约 |
-|---|---|---|---|
-| POST | `/api/ai/post-summaries` | 社区帖子结构化摘要（临时兜底） | 本页；见 [已移交功能说明](../归档/已移交-SVQuant/README.md) |
-
-AI 因子生成、策略生成、回测解读与策略转写已于 2026-11-05 移交 SVQuant，RE 只保留帖子摘要兜底，待 SVQuant 移除 fallback 后删除。`ai.*` 配置仍用于该接口。
-
 ---
 
 ## 4. 异步任务约定

@@ -182,9 +182,6 @@ class RuntimeSettings:
     strategy_dir: Path
     strategy_index: Path
     output_path: Path
-    ai_base_url: str
-    ai_api_key: str | None = field(repr=False)
-    ai_model: str
     #: 未解析符号链接的配置路径；发布轮换时用它重新解析目标。
     data_dir_configured: Path | None = None
     data_manifest_configured: Path | None = None
@@ -208,7 +205,6 @@ def _from_manager(manager: ConfigManager, config_path: Path) -> RuntimeSettings:
     assets = _section(manager, "assets")
     cache = _section(manager, "cache")
     storage = _section(manager, "storage")
-    ai = _section(manager, "ai")
 
     # data.dir 是独立仓库的正式配置；保留旧的 data_dir 键作为一次性迁移兼容，
     # 但不再读取任何环境变量。
@@ -272,10 +268,6 @@ def _from_manager(manager: ConfigManager, config_path: Path) -> RuntimeSettings:
         base=base_dir,
         default=base_dir / "output",
     )
-    ai_base_url = _optional_string(ai.get("base_url"), "ai.base_url")
-    ai_api_key = _optional_string(ai.get("api_key"), "ai.api_key")
-    ai_model = _optional_string(ai.get("model"), "ai.model")
-
     max_workers = _int(
         runtime.get("max_workers", application.get("max_workers")),
         "runtime.max_workers",
@@ -359,11 +351,6 @@ def _from_manager(manager: ConfigManager, config_path: Path) -> RuntimeSettings:
         strategy_dir=strategy_dir,
         strategy_index=strategy_index,
         output_path=output_path,
-        ai_base_url=(
-            ai_base_url or "https://ark.cn-beijing.volces.com/api/coding/v3"
-        ).rstrip("/"),
-        ai_api_key=ai_api_key,
-        ai_model=ai_model or "ark-code-latest",
     )
 
 

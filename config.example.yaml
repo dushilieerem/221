@@ -17,11 +17,6 @@ runtime:
 
 # 所有 AI 功能共用的 OpenAI 兼容服务配置；API Key 填在本地 config.yaml。
 # AI_FACTOR_*、AI_STRATEGY_*、AI_BACKTEST_INTERPRETATION_* 环境变量可按功能覆盖。
-ai:
-  base_url: https://ark.cn-beijing.volces.com/api/coding/v3
-  api_key: ""
-  model: ark-code-latest
-
 data:
   # ResearchEngine 只读使用外部行情目录；不要把 marketdata 复制进本仓库。
   # 从本仓库启动时，对应上级 project 目录中的 marketdata。
