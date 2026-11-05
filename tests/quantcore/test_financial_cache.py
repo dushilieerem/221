@@ -78,8 +78,8 @@ def test_fundamentals_expression_and_valuation_merge(data_root):
     assert frame.loc[0, "pb_ratio"] == pytest.approx(1.2)
 
 
-def test_fundamentals_net_profit_growth_uses_parent_cumulative(data_root):
-    """净利润同比按归母累计口径，与去年同期同报告期比较。"""
+def test_fundamentals_net_profit_growth_uses_single_quarter(data_root):
+    """净利润同比按单季度归母口径，与去年同一报告期比较（聚宽 indicator 口径）。"""
     from app.services.strategy.compat.query import indicator
 
     store = FundamentalStore(root=data_root)
@@ -87,7 +87,7 @@ def test_fundamentals_net_profit_growth_uses_parent_cumulative(data_root):
 
     frame = store.query(q, as_of="2024-09-01")
 
-    # 2024H1 归母累计 6.0，2023H1 4.0。
+    # 单季度归母：2024Q2 = 6.0，2023Q2 = 4.0。
     assert frame.loc[0, "inc_net_profit_year_on_year"] == pytest.approx(50.0)
 
 

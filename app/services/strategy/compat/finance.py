@@ -99,6 +99,41 @@ class FinanceNamespace:
             merged["interest"], errors="coerce"
         ).fillna(0.0) / 10.0
         total_shares = pd.to_numeric(merged["total_capital"], errors="coerce")
+        # 送股/转增：派息按登记日股本计算，而股本表里新股本在送股公告时
+        # 就已出现（早于派息记录日）。若选中的股本恰好是本次送股后的值
+        # （比值≈1+送股/10），回退到送股前的股本，避免派息总额被放大
+        # 1.5 倍、股息率失真（聚宽 bonus_amount_rmb 按登记日股本）。
+        stock_bonus = pd.to_numeric(
+            merged["stockBonus"], errors="coerce"
+        ).fillna(0.0)
+        adjusted = total_shares.copy()
+        need_fix = stock_bonus > 0
+        if need_fix.any():
+            history = {
+                symbol: list(zip(
+                    group.sort_values("announce")["announce"].to_numpy(),
+                    group.sort_values("announce")["total_capital"].to_numpy(dtype=float),
+                ))
+                for symbol, group in shares.groupby("Symbol")
+            }
+            for position in merged.index[need_fix]:
+                symbol = merged.at[position, "Symbol"]
+                current = float(total_shares.at[position])
+                records = history.get(symbol)
+                if records is None or not np.isfinite(current):
+                    continue
+                selected = merged.at[position, "announce"]
+                previous = [
+                    value for announce, value in records
+                    if announce <= selected and value != current
+                ]
+                if not previous:
+                    continue
+                base = float(previous[-1])
+                target = 1.0 + float(stock_bonus.at[position]) / 10.0
+                if base > 0 and abs(current / base - target) <= 0.02:
+                    adjusted.at[position] = base
+        total_shares = adjusted
         bonus = cash_per_share * total_shares / 10000.0
         bonus = bonus.replace([np.inf, -np.inf], np.nan)
         # 预先把列名改成聚宽查询字段，后续每次查询直接布尔过滤，避免重复
