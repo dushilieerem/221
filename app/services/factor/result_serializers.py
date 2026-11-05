@@ -108,39 +108,46 @@ def _compute_drawdowns(equity: pd.Series) -> list[DrawdownInfo]:
     peak_value = None
     trough_date = None
     trough_value = None
+    # 真正的峰值是「进入回撤之前」的最后一个新高；进入回撤当天已经在下行了，
+    # 不能把当天的净值当成峰值（否则区间深度会明显小于指标层的 max_drawdown）。
+    last_peak_date = None
+    last_peak_value = None
 
-    for date, (eq_val, dd_val) in enumerate(zip(equity.items(), drawdown.items())):
+    for eq_val, dd_val in zip(equity.items(), drawdown.items()):
         idx, eq = eq_val
         _, dd = dd_val
 
-        if dd < 0 and not in_drawdown:
-            # 开始回撤
+        if dd >= 0:
+            last_peak_date = idx
+            last_peak_value = eq
+            if in_drawdown:
+                # 回撤恢复
+                in_drawdown = False
+                depth = (trough_value - peak_value) / peak_value
+                days = (idx - peak_date).days
+                drawdowns_list.append(
+                    DrawdownInfo(
+                        start=str(peak_date.date()),
+                        end=str(trough_date.date()),
+                        peak=float(peak_value),
+                        trough=float(trough_value),
+                        recovery=str(idx.date()),
+                        depth=float(depth),
+                        days=days,
+                    )
+                )
+            continue
+
+        if not in_drawdown:
+            # 开始回撤：峰值取进入回撤前最后一个新高。
             in_drawdown = True
-            peak_date = idx
-            peak_value = eq
+            peak_date = last_peak_date
+            peak_value = last_peak_value
             trough_date = idx
             trough_value = eq
-        elif dd < 0 and in_drawdown:
-            # 回撤中，更新最低点
-            if eq < trough_value:
-                trough_date = idx
-                trough_value = eq
-        elif dd >= 0 and in_drawdown:
-            # 回撤恢复
-            in_drawdown = False
-            depth = (trough_value - peak_value) / peak_value
-            days = (idx - peak_date).days
-            drawdowns_list.append(
-                DrawdownInfo(
-                    start=str(peak_date.date()),
-                    end=str(trough_date.date()),
-                    peak=float(peak_value),
-                    trough=float(trough_value),
-                    recovery=str(idx.date()),
-                    depth=float(depth),
-                    days=days,
-                )
-            )
+        elif eq < trough_value:
+            trough_date = idx
+            trough_value = eq
 
     # 如果到末尾还在回撤中
     if in_drawdown and trough_date is not None and peak_date is not None:
