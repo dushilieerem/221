@@ -50,6 +50,7 @@ from app.services.factor.result_serializers import (
     _compute_drawdowns,
     _compute_equity_with_drawdown,
     _display_instrument,
+    _horizon_ic_payload,
     _ic_points,
     _industry_equity_to_response,
     _industry_group_equity_to_response,
@@ -196,6 +197,7 @@ def _request_spec(req: FactorBacktestRequest) -> FactorBacktestSpec:
         winsorize=req.winsorize,
         standardize=req.standardize,
         analysis_level=req.analysis_level,
+        ic_horizons=tuple(req.ic_horizons),
         engine="native",
         strict_as_of=True,
     )
@@ -336,6 +338,7 @@ def _factor_request_from_spec(spec: FactorBacktestSpec) -> FactorBacktestRequest
         "winsorize": spec.winsorize,
         "standardize": spec.standardize,
         "analysis_level": spec.analysis_level,
+        "ic_horizons": list(spec.ic_horizons),
     }
     if spec.universe_snapshot is not None:
         payload["universe_snapshot"] = spec.universe_snapshot
@@ -694,6 +697,7 @@ def _serialize_factor_execution(
     if req.analysis_level in {"core", "full"}:
         layered_equity = analysis.get("layered_equity", pd.DataFrame())
         ic_series = analysis.get("ic_series", pd.DataFrame())
+        rank_ic_series = analysis.get("rank_ic_series", pd.DataFrame())
         cumulative_ic = analysis.get("cumulative_ic", pd.Series(dtype=float))
         rolling_ir = analysis.get("rolling_ir", pd.Series(dtype=float))
         has_layered_groups = len(layered_equity.columns) >= req.groups
@@ -719,12 +723,14 @@ def _serialize_factor_execution(
             cumulative_series=_layered_equity_to_points(layered_equity),
             definition={
                 "ic_type": "pearson",
+                "rank_ic_type": "spearman_rank",
+                "ic_horizons": list(execution.spec.ic_horizons),
                 "ic_std_ddof": 1,
                 # IC 不可用时的原因；可用为 None。取值为
                 # missing_inputs / no_common_axis /
                 # insufficient_cross_section / zero_cross_sectional_variance。
                 "ic_unavailable_reason": analysis.get("ic_unavailable_reason"),
-                "forward_return_days": 1,
+                "forward_return_days": execution.spec.forward_return_days,
                 "signal_lag_days": 0,
                 "rolling_ir_window": 60,
                 "groups": req.groups,
@@ -751,6 +757,8 @@ def _serialize_factor_execution(
                 } if req.analysis_level == "full" else {}),
             },
             ic_series=_ic_points(ic_series),
+            rank_ic_series=_ic_points(rank_ic_series),
+            ic_horizons=_horizon_ic_payload(analysis.get("ic_horizons", {})),
             cumulative_ic_series=_value_points(cumulative_ic),
             rolling_ir_series=_rolling_ir_points(rolling_ir),
             industry_equity_curves=_industry_equity_to_response(

@@ -10,7 +10,7 @@ import math
 from typing import Any, Literal, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 # ---------------- 请求 ----------------
@@ -120,6 +120,33 @@ class FactorBacktestRequest(BaseModel):
     analysis_level: Literal["core", "full"] = Field(
         "core", description="core | full"
     )
+    #: 因子 IC 的多持有期（交易日）。默认 [1]；显式传入多个时，响应在
+    #: ``analysis.ic_horizons`` 额外返回每个持有期的 IC/RankIC 明细，
+    #: 用于 IC 衰减。顶层 ``ic_mean``/``rank_ic_mean``/``ic_series`` 仍是
+    #: 1 日口径。
+    ic_horizons: list[int] = Field(
+        default_factory=lambda: [1],
+        description="IC 持有期列表（交易日，1-20，自动去重升序）",
+    )
+
+    @field_validator("ic_horizons", mode="before")
+    @classmethod
+    def validate_ic_horizons(cls, value: object) -> list[int]:
+        """去重升序并限制在 1-20 个交易日，拒绝布尔值冒充整数。"""
+        if value is None:
+            return [1]
+        if not isinstance(value, (list, tuple)):
+            raise ValueError("ic_horizons 必须是整数列表")
+        horizons: list[int] = []
+        for item in value:
+            if isinstance(item, bool) or not isinstance(item, int):
+                raise ValueError("ic_horizons 必须是整数")
+            if item < 1 or item > 20:
+                raise ValueError("ic_horizons 的取值必须在 1-20 之间")
+            horizons.append(item)
+        if not horizons:
+            raise ValueError("ic_horizons 不能为空")
+        return sorted(set(horizons))
 
     @model_validator(mode="after")
     def validate_factor_source(self):
@@ -333,6 +360,19 @@ class ICPoint(ValuePoint):
     sample_size: int
 
 
+class HorizonIC(BaseModel):
+    """单个持有期的 IC/RankIC 汇总与日度序列。"""
+    horizon: int
+    ic_mean: Optional[float] = None
+    ic_std: Optional[float] = None
+    rank_ic_mean: Optional[float] = None
+    ic_ir: Optional[float] = None
+    valid_days: int = 0
+    ic_series: list[ICPoint] = []
+    rank_ic_series: list[ICPoint] = []
+    unavailable_reason: Optional[str] = None
+
+
 class RollingIRPoint(ValuePoint):
     """滚动 IC 信息比率。"""
     window: int
@@ -369,6 +409,10 @@ class FactorAnalysis(BaseModel):
     quantile_metrics: list[QuantileMetric] = []
     definition: "dict[str, object]" = {}
     ic_series: list[ICPoint] = []
+    #: 日度 RankIC（Spearman）序列；``core`` 与 ``full`` 都返回。
+    rank_ic_series: list[ICPoint] = []
+    #: 多持有期 IC 明细，键为持有交易日；默认请求 [1] 时为空。
+    ic_horizons: "dict[str, HorizonIC]" = {}
     cumulative_ic_series: list[ValuePoint] = []
     rolling_ir_series: list[RollingIRPoint] = []
     industry_equity_curves: list[IndustryEquityCurve] = []
@@ -399,7 +443,7 @@ class FactorBacktestMeta(BaseModel):
     execution_timing: Literal["same_close", "next_close", "next_open"] = "next_close"
     execution_model: dict[str, str] = Field(default_factory=dict)
     execution_version: str = "factor-execution-v8"
-    metric_version: str = "factor-scorecard-v4"
+    metric_version: str = "factor-scorecard-v5"
     data_release_id: Optional[str] = None
     spec_hash: Optional[str] = None
     factor_source_hash: Optional[str] = None

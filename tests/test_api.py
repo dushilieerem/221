@@ -984,7 +984,29 @@ def test_factor_backtest_defaults_to_core_analysis(market_data_dir):
     ]
     assert analysis["industry_equity_curves"] == []
     assert analysis["ic_series"] == []
+    # 日度 RankIC 在 core 与 full 都返回；多持有期默认不展开。
+    assert analysis["rank_ic_series"]
+    assert analysis["ic_horizons"] == {}
+    assert analysis["definition"]["rank_ic_type"] == "spearman_rank"
     assert body["meta"]["timings_seconds"]["api_total"] >= 0
+
+
+def test_factor_backtest_returns_multi_horizon_ic(market_data_dir):
+    payload = {
+        **_request_payload(),
+        "analysis_level": "core",
+        "ic_horizons": [1, 5],
+    }
+    body = _wait_factor_task(payload).json()["result"]
+    analysis = body["factor_analysis"]
+    horizons = analysis["ic_horizons"]
+    assert set(horizons) == {"1", "5"}
+    assert horizons["5"]["horizon"] == 5
+    assert horizons["1"]["valid_days"] > 0
+    # 5 日持有期在区间末端少 4 个有效日。
+    assert horizons["5"]["valid_days"] < horizons["1"]["valid_days"]
+    assert horizons["5"]["rank_ic_series"]
+    assert analysis["definition"]["ic_horizons"] == [1, 5]
 
 
 def test_data_change_invalidates_cache(market_data_dir):

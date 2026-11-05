@@ -71,3 +71,11 @@ def test_report_metric_revision_changes_computation_identity():
     spec = FactorBacktestSpec(factor_name="roc")
     assert spec.metric_version != "factor-scorecard-v3"
     assert spec.identity() != replace(spec, metric_version="factor-scorecard-v3").identity()
+
+
+def test_ic_horizons_enter_computation_identity():
+    """不同 IC 持有期不能共用缓存键。"""
+
+    spec = FactorBacktestSpec(factor_name="roc")
+    assert spec.ic_horizons == (1,)
+    assert spec.identity() != replace(spec, ic_horizons=(1, 5)).identity()

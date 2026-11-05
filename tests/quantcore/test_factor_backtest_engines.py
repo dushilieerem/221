@@ -528,6 +528,114 @@ def test_metric_engine_owns_factor_analysis_and_benchmark_alignment():
         )
 
 
+def test_forward_returns_for_horizon_matches_execution_timing():
+    """多持有期远期收益在 h=1 时与既有成交口径逐点一致。"""
+
+    dates = pd.date_range("2026-01-02", periods=6, freq="B")
+    close = pd.DataFrame(
+        {"A": [100.0, 110.0, 121.0, 133.1, 146.41, 161.051]},
+        index=dates,
+    )
+    open_prices = close * 0.995
+    base = close.shift(-1).div(close).sub(1.0)
+
+    for timing in ("same_close", "next_close", "next_open"):
+        expected = MetricEngine._execution_forward_returns(
+            base, close, open_prices, timing
+        )
+        actual = MetricEngine._forward_returns_for_horizon(
+            close, open_prices, timing, 1
+        )
+        pd.testing.assert_frame_equal(actual, expected)
+
+    # h=2：same_close 为 t→t+2；next_close 为 t+1→t+3；
+    # next_open 为 t+1 开盘→t+2 收盘。
+    two_days = MetricEngine._forward_returns_for_horizon(
+        close, open_prices, "same_close", 2
+    )
+    assert two_days.loc[dates[0], "A"] == pytest.approx(121.0 / 100.0 - 1.0)
+    two_days = MetricEngine._forward_returns_for_horizon(
+        close, open_prices, "next_close", 2
+    )
+    assert two_days.loc[dates[0], "A"] == pytest.approx(133.1 / 110.0 - 1.0)
+    two_days = MetricEngine._forward_returns_for_horizon(
+        close, open_prices, "next_open", 2
+    )
+    assert two_days.loc[dates[0], "A"] == pytest.approx(
+        121.0 / (110.0 * 0.995) - 1.0
+    )
+
+
+def test_multi_horizon_ic_is_opt_in_and_keeps_primary_series():
+    """显式请求多个持有期时，ic_horizons 与顶层 1 日口径互不干扰。"""
+
+    dates = pd.date_range("2026-01-02", periods=8, freq="B")
+    symbols = list("ABCD")
+    rng = np.random.default_rng(3)
+    close = pd.DataFrame(
+        100.0 * np.cumprod(1.0 + rng.normal(0, 0.01, (8, 4)), axis=0),
+        index=dates,
+        columns=symbols,
+    )
+    factor = pd.DataFrame(
+        rng.normal(size=(8, 4)), index=dates, columns=symbols
+    )
+    portfolio = PortfolioEngine().build(
+        factor, close, groups=2, portfolio_type="long_only", stock_num=2
+    )
+
+    default = MetricEngine().evaluate_factor_portfolio(
+        portfolio,
+        analysis_level="core",
+        benchmark_loader=lambda index: pd.Series(1.0, index=index),
+        groups=2,
+    )
+    assert "ic_horizons" not in default["factor_analysis"]
+    assert list(default["factor_analysis"]["rank_ic_series"].columns) == [
+        "value", "sample_size",
+    ]
+
+    evaluation = MetricEngine().evaluate_factor_portfolio(
+        portfolio,
+        analysis_level="core",
+        benchmark_loader=lambda index: pd.Series(1.0, index=index),
+        groups=2,
+        ic_horizons=(1, 2),
+    )
+    horizons = evaluation["factor_analysis"]["ic_horizons"]
+    assert set(horizons) == {"1", "2"}
+    # h=1 直接复用主路径统计，逐点相同。
+    pd.testing.assert_frame_equal(
+        horizons["1"]["ic_series"], evaluation["ic_series"]
+    )
+    # h=2 用同一份 factor_values 与独立的远期收益矩阵计算。
+    expected = MetricEngine._factor_statistics(
+        evaluation["context"].factor_values,
+        MetricEngine._forward_returns_for_horizon(close, None, "next_close", 2),
+        252,
+    )
+    pd.testing.assert_frame_equal(horizons["2"]["ic_series"], expected["ic_series"])
+
+
+def test_ic_horizons_request_normalization_and_validation():
+    from pydantic import ValidationError
+
+    from app.schemas.backtest import FactorBacktestRequest
+
+    def request(**kwargs):
+        return FactorBacktestRequest(
+            factor_name="f",
+            factor_code="def f(self):\n    return self.close",
+            **kwargs,
+        )
+
+    assert request().ic_horizons == [1]
+    assert request(ic_horizons=[5, 1, 5]).ic_horizons == [1, 5]
+    for bad in ([], [0], [21], [True], "1"):
+        with pytest.raises(ValidationError):
+            request(ic_horizons=bad)
+
+
 def test_portfolio_aligns_forward_returns_after_full_price_shift():
     dates = pd.date_range("2026-01-02", periods=4, freq="B")
     close = pd.DataFrame({"A": [100.0, 110.0, 121.0, 133.1]}, index=dates)
