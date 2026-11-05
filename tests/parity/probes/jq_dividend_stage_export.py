@@ -27,11 +27,23 @@ STAGE_OUTPUT = "红利v3_选股阶段导出.csv"
 WEIGHT_OUTPUT = "红利v3_最终权重导出.csv"
 
 
+# 研究环境同一个 kernel 里重复运行本 cell 时，globals 里会残留上一次的
+# 包装函数；先清掉，否则 _ORIGINAL_GET_INDUSTRY 会捕获到它自己，无限递归。
+if "get_industry" in globals():
+    _stale = globals().get("get_industry")
+    if getattr(_stale, "__module__", None) == "__main__":
+        del globals()["get_industry"]
+
 # 研究环境的 get_industry 可能返回 DataFrame（回测里是 dict），统一成 dict。
-_ORIGINAL_GET_INDUSTRY = get_industry
+try:
+    _ORIGINAL_GET_INDUSTRY = get_industry
+except NameError:
+    _ORIGINAL_GET_INDUSTRY = None
 
 
 def get_industry(security, date=None, **kwargs):
+    if _ORIGINAL_GET_INDUSTRY is None:
+        raise RuntimeError("研究环境没有 get_industry；请重启内核后重新运行本 cell")
     result = _ORIGINAL_GET_INDUSTRY(security, date=date, **kwargs)
     if isinstance(result, pd.DataFrame):
         mapping = {}
