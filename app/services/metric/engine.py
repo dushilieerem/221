@@ -18,7 +18,7 @@ Research 只调用 ``metric.calculate(...)``。
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 import logging
 import math
 from typing import Any, Dict
@@ -229,6 +229,52 @@ class MetricEngine:
         )
 
     @staticmethod
+    def _forward_returns_for_horizon(
+        close: pd.DataFrame,
+        open_prices: pd.DataFrame | None,
+        execution_timing: str,
+        horizon: int,
+    ) -> pd.DataFrame:
+        """按成交时点生成指定持有期的远期收益。
+
+        与 :meth:`_execution_forward_returns` 的 1 日口径严格一致，只是把持有
+        期从 1 天推广到 ``horizon`` 天：
+
+        - ``same_close``：t 日收盘买入，持有 h 天，``close[t+h]/close[t]-1``；
+        - ``next_close``：t+1 日收盘买入，持有 h 天，``close[t+1+h]/close[t+1]-1``；
+        - ``next_open``：t+1 日开盘买入，持有 h 天，``close[t+h]/open[t+1]-1``。
+        """
+
+        if horizon < 1:
+            raise ValueError("远期收益 horizon 至少为 1")
+        if execution_timing == "same_close":
+            return close.shift(-int(horizon)).div(close).sub(1.0)
+        if execution_timing == "next_close":
+            return (
+                close.shift(-(int(horizon) + 1))
+                .div(close.shift(-1))
+                .sub(1.0)
+            )
+        if execution_timing == "next_open":
+            if open_prices is None:
+                raise ValueError(
+                    "execution_timing='next_open' 需要开盘价，但评测层没有收到 "
+                    "open 面板"
+                )
+            prices_open = open_prices.reindex(
+                index=close.index, columns=close.columns
+            ).replace(0.0, float("nan"))
+            return (
+                close.shift(-int(horizon))
+                .div(prices_open.shift(-1))
+                .sub(1.0)
+            )
+        raise ValueError(
+            f"不支持的 execution_timing: {execution_timing!r}，"
+            "可选 same_close | next_close | next_open"
+        )
+
+    @staticmethod
     def _layered_returns(
         asset_returns: pd.DataFrame,
         group_assignments: pd.DataFrame,
@@ -363,7 +409,7 @@ class MetricEngine:
         """
         return {
             "ic_series": pd.DataFrame(columns=["value", "sample_size"]),
-            "rank_ic_series": pd.Series(dtype=float),
+            "rank_ic_series": pd.DataFrame(columns=["value", "sample_size"]),
             "summary": {
                 "ic_mean": None,
                 "rank_ic_mean": None,
@@ -453,9 +499,15 @@ class MetricEngine:
         ir = None if std is None else (
             0.0 if std == 0 else mean / std * (periods_per_year ** 0.5)
         )
+        # RankIC 与 IC 的有效日可能不完全重合（秩相关对常数截面同样无定义，
+        # 但浮点判定边界不同）；保留 RankIC 自己的有效日，样本数按当日对齐。
+        rank_ic_series = pd.DataFrame({
+            "value": rank_ic,
+            "sample_size": sample_size.reindex(rank_ic.index),
+        }).dropna(subset=["value"])
         return {
             "ic_series": ic_series,
-            "rank_ic_series": rank_ic,
+            "rank_ic_series": rank_ic_series,
             "summary": {
                 "ic_mean": mean,
                 "rank_ic_mean": (
@@ -630,14 +682,32 @@ class MetricEngine:
         if analysis_level not in {"core", "full"}:
             return {}
 
+        rank_ic_series = evaluation.get("rank_ic_series")
+        if not isinstance(rank_ic_series, pd.DataFrame):
+            rank_ic_series = pd.DataFrame(columns=["value", "sample_size"])
         out: dict[str, Any] = {
             "layered_returns": evaluation["layered_returns"],
             "layered_equity": evaluation["layered_equity"],
             "predictive_summary": evaluation["predictive_summary"],
+            # 日度 RankIC 序列：core 与 full 都返回，供 NW t 检验与 IC 稳定性
+            # 使用；与 full-only 的 Pearson ic_series 并行存在。
+            "rank_ic_series": rank_ic_series,
             # IC 不可用的原因（可用时为 None）；core 与 full 都带回。
             "ic_unavailable_reason": evaluation.get("ic_unavailable_reason"),
             "group_turnover": evaluation.get("group_turnover", pd.DataFrame()),
         }
+        # 多持有期 IC 只在调用方显式请求多个持有期时出现，避免默认响应变大。
+        horizon_statistics = evaluation.get("ic_horizon_statistics") or {}
+        if len(horizon_statistics) > 1:
+            out["ic_horizons"] = {
+                str(horizon): {
+                    "summary": statistics.get("summary", {}),
+                    "ic_series": statistics.get("ic_series"),
+                    "rank_ic_series": statistics.get("rank_ic_series"),
+                    "unavailable_reason": statistics.get("unavailable_reason"),
+                }
+                for horizon, statistics in sorted(horizon_statistics.items())
+            }
         if analysis_level == "full":
             # evaluate_factor_portfolio 已经完成一次因子/远期收益对齐和 IC
             # 计算；full 只复用结果，不再重新扫描日期×标的矩阵。
@@ -723,6 +793,7 @@ class MetricEngine:
         market_fields: Mapping[str, pd.DataFrame] | None = None,
         rebalance: str | int = 1,
         groups: int | None = 5,
+        ic_horizons: Sequence[int] = (1,),
     ) -> dict[str, Any]:
         """评价 PortfolioEngine 产物并返回普通 Python 映射。
 
@@ -781,6 +852,24 @@ class MetricEngine:
             forward_returns,
             int(periods_per_year),
         )
+        # 多持有期 IC：只把持有期推广到 h>1，成交时点对齐方式与主路径一致。
+        # h=1 直接复用主路径结果，保证顶层 ic_series 与 ic_horizons["1"]
+        # 逐点相同（PortfolioEngine 的主路径远期收益 horizon 恒为 1）。
+        horizons = tuple(sorted({int(h) for h in ic_horizons})) or (1,)
+        if any(h < 1 for h in horizons):
+            raise ValueError("ic_horizons 的持有期必须 >= 1")
+        horizon_statistics: dict[int, dict[str, Any]] = {}
+        for horizon in horizons:
+            if horizon == 1:
+                horizon_statistics[horizon] = factor_statistics
+                continue
+            horizon_statistics[horizon] = self._factor_statistics(
+                factor_values,
+                self._forward_returns_for_horizon(
+                    close, open_prices, execution_timing, horizon
+                ),
+                int(periods_per_year),
+            )
         ctx = MetricContext(
             equity_curve=equity,
             returns=returns,
@@ -860,6 +949,8 @@ class MetricEngine:
             "transaction_summary": transaction_summary,
             "context": ctx,
             "ic_series": factor_statistics["ic_series"],
+            "rank_ic_series": factor_statistics["rank_ic_series"],
+            "ic_horizon_statistics": horizon_statistics,
             "ic_unavailable_reason": factor_statistics.get("unavailable_reason"),
             "group_turnover": group_turnover,
         }

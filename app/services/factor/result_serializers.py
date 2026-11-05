@@ -13,6 +13,7 @@ from app.schemas.backtest import (
     EventPositionSnapshot,
     ExecutionTimelineItem,
     Holding,
+    HorizonIC,
     ICPoint,
     IndustryEquityCurve,
     IndustryGroupEquityCurve,
@@ -46,7 +47,7 @@ def _value_points(series: pd.Series) -> list[ValuePoint]:
 
 
 def _ic_points(frame: pd.DataFrame) -> list[ICPoint]:
-    if frame.empty:
+    if frame is None or frame.empty:
         return []
     return [
         ICPoint(
@@ -56,6 +57,27 @@ def _ic_points(frame: pd.DataFrame) -> list[ICPoint]:
         )
         for date, row in frame.iterrows() if pd.notna(row["value"])
     ]
+
+
+def _horizon_ic_payload(horizons: dict[str, dict] | None) -> dict[str, HorizonIC]:
+    """把 metric 层的多持有期统计转成响应模型；为空时不生成字段内容。"""
+    if not horizons:
+        return {}
+    payload: dict[str, HorizonIC] = {}
+    for horizon, statistics in sorted(horizons.items(), key=lambda item: int(item[0])):
+        summary = statistics.get("summary") or {}
+        payload[str(horizon)] = HorizonIC(
+            horizon=int(horizon),
+            ic_mean=summary.get("ic_mean"),
+            ic_std=summary.get("ic_std"),
+            rank_ic_mean=summary.get("rank_ic_mean"),
+            ic_ir=summary.get("ic_ir"),
+            valid_days=int(summary.get("valid_days") or 0),
+            ic_series=_ic_points(statistics.get("ic_series")),
+            rank_ic_series=_ic_points(statistics.get("rank_ic_series")),
+            unavailable_reason=statistics.get("unavailable_reason"),
+        )
+    return payload
 
 
 def _rolling_ir_points(series: pd.Series, window: int = 60) -> list[RollingIRPoint]:
@@ -332,6 +354,7 @@ __all__ = [
     "_layered_equity_to_points",
     "_value_points",
     "_ic_points",
+    "_horizon_ic_payload",
     "_rolling_ir_points",
     "_industry_equity_to_response",
     "_industry_group_equity_to_response",

@@ -63,6 +63,9 @@ class FactorBacktestSpec:
     groups: int | None = 5
     stock_num: int = 100
     forward_return_days: int = 1
+    #: 额外计算 IC 的持有期（交易日）。1 日口径恒由标的自身的
+    #: ``forward_return_days`` 主路径计算；这里只列需要并排比较的持有期。
+    ic_horizons: tuple[int, ...] = (1,)
     commission_rate: float = 0.0
     stamp_tax: float = 0.0
     slippage_rate: float = 0.0
@@ -84,7 +87,7 @@ class FactorBacktestSpec:
     output_path: str | None = field(default=None, compare=False, repr=False)
     storage: str = field(default="csv", compare=False, repr=False)
     execution_version: str = "factor-execution-v8"
-    metric_version: str = "factor-scorecard-v4"
+    metric_version: str = "factor-scorecard-v5"
 
     def computation_payload(self) -> dict[str, Any]:
         """返回不含入口/持久化策略的规范化计算身份。"""
@@ -105,6 +108,7 @@ class FactorBacktestSpec:
             "groups": self.groups,
             "stock_num": self.stock_num,
             "forward_return_days": self.forward_return_days,
+            "ic_horizons": list(self.ic_horizons),
             # 成本参数参与主组合的净收益计算，因此必须是计算身份的一部分：
             # 曾经这里被固定为 0，是因为当时因子回测恒用毛收益；成本真正
             # 生效后若仍写 0，不同费率的请求会共用缓存键并互相返回错误结果。

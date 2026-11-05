@@ -186,6 +186,7 @@ class BacktestEngine:
                 market_fields=market_fields,
                 rebalance=spec.rebalance_days,
                 groups=spec.groups,
+                ic_horizons=spec.ic_horizons,
             )
         except (FactorBacktestDataError, FactorBacktestEmptyResult, FactorBacktestParameterError):
             raise

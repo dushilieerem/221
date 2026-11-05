@@ -84,6 +84,7 @@ GET /api/backtest/factor/9f1c...
 | `benchmark` | enum | `CSI300` | `CSI300`、`CSI500`、`CSI1000` 或 `SSE50`。 |
 | `benchmark_snapshot` | object/null | `null` | WebApp 已鉴权并解析的固定权重组合基准快照；与 `benchmark` 至多传一个。 |
 | `analysis_level` | enum | `core` | `core` 或 `full`；后者增加 IC/IR、FF3、行业曲线。 |
+| `ic_horizons` | integer[] | `[1]` | 额外计算的 IC 持有期（交易日，1–20，自动去重升序）。传多个时 `factor_analysis.ic_horizons` 返回每个持有期的 IC/RankIC 明细；顶层字段仍是 1 日口径。 |
 | `filter_suspended` | boolean | `false` | 是否把停牌标的排除出研究样本。 |
 | `filter_st` | boolean | `false` | 是否把 ST、\*ST 标的排除出研究样本。 |
 | `filter_limit_up` | boolean | `false` | 是否把涨停标的排除出研究样本。 |
@@ -124,6 +125,28 @@ GET /api/backtest/factor/9f1c...
 `meta` 会回显 `execution_timing` 与口径字典 `execution_model`（含 `signal`、`fill_price`、`fill_session` 与收益拆分方式）。
 
 > **缓存**：`execution_timing` 已进入计算身份，`execution_version` 升至 `factor-execution-v8`，旧缓存与库中已存批次结果按新口径重算。
+
+### 日度 RankIC 与多持有期 IC
+
+`factor_analysis.rank_ic_series` 返回**日度** RankIC（逐日截面 Spearman 秩相关），与 Pearson 的 `ic_series` 并行；每项为 `{date, value, sample_size}`。`analysis_level` 为 `core` 或 `full` 时都返回。`definition.rank_ic_type` 固定为 `"spearman_rank"`，可用于 NW t 检验和 IC 稳定性分析。
+
+`ic_horizons` 显式传入多个持有期时，`factor_analysis.ic_horizons` 按持有期返回明细：
+
+```json
+{
+  "1": {
+    "horizon": 1,
+    "ic_mean": 0.021, "rank_ic_mean": 0.018,
+    "ic_std": 0.11, "ic_ir": 0.30, "valid_days": 242,
+    "ic_series": [{"date": "2024-01-02", "value": 0.03, "sample_size": 280}],
+    "rank_ic_series": [{"date": "2024-01-02", "value": 0.02, "sample_size": 280}],
+    "unavailable_reason": null
+  },
+  "5": {"horizon": 5, "...": "同结构"}
+}
+```
+
+持有期收益口径与 `execution_timing` 对齐：`same_close` 为 `close[t+h]/close[t]-1`；`next_close` 为 `close[t+1+h]/close[t+1]-1`；`next_open` 为 `close[t+h]/open[t+1]-1`。区间末端的 h 个交易日没有足够未来价格，对应 `valid_days` 会少 h 天，属预期。`ic_horizons` 只影响 IC 明细，不改变主组合、分层曲线与净值；但它是计算身份的一部分，不同持有期不会共用缓存。
 
 ### IC 不可用时的原因
 
@@ -236,7 +259,7 @@ GET /api/backtest/factor/9f1c...
 
 `factor_analysis.ic_std` 使用日频IC的样本标准差（`ddof=1`），不足两个有效IC时为 `null`，口径同时写入 `definition.ic_std_ddof`。逐分位换手按股票权重变化 `Σ|Δw|/2` 计算，保留完整信号日期后按成交时点移位，再与收益日期对齐；从空仓首次建仓计0.5，不是SuperMind的成员新增比例口径。
 
-本次指标修正将 `metric_version` 升至 `factor-scorecard-v4`，使新请求和新批次使用新计算身份，避免复用旧指标缓存。已保存的历史报告不会自动改写，需重新运行后验证新结果。
+本次指标修正（新增日度 RankIC 序列）将 `metric_version` 升至 `factor-scorecard-v5`，使新请求和新批次使用新计算身份，避免复用缺少 `rank_ic_series` 的旧指标缓存。已保存的历史报告不会自动改写，需重新运行后验证新结果。
 
 因子回测响应的 `meta` 会明确返回因子价格和收益价格的复权口径、字段、逻辑来源及精度策略。当前默认策略为：因子使用后复权 OHLC，收益使用后复权 close，均来自研究行情 `data_engine`，读取源精度且不额外四舍五入。`unadjusted_price/unadjusted_price.parquet` 只用于行情展示接口，不参与因子计算。
 
