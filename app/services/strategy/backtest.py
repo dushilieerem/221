@@ -105,6 +105,74 @@ def _strategy_run_identity(req: StrategyBacktestRequest, data_engine) -> dict[st
     return {"data_release_id": release_id, "spec_hash": digest}
 
 
+
+def _factor_refs_code_hash(refs) -> str:
+    """factor_refs 模式的稳定代码身份，进入响应 meta 与 spec_hash。"""
+
+    payload = [
+        {"library": ref.library, "factor": ref.factor, "direction": ref.direction}
+        for ref in refs
+    ]
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def _build_factor_refs_strategy(refs, top_n: int = 30, rebalance_days: int = 20):
+    """用内置因子合成 ``@signal`` 分数，复用 FactorPortfolioStrategy 的选股/调仓。
+
+    只接受库名+因子名；因子通过当前 SQLite 内置因子加载器解析，不执行调用方
+    源码。方向 negative 取负号，各因子先做截面 zscore 再等权合成。
+    """
+
+    from app.models.factor_backtest import FactorBacktestSpec
+    from app.services.factor.loader import load_factor_from_spec
+    from app.services.strategy.vectorized.factor_strategy import (
+        EveryNTradingDays,
+        FactorPortfolioStrategy,
+        TopN,
+        signal,
+    )
+
+    loaded = []
+    for ref in refs:
+        try:
+            factor_obj = load_factor_from_spec(
+                spec=FactorBacktestSpec(
+                    factor_name=ref.factor,
+                    library_names=(ref.library,),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - 统一转成 422 可读错误
+            raise ValueError(
+                f"内置因子加载失败: {ref.library}/{ref.factor}: {exc}"
+            ) from exc
+        loaded.append((factor_obj, -1.0 if ref.direction == "negative" else 1.0))
+
+    class FactorRefsStrategy(FactorPortfolioStrategy):
+        selector = TopN(top_n)
+        rebalance = EveryNTradingDays(rebalance_days)
+
+        @signal
+        def composite_score(self):
+            parts = []
+            for factor_obj, sign in loaded:
+                values = factor_obj.compute(self._panel)
+                if not isinstance(values, pd.DataFrame):
+                    raise TypeError(
+                        f"内置因子 {factor_obj.name!r} 必须返回日期×标的 DataFrame"
+                    )
+                if sign < 0:
+                    values = -values
+                parts.append(self.zscore(values))
+            total = parts[0]
+            for part in parts[1:]:
+                total = total + part
+            return total / float(len(parts))
+
+    return FactorRefsStrategy
+
+
 def run_strategy_backtest(
     req: StrategyBacktestRequest,
     *,
@@ -127,124 +195,132 @@ def run_strategy_backtest(
         code_hash = None
         strategy_code = req.strategy_code
         expected_entrypoint = None
-        if req.strategy_id is not None:
-            from app.services.catalog.strategy_catalog import StrategyCatalog
+        if req.factor_refs is not None:
+            strategy_class = _build_factor_refs_strategy(
+                req.factor_refs,
+                req.top_n or 30,
+                req.rebalance_days or 20,
+            )
+            code_hash = _factor_refs_code_hash(req.factor_refs)
+        else:
+            if req.strategy_id is not None:
+                from app.services.catalog.strategy_catalog import StrategyCatalog
 
-            asset = StrategyCatalog().load(req.strategy_id, req.strategy_version)
-            if asset.execution_mode != req.engine_mode:
-                raise ValueError(
-                    f"策略 {req.strategy_id} 的 execution_mode 为 {asset.execution_mode}，"
-                    f"与请求 engine_mode={req.engine_mode} 不一致"
+                asset = StrategyCatalog().load(req.strategy_id, req.strategy_version)
+                if asset.execution_mode != req.engine_mode:
+                    raise ValueError(
+                        f"策略 {req.strategy_id} 的 execution_mode 为 {asset.execution_mode}，"
+                        f"与请求 engine_mode={req.engine_mode} 不一致"
+                    )
+                strategy_code = asset.source_code
+                strategy_id = asset.strategy_id
+                strategy_version = asset.version
+                code_hash = asset.code_hash
+                expected_entrypoint = asset.entrypoint
+
+            # 聚宽方言：模块级 initialize + 兼容层，不要求策略类。
+            if req.strategy_dialect == "joinquant":
+                from app.services.security.code_guard import assert_safe_user_code
+                from app.services.strategy.compat import load_joinquant_strategy
+                from app.services.strategy.compat.factors import FactorStore
+                from app.services.strategy.compat.finance import FinanceNamespace
+                from app.services.strategy.compat.fundamentals import FundamentalStore
+                from app.services.strategy.compat.index import (
+                    IndexMembership,
+                    IndexPriceStore,
                 )
-            strategy_code = asset.source_code
-            strategy_id = asset.strategy_id
-            strategy_version = asset.version
-            code_hash = asset.code_hash
-            expected_entrypoint = asset.entrypoint
+                from app.services.strategy.compat.industry import IndustryStore
+                from app.services.strategy.compat.loader import strip_joinquant_imports
+                from app.services.strategy.compat.master import SecurityMaster
 
-        # 聚宽方言：模块级 initialize + 兼容层，不要求策略类。
-        if req.strategy_dialect == "joinquant":
+                cleaned = strip_joinquant_imports(strategy_code)
+                if req.strategy_id is None:
+                    assert_safe_user_code(cleaned, kind="策略")
+                compat_data_dir = getattr(data_engine, "data_dir", None)
+                # 新发布视图在 <materialized>/free/compat 提供聚宽兼容目录树；
+                # 没有时回退到 MODELSCOPE_ROOT / staging。
+                compat_root = None
+                if compat_data_dir is not None:
+                    candidate = Path(compat_data_dir).parent / "free" / "compat"
+                    if candidate.is_dir():
+                        compat_root = candidate
+                fundamentals = (
+                    FundamentalStore(compat_root)
+                    if compat_root is not None
+                    else FundamentalStore()
+                )
+                factors = (
+                    FactorStore(root=compat_root, data_engine=data_engine)
+                    if compat_root is not None
+                    else FactorStore(data_engine=data_engine)
+                )
+                strategy_obj = load_joinquant_strategy(
+                    strategy_code,
+                    fundamentals=fundamentals,
+                    factors=factors,
+                    master=(
+                        SecurityMaster(compat_root)
+                        if compat_root is not None
+                        else None
+                    ),
+                    finance=(
+                        FinanceNamespace(compat_root)
+                        if compat_root is not None
+                        else None
+                    ),
+                    index=(
+                        IndexMembership(compat_data_dir)
+                        if compat_data_dir is not None
+                        else None
+                    ),
+                    industry=(
+                        IndustryStore(compat_data_dir)
+                        if compat_data_dir is not None
+                        else None
+                    ),
+                    index_prices=(
+                        IndexPriceStore(compat_data_dir)
+                        if compat_data_dir is not None
+                        else None
+                    ),
+                )
+                return _run_event_strategy_backtest(
+                    req,
+                    strategy_obj,
+                    strategy_id,
+                    strategy_version,
+                    code_hash,
+                    data_engine=data_engine,
+                )
+
+            # 编译策略代码（P0-11 静态护栏；容器隔离后续）
             from app.services.security.code_guard import assert_safe_user_code
-            from app.services.strategy.compat import load_joinquant_strategy
-            from app.services.strategy.compat.factors import FactorStore
-            from app.services.strategy.compat.finance import FinanceNamespace
-            from app.services.strategy.compat.fundamentals import FundamentalStore
-            from app.services.strategy.compat.index import (
-                IndexMembership,
-                IndexPriceStore,
-            )
-            from app.services.strategy.compat.industry import IndustryStore
-            from app.services.strategy.compat.loader import strip_joinquant_imports
-            from app.services.strategy.compat.master import SecurityMaster
 
-            cleaned = strip_joinquant_imports(strategy_code)
             if req.strategy_id is None:
-                assert_safe_user_code(cleaned, kind="策略")
-            compat_data_dir = getattr(data_engine, "data_dir", None)
-            # 新发布视图在 <materialized>/free/compat 提供聚宽兼容目录树；
-            # 没有时回退到 MODELSCOPE_ROOT / staging。
-            compat_root = None
-            if compat_data_dir is not None:
-                candidate = Path(compat_data_dir).parent / "free" / "compat"
-                if candidate.is_dir():
-                    compat_root = candidate
-            fundamentals = (
-                FundamentalStore(compat_root)
-                if compat_root is not None
-                else FundamentalStore()
-            )
-            factors = (
-                FactorStore(root=compat_root, data_engine=data_engine)
-                if compat_root is not None
-                else FactorStore(data_engine=data_engine)
-            )
-            strategy_obj = load_joinquant_strategy(
-                strategy_code,
-                fundamentals=fundamentals,
-                factors=factors,
-                master=(
-                    SecurityMaster(compat_root)
-                    if compat_root is not None
-                    else None
-                ),
-                finance=(
-                    FinanceNamespace(compat_root)
-                    if compat_root is not None
-                    else None
-                ),
-                index=(
-                    IndexMembership(compat_data_dir)
-                    if compat_data_dir is not None
-                    else None
-                ),
-                industry=(
-                    IndustryStore(compat_data_dir)
-                    if compat_data_dir is not None
-                    else None
-                ),
-                index_prices=(
-                    IndexPriceStore(compat_data_dir)
-                    if compat_data_dir is not None
-                    else None
-                ),
-            )
-            return _run_event_strategy_backtest(
-                req,
-                strategy_obj,
-                strategy_id,
-                strategy_version,
-                code_hash,
-                data_engine=data_engine,
-            )
-
-        # 编译策略代码（P0-11 静态护栏；容器隔离后续）
-        from app.services.security.code_guard import assert_safe_user_code
-
-        if req.strategy_id is None:
-            assert_safe_user_code(strategy_code, kind="策略")
-        namespace = {"__name__": "user_strategy"}
-        exec(compile(strategy_code, '<strategy>', 'exec'), namespace)
-        strategy_classes = [
-            obj for obj in namespace.values()
-            if isinstance(obj, type)
-            and obj.__module__ == "user_strategy"
-            and hasattr(obj, "generate_signals" if req.engine_mode == "vectorized" else "initialize")
-        ]
-        if len(strategy_classes) != 1:
-            method = "generate_signals" if req.engine_mode == "vectorized" else "initialize"
-            raise ValueError(f"策略代码必须且只能定义一个包含 {method} 方法的类")
-        strategy_class = strategy_classes[0]
-        if expected_entrypoint is not None and strategy_class.__name__ != expected_entrypoint:
-            raise ValueError("策略索引 entrypoint 与源码中的策略类不一致")
-        if req.engine_mode == "event":
-            return _run_event_strategy_backtest(
-                req,
-                strategy_class,
-                strategy_id,
-                strategy_version,
-                code_hash,
-                data_engine=data_engine,
-            )
+                assert_safe_user_code(strategy_code, kind="策略")
+            namespace = {"__name__": "user_strategy"}
+            exec(compile(strategy_code, '<strategy>', 'exec'), namespace)
+            strategy_classes = [
+                obj for obj in namespace.values()
+                if isinstance(obj, type)
+                and obj.__module__ == "user_strategy"
+                and hasattr(obj, "generate_signals" if req.engine_mode == "vectorized" else "initialize")
+            ]
+            if len(strategy_classes) != 1:
+                method = "generate_signals" if req.engine_mode == "vectorized" else "initialize"
+                raise ValueError(f"策略代码必须且只能定义一个包含 {method} 方法的类")
+            strategy_class = strategy_classes[0]
+            if expected_entrypoint is not None and strategy_class.__name__ != expected_entrypoint:
+                raise ValueError("策略索引 entrypoint 与源码中的策略类不一致")
+            if req.engine_mode == "event":
+                return _run_event_strategy_backtest(
+                    req,
+                    strategy_class,
+                    strategy_id,
+                    strategy_version,
+                    code_hash,
+                    data_engine=data_engine,
+                )
         from app.services.strategy.vectorized.factor_strategy import FactorPortfolioStrategy
 
         from app.models.data import Panel
@@ -416,6 +492,10 @@ def run_strategy_backtest(
             strategy_id=strategy_id,
             strategy_version=strategy_version,
             code_hash=code_hash,
+            factor_refs=(
+                [ref.model_dump(mode="json") for ref in req.factor_refs]
+                if req.factor_refs else []
+            ),
             **_strategy_run_identity(req, data_engine),
             filter_suspended=req.filter_suspended,
             filter_st=req.filter_st,

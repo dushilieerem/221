@@ -28,6 +28,9 @@ Web 端需要展示调仓或成交过程时，使用 `include_execution_timeline
 | `engine_mode` | enum | `vectorized` | `vectorized` 或 `event`；决定策略契约和回测引擎。 |
 | `strategy_id` | string/null | — | 已保存策略 ID；与 `strategy_code` 二选一。 |
 | `strategy_version` | string/null | `null` | 已保存策略版本；省略时使用 `index.yaml` 中的 `current_version`。 |
+| `factor_refs` | array/null | `null` | 内置因子引用（1–3 个），每项 `{library, factor, direction}`；与 `strategy_code`/`strategy_id` 互斥，仅向量化 + native 方言。只接受库名+因子名，不接受源码。 |
+| `top_n` | integer/null | `null` | 仅 `factor_refs` 模式生效：等权 TopN 持仓数，默认 30。 |
+| `rebalance_days` | integer/null | `null` | 仅 `factor_refs` 模式生效：调仓间隔交易日，默认 20。 |
 | `universe` | string | `CSI500` | 股票池。 |
 | `universe_snapshot` | object/null | `null` | WebApp 已鉴权并解析的静态证券池快照；仅向量化模式支持，且与 `universe` 至多传一个。 |
 | `start` / `end` | string/null | `null` | 回测区间，格式 `YYYY-MM-DD`。 |
@@ -449,3 +452,20 @@ Web 端需要展示调仓或成交过程时，使用 `include_execution_timeline
 
 `strategy_params`、`factor_code`、`factor_name`、`data_dir`、`backtest_engine`、`include_equity` 和未知字段会返回 `422`。策略代码示例见 [因子与策略指南](../../../用户指南/因子与策略指南/README.md)。
 
+### 内置因子引用（`factor_refs`）
+
+```jsonc
+{
+  "factor_refs": [
+    {"library": "主因子库", "factor": "SV01_0005", "direction": "positive"},
+    {"library": "主因子库", "factor": "SV01_0010", "direction": "negative"}
+  ],
+  "top_n": 30,
+  "rebalance_days": 20
+}
+```
+
+- 因子通过当前 SQLite 内置因子库加载（`library` + `factor`，`factor` 可填 `sv_id` 或因子名），不执行调用方源码。
+- 每个因子按 `direction` 取正/负号 → 截面 zscore → 等权平均，作为 `FactorPortfolioStrategy` 的 `@signal` 分数；选股与调仓沿用 `top_n` / `rebalance_days`。
+- 响应 `meta.factor_refs` 回显引用清单，`meta.strategy` 为 `FactorRefsStrategy`，`meta.code_hash` 为引用清单的稳定哈希。
+- `factor_refs` 与 `strategy_code`/`strategy_id` 互斥；`top_n`/`rebalance_days` 只能与 `factor_refs` 一起使用；事件模式和聚宽方言暂不支持。
