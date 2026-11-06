@@ -1039,6 +1039,45 @@ def test_invalid_factor_code_returns_error(market_data_dir):
     assert response.json()["error"] is not None
 
 
+def test_strategy_backtest_with_builtin_factor_refs(market_data_dir):
+    response = client.post(
+        "/api/backtest/strategy",
+        json={
+            "factor_refs": [
+                {"library": "主因子库", "factor": "SV01_0001", "direction": "positive"}
+            ],
+            "benchmark": "CSI300",
+            "top_n": 3,
+            "rebalance_days": 5,
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["error"] is None
+    meta = body["meta"]
+    assert meta["strategy"] == "FactorRefsStrategy"
+    assert len(meta["code_hash"]) == 64
+    assert meta["factor_refs"] == [
+        {"library": "主因子库", "factor": "SV01_0001", "direction": "positive"}
+    ]
+    assert body["final_equity"] is not None
+
+
+def test_strategy_backtest_unknown_factor_ref_returns_error(market_data_dir):
+    response = client.post(
+        "/api/backtest/strategy",
+        json={
+            "factor_refs": [
+                {"library": "主因子库", "factor": "NOT_EXIST", "direction": "positive"}
+            ],
+            "benchmark": "CSI300",
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["error"] and "内置因子加载失败" in body["error"]
+
+
 def test_strategy_backtest_returns_equity_and_positions(market_data_dir):
     response = client.post(
         "/api/backtest/strategy",

@@ -174,6 +174,17 @@ class FactorBacktestRequest(BaseModel):
             raise ValueError("benchmark 与 benchmark_snapshot 至多提供一个")
         return self
 
+
+class FactorRef(BaseModel):
+    """策略回测引用的内置因子：只允许库名+因子名，不接受源码。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    library: str = Field(min_length=1, max_length=100)
+    factor: str = Field(min_length=1, max_length=100)
+    direction: Literal["positive", "negative"] = "positive"
+
+
 class StrategyBacktestRequest(BaseModel):
     """``POST /api/backtest/strategy`` 请求。"""
 
@@ -189,6 +200,16 @@ class StrategyBacktestRequest(BaseModel):
     strategy_id: Optional[str] = Field(None, description="app/assets/strategies/index.yaml 中的策略 ID")
     #: 已保存策略版本；省略时使用索引声明的 current_version
     strategy_version: Optional[str] = Field(None, description="已保存策略的版本号")
+    #: 内置因子引用（1–3 个）。提供时用内置因子合成 @signal 分数，走
+    #: FactorPortfolioStrategy 的 selector/rebalance；与 strategy_code/
+    #: strategy_id 互斥。只接受库名+因子名，不接受源码。
+    factor_refs: Optional[list[FactorRef]] = Field(
+        None, min_length=1, max_length=3, description="内置因子引用列表"
+    )
+    #: 仅 factor_refs 模式生效：等权 TopN 的持仓数（默认 30）。
+    top_n: Optional[int] = Field(None, ge=1, le=1000)
+    #: 仅 factor_refs 模式生效：调仓间隔交易日（默认 20）。
+    rebalance_days: Optional[int] = Field(None, ge=1, le=250)
     universe: str = "CSI500"
     universe_snapshot: Optional[UniverseSnapshotInput] = None
     start: Optional[str] = None
@@ -237,10 +258,27 @@ class StrategyBacktestRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_strategy_source(self):
-        if bool(self.strategy_code) == bool(self.strategy_id):
-            raise ValueError("strategy_code 与 strategy_id 必须且只能提供一个")
-        if self.strategy_version is not None and self.strategy_id is None:
-            raise ValueError("strategy_version 只能与 strategy_id 一起使用")
+        if self.factor_refs is not None:
+            if self.strategy_code or self.strategy_id:
+                raise ValueError(
+                    "factor_refs 与 strategy_code/strategy_id 互斥"
+                )
+            if self.strategy_version is not None:
+                raise ValueError("strategy_version 只能与 strategy_id 一起使用")
+            keys = [(ref.library, ref.factor) for ref in self.factor_refs]
+            if len(keys) != len(set(keys)):
+                raise ValueError("factor_refs 中不能出现重复的库+因子")
+            if self.engine_mode != "vectorized":
+                raise ValueError("factor_refs 仅支持 vectorized 引擎")
+            if self.strategy_dialect != "native":
+                raise ValueError("factor_refs 仅支持 native 策略方言")
+        else:
+            if bool(self.strategy_code) == bool(self.strategy_id):
+                raise ValueError("strategy_code 与 strategy_id 必须且只能提供一个")
+            if self.strategy_version is not None and self.strategy_id is None:
+                raise ValueError("strategy_version 只能与 strategy_id 一起使用")
+            if self.top_n is not None or self.rebalance_days is not None:
+                raise ValueError("top_n/rebalance_days 只能与 factor_refs 一起使用")
         if self.universe_snapshot is not None and "universe" in self.model_fields_set:
             raise ValueError("universe 与 universe_snapshot 至多提供一个")
         if self.benchmark_snapshot is not None and "benchmark" in self.model_fields_set:
@@ -474,6 +512,10 @@ class StrategyBacktestMeta(BaseModel):
     spec_hash: Optional[str] = None
     #: 本次任务 id；同步接口也会返回，便于把报告与运行日志对应起来。
     run_id: Optional[str] = None
+    #: factor_refs 模式下的因子引用回显；其它模式不输出该字段。
+    factor_refs: list[dict] = Field(
+        default_factory=list, exclude_if=lambda value: not value
+    )
     #: 本次请求的过滤开关回显；事件模式下前三个由撮合层常开拒单覆盖
     filter_suspended: bool = False
     filter_st: bool = False
