@@ -727,6 +727,37 @@ def _run_event_strategy_backtest(
                     event_panels[field].index
                 )
 
+        # 聚宽方言 + 未复权撮合：用现金分红模型（派息入现金、送股增股），
+        # 与聚宽 ``use_real_price=True`` 的账户口径一致；数据集缺失时保留
+        # 再投资口径并在 assumptions 里标注。
+        company_action_model = "reinvest"
+        if (
+            req.strategy_dialect == "joinquant"
+            and req.execution_price_source == "unadjusted"
+            and data_engine.data_dir is not None
+        ):
+            from app.services.data.dividends import load_dividend_panels
+
+            # raw_symbols 是无后缀代码（000001），分红/涨跌停数据集用交易所
+            # 代码（000001.SZ）；先按 symbol_mapping 换成交易所代码再过滤。
+            dividend_symbols = [
+                symbol_mapping.get(str(symbol), str(symbol))
+                for symbol in raw_symbols
+            ]
+            try:
+                raw_dividends = load_dividend_panels(
+                    data_engine.data_dir,
+                    dividend_symbols,
+                    start=panel_start,
+                    end=req.end,
+                )
+            except FileNotFoundError:
+                raw_dividends = None
+            if raw_dividends:
+                for field, panel in raw_dividends.items():
+                    event_panels[field] = _rename_symbols(panel, symbol_mapping)
+                company_action_model = "cash"
+
         execution_panels = None
         if req.execution_price_source == "unadjusted":
             from app.services.paper_trading.price_view import load_unadjusted_panels
@@ -812,6 +843,7 @@ def _run_event_strategy_backtest(
                 execution_timing=req.execution_timing,
                 filter_st=req.filter_st and listed_status_available,
                 execution_price_source=req.execution_price_source,
+                company_action_model=company_action_model,
                 timed_execution=req.timed_execution,
             ),
             execution_panels=execution_panels,
