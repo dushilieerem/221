@@ -70,8 +70,8 @@ app/services/experiment/manager.py
 ExperimentManager
 ─────────────────────────────────────────
 属性：
-  max_workers: int              # 同时执行的回测数，默认 2
-  max_queue_size: int           # 额外排队数，默认 8
+  max_workers: int              # 同时执行的回测数，默认 6
+  max_queue_size: int           # 额外排队数，默认 24
   runs: Dict[run_id, Run]       # 进程内任务状态
   inflight: Dict[key, run_id]   # 同键任务去重
 
