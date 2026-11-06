@@ -9,6 +9,7 @@ from app.schemas.backtest import DataReleaseStatusResponse
 from app.services.data.engine import DataEngine
 from app.services.data.manifest import DataManifestError
 from app.services.data.release_watcher import reload_data_release
+from app.services.data.view_lock import active_view_lock
 
 
 router = APIRouter()
@@ -21,10 +22,15 @@ def _release_status(
 ) -> DataReleaseStatusResponse:
     if data_version is None:
         data_version = getattr(engine.provider, "data_version", None)
+    lock = None
+    if engine.data_dir is not None:
+        lock = active_view_lock(engine.data_dir)
     return DataReleaseStatusResponse(
         data_version=data_version,
         release_id=engine.release_id,
         data_dir=str(engine.data_dir) if engine.data_dir is not None else None,
+        view_id=lock.view_id if lock is not None else None,
+        manifest_sha256=lock.manifest_sha256 if lock is not None else None,
     )
 
 

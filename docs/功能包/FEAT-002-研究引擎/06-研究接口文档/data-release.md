@@ -12,7 +12,9 @@ GET /api/data/status
 {
   "data_version": "ifind-sync-20260929-093857",
   "release_id": "0f1c8f3a...",
-  "data_dir": "/path/to/marketdata"
+  "data_dir": "/path/to/views/research-rv-20261106-2/materialized/ifind",
+  "view_id": "research-rv-20261106-2",
+  "manifest_sha256": "9f2c..."
 }
 ```
 
@@ -23,8 +25,12 @@ GET /api/data/status
 | `data_version` | 当前 release 清单 `data_manifest.yaml` 中的 `data_version` |
 | `release_id` | 服务装载该 release 时按文件大小/修改时间算出的签名；数据文件变化后随之改变 |
 | `data_dir` | 当前 release 的物理目录 |
+| `view_id` | 数据侧视图锁 `views/current.lock` 中的视图名；锁缺失或与已装载目录不一致时省略 |
+| `manifest_sha256` | 视图锁记录的清单签名；同上，仅在锁与目录一致时返回 |
 
 `release_id` 变化即代表服务切换到了新的 release，可用于确认数据更新是否已生效。
+`view_id` 来自数据发布方在 `switch-current` 时写入的 `views/current.lock`；服务刚切换视图、尚未重载完成时，锁已指向新视图而 `data_dir` 仍是旧目录，此时这两个字段会省略，避免新旧视图信息串台。
+
 
 ## POST /api/data/reload
 

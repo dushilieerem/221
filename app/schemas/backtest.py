@@ -730,6 +730,9 @@ class DataReleaseStatusResponse(BaseModel):
     data_version: str | None = None
     release_id: str | None = None
     data_dir: str | None = None
+    #: 数据侧的视图锁（``views/current.lock``）；锁缺失或与已装载目录不一致时省略。
+    view_id: str | None = None
+    manifest_sha256: str | None = None
 
 
 class DailyBar(BaseModel):
