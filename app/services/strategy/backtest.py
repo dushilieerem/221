@@ -700,10 +700,14 @@ def _run_event_strategy_backtest(
         if data_engine.data_dir is not None:
             from app.services.data.limit_prices import load_limit_panels
 
+            limit_symbols = [
+                symbol_mapping.get(str(symbol), str(symbol))
+                for symbol in raw_symbols
+            ]
             try:
                 raw_limits = load_limit_panels(
                     data_engine.data_dir,
-                    list(raw_symbols),
+                    limit_symbols,
                     start=panel_start,
                     end=req.end,
                 )
