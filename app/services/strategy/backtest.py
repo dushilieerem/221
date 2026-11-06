@@ -695,6 +695,23 @@ def _run_event_strategy_backtest(
             field: _rename_symbols(panels[field], symbol_mapping)
             for field in required_fields
         }
+        # 涨跌停价优先使用数据侧权威结果（含板块/ST 与 2026-07-06 后的规则）；
+        # 数据集缺失时引擎回退到「昨收 × 板块比例」的本地推算。
+        if data_engine.data_dir is not None:
+            from app.services.data.limit_prices import load_limit_panels
+
+            try:
+                raw_limits = load_limit_panels(
+                    data_engine.data_dir,
+                    list(raw_symbols),
+                    start=panel_start,
+                    end=req.end,
+                )
+            except FileNotFoundError:
+                raw_limits = None
+            if raw_limits:
+                for field, panel in raw_limits.items():
+                    event_panels[field] = _rename_symbols(panel, symbol_mapping)
         index = data_engine.get_index(req.benchmark, req.start, req.end)
         benchmark_symbol = getattr(strategy, "benchmark_symbol", None)
         if benchmark_symbol:

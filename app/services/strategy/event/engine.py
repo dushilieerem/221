@@ -240,6 +240,11 @@ class EventBacktestEngine:
                     else "previous_close"
                 ),
                 "delisted_handling": "point_in_time_exclude;force_liquidate_at_transition_close",
+                "limit_price_source": (
+                    "derived_limit_prices"
+                    if "upper_limit" in self.panels
+                    else "computed_prev_close_ratio"
+                ),
                 "price_source": self._execution_price_source,
                 "corporate_action_adjustment": (
                     "share_scaling_by_adjusted_over_unadjusted_ratio"
@@ -363,6 +368,11 @@ class EventBacktestEngine:
                 "time_points": ",".join(times),
                 "data_visibility": "previous_close",
                 "delisted_handling": "point_in_time_exclude;force_liquidate_at_transition_close",
+                "limit_price_source": (
+                    "derived_limit_prices"
+                    if "upper_limit" in self.panels
+                    else "computed_prev_close_ratio"
+                ),
                 "price_source": self._execution_price_source,
                 "intraday_price": (
                     "1m"
@@ -890,9 +900,29 @@ class EventBacktestEngine:
         field = "open" if time < "12:00" else "close"
         return self._price_from_panel(symbol, date, field)
 
+    def _limit_from_panels(
+        self, symbol: str, date: pd.Timestamp
+    ) -> tuple[float | None, float | None]:
+        """读取数据侧涨跌停价；缺失字段或日期时返回 (None, None)。"""
+
+        high = low = None
+        for field, target in (
+            ("upper_limit", "high"), ("lower_limit", "low"),
+        ):
+            frame = self.panels.get(field)
+            if frame is None or symbol not in frame.columns or date not in frame.index:
+                continue
+            value = frame.at[date, symbol]
+            if pd.notna(value) and np.isfinite(value) and value > 0:
+                if target == "high":
+                    high = float(value)
+                else:
+                    low = float(value)
+        return high, low
+
     def _reject_reason(self, symbol: str, side: str, quantity: int, price: float, ledger: _Ledger, date: pd.Timestamp) -> str | None:
-        # 当前 iFinD release 只提供 ``up_and_down_status``；状态字段缺失时
-        # 按放行处理，原始文本按停牌及涨跌停状态解析。
+        # 停牌/ST/退市优先按状态字段判断；涨跌停优先按数据侧的
+        # ``upper_limit`` / ``lower_limit``，缺失时回退到状态文本。
         if self._status_matches(date, symbol, r"停牌"):
             return "SUSPENDED"
         if (
@@ -906,14 +936,23 @@ class EventBacktestEngine:
             # 退市剔除恒开启。只拦买入：残余持仓由日终 ``_liquidate_delisted``
             # 按转换日收盘价强平，不需要在撮合层再拦一次卖出。
             return "DELISTED"
-        if side == "buy" and self._status_matches(
-            date, symbol, r"涨停|limit.?up|up.?limit"
-        ):
-            return "LIMIT_UP"
-        if side == "sell" and self._status_matches(
-            date, symbol, r"跌停|limit.?down|down.?limit"
-        ):
-            return "LIMIT_DOWN"
+        high, low = self._limit_from_panels(symbol, date)
+        if high is not None or low is not None:
+            # 与聚宽日频撮合一致：买入成交价达到涨停价、卖出达到跌停价时
+            # 视为无法成交；仅触及但未封死的情况由日线数据无法区分。
+            if side == "buy" and high is not None and price >= high - 1e-9:
+                return "LIMIT_UP"
+            if side == "sell" and low is not None and price <= low + 1e-9:
+                return "LIMIT_DOWN"
+        else:
+            if side == "buy" and self._status_matches(
+                date, symbol, r"涨停|limit.?up|up.?limit"
+            ):
+                return "LIMIT_UP"
+            if side == "sell" and self._status_matches(
+                date, symbol, r"跌停|limit.?down|down.?limit"
+            ):
+                return "LIMIT_DOWN"
         if side == "buy":
             if quantity % self.config.lot_size:
                 return "LOT_SIZE"
@@ -1346,6 +1385,18 @@ class _MarketView:
         return values.round(2)
 
     def limit_prices(self, symbol: str) -> tuple[float | None, float | None]:
+        """当前交易日的涨跌停价。
+
+        优先读数据侧 ``derived/limit_prices``（含板块/ST/北交所与规则切换），
+        数据集缺失或当日无记录时回退到「昨收 × 板块比例」的本地推算。
+        """
+
+        engine = self._engine
+        date = engine._current_date
+        if date is not None:
+            high, low = engine._limit_from_panels(symbol, date)
+            if high is not None or low is not None:
+                return high, low
         previous = self.previous_close(symbol)
         if previous is None:
             return None, None

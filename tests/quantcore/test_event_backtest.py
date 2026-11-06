@@ -89,6 +89,51 @@ def test_limit_up_rejects_buy():
     assert result.orders[0].reason_code == "LIMIT_UP"
 
 
+def test_limit_price_panel_rejects_buy_at_upper_limit():
+    panels = _panels()
+    dates = panels["close"].index
+    # 01-03 开盘 11.0，数据侧上限也是 11.0 → 买入按涨停拒单
+    panels["upper_limit"] = pd.DataFrame({"A": [10.5, 11.0, 13.0]}, index=dates)
+    panels["lower_limit"] = pd.DataFrame({"A": [9.5, 10.0, 11.0]}, index=dates)
+
+    class Strategy:
+        def initialize(self, context):
+            def trade(ctx):
+                if ctx.current_dt.date().isoformat() == "2024-01-03":
+                    ctx.orders.target_quantity("A", 100)
+
+            context.schedule.daily(trade)
+
+    result = EventBacktestEngine(panels, _config()).run(Strategy())
+
+    assert result.orders[0].reason_code == "LIMIT_UP"
+    assert not result.fills
+
+
+def test_limit_price_panel_rejects_sell_at_lower_limit():
+    panels = _panels()
+    dates = panels["close"].index
+    # 01-03 开盘 11.0，数据侧下限也是 11.0 → 卖出按跌停拒单
+    panels["upper_limit"] = pd.DataFrame({"A": [10.5, 13.0, 13.0]}, index=dates)
+    panels["lower_limit"] = pd.DataFrame({"A": [9.5, 11.0, 11.0]}, index=dates)
+
+    class Strategy:
+        def initialize(self, context):
+            def trade(ctx):
+                day = ctx.current_dt.date().isoformat()
+                if day == "2024-01-02":
+                    ctx.orders.target_quantity("A", 100)
+                if day == "2024-01-03":
+                    ctx.orders.close("A")
+
+            context.schedule.daily(trade)
+
+    result = EventBacktestEngine(panels, _config()).run(Strategy())
+
+    assert len(result.fills) == 1  # 首日买入成功
+    assert any(order.reason_code == "LIMIT_DOWN" for order in result.orders)
+
+
 def test_suspended_rejects_buy():
     panels = _panels()
     panels["up_and_down_status"] = pd.DataFrame(
