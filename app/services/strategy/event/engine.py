@@ -247,9 +247,14 @@ class EventBacktestEngine:
                 ),
                 "price_source": self._execution_price_source,
                 "corporate_action_adjustment": (
-                    "share_scaling_by_adjusted_over_unadjusted_ratio"
+                    "cash_dividend_gross_no_tax"
                     if self._execution_price_source == "unadjusted"
-                    else "embedded_in_adjusted_prices"
+                    and self.config.company_action_model == "cash"
+                    else (
+                        "share_scaling_by_adjusted_over_unadjusted_ratio"
+                        if self._execution_price_source == "unadjusted"
+                        else "embedded_in_adjusted_prices"
+                    )
                 ),
             },
         )
@@ -373,6 +378,16 @@ class EventBacktestEngine:
                     if "upper_limit" in self.panels
                     else "computed_prev_close_ratio"
                 ),
+                "corporate_action_adjustment": (
+                    "cash_dividend_gross_no_tax"
+                    if self._execution_price_source == "unadjusted"
+                    and self.config.company_action_model == "cash"
+                    else (
+                        "share_scaling_by_adjusted_over_unadjusted_ratio"
+                        if self._execution_price_source == "unadjusted"
+                        else "embedded_in_adjusted_prices"
+                    )
+                ),
                 "price_source": self._execution_price_source,
                 "intraday_price": (
                     "1m"
@@ -390,6 +405,66 @@ class EventBacktestEngine:
             f"{pd.Timestamp(date).strftime('%Y-%m-%d')} {normalized}:00"
         ).to_pydatetime()
 
+    def _event_value(self, panel_name: str, symbol: str, date: pd.Timestamp) -> float:
+        """读取分红/送转面板的单值；缺失或非有限值按 0 处理。"""
+
+        frame = self.panels.get(panel_name)
+        if frame is None or symbol not in frame.columns or date not in frame.index:
+            return 0.0
+        value = frame.at[date, symbol]
+        if pd.isna(value) or not np.isfinite(value):
+            return 0.0
+        return float(value)
+
+    def _apply_cash_dividends(
+        self, ledger: _Ledger, date: pd.Timestamp
+    ) -> list[dict[str, object]]:
+        """聚宽现金分红口径：派息入现金、送股增股，不自动再投资。
+
+        与再投资口径的区别只在事件日之后的暴露：现金留在账户，等策略自己
+        决定何时买入。分红税未建模（税前金额入账）；送股不足 1 股向下取整。
+        """
+
+        events: list[dict[str, object]] = []
+        for symbol in list(ledger.positions):
+            shares = int(ledger.positions.get(symbol, 0))
+            if shares <= 0:
+                continue
+            cash_per_share = self._event_value("cash_dividend", symbol, date)
+            bonus_per_share = self._event_value("stock_bonus", symbol, date)
+            if cash_per_share <= 0 and bonus_per_share <= 0:
+                continue
+            cash = shares * cash_per_share
+            bonus_shares = (
+                int(np.floor(shares * bonus_per_share))
+                if bonus_per_share > 0 else 0
+            )
+            new_shares = shares + bonus_shares
+            if cash:
+                ledger.cash += cash
+            if bonus_shares:
+                ledger.positions[symbol] = new_shares
+                ledger.sellable[symbol] = min(
+                    new_shares,
+                    int(ledger.sellable.get(symbol, 0)) + bonus_shares,
+                )
+            if symbol in ledger.average_cost:
+                total_cost = ledger.average_cost[symbol] * shares - cash
+                ledger.average_cost[symbol] = (
+                    max(total_cost, 0.0) / new_shares if new_shares else 0.0
+                )
+            events.append({
+                "type": "CORPORATE_ACTION_ADJUSTMENT",
+                "timestamp": date.to_pydatetime(),
+                "symbol": symbol,
+                "model": "cash",
+                "cash_dividend": float(cash),
+                "stock_bonus_shares": int(bonus_shares),
+                "previous_quantity": shares,
+                "quantity": new_shares,
+            })
+        return events
+
     def _apply_corporate_adjustments(
         self, ledger: _Ledger, index: int, date: pd.Timestamp
     ) -> list[dict[str, object]]:
@@ -403,8 +478,11 @@ class EventBacktestEngine:
         if (
             self._execution_price_source != "unadjusted"
             or index == 0
-            or self._adjustment_ratio is None
         ):
+            return []
+        if self.config.company_action_model == "cash":
+            return self._apply_cash_dividends(ledger, date)
+        if self._adjustment_ratio is None:
             return []
         ratios = self._adjustment_ratio.loc[date]
         events: list[dict[str, object]] = []

@@ -469,3 +469,9 @@ Web 端需要展示调仓或成交过程时，使用 `include_execution_timeline
 - 每个因子按 `direction` 取正/负号 → 截面 zscore → 等权平均，作为 `FactorPortfolioStrategy` 的 `@signal` 分数；选股与调仓沿用 `top_n` / `rebalance_days`。
 - 响应 `meta.factor_refs` 回显引用清单，`meta.strategy` 为 `FactorRefsStrategy`，`meta.code_hash` 为引用清单的稳定哈希。
 - `factor_refs` 与 `strategy_code`/`strategy_id` 互斥；`top_n`/`rebalance_days` 只能与 `factor_refs` 一起使用；事件模式和聚宽方言暂不支持。
+
+### 公司行为（分红送转）
+
+- `strategy_dialect="joinquant"` 且 `execution_price_source="unadjusted"` 时，事件引擎按**现金分红**记账：事件日把 `interest/10 × 持股数` 计入现金、`stockBonus/10` 增加股数，现金不自动再投资，等策略自行下单；`assumptions.corporate_action_adjustment = "cash_dividend_gross_no_tax"`。
+- 其余组合（native 方言，或复权价格来源）保持原有口径：未复权时按 `hfq/unadj` 比例缩放持仓（等价分红再投资），复权时公司行为已包含在价格中。
+- 分红税未建模，现金按税前金额入账；送股不足 1 股向下取整；分红事件数据缺失时回退再投资口径并在 `assumptions` 标注。

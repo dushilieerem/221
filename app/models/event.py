@@ -81,6 +81,11 @@ class EventBacktestConfig:
     #: - unadjusted：成交、估值、整手与费用使用未复权价格，信号仍用复权面板；
     #:   持仓按 ``hfq_close / unadjusted_close`` 的每日比例缩放，等价于分红送转再投资。
     execution_price_source: str = "adjusted"
+    #: 公司行为模型（仅 ``execution_price_source="unadjusted"`` 生效）：
+    #: - reinvest：按复权比例缩放持仓，等价分红送转再投资（native 默认）；
+    #: - cash：现金分红入账、送股增股，不自动再投资（joinquant 方言默认）。
+    #: 分红税未建模，现金按税前金额入账。
+    company_action_model: str = "reinvest"
     #: 是否按时点调度。开启后策略可用 ``schedule.daily(cb, time="14:50")``
     #: 注册盘中回调；成交价取下单时点的盘中价，15:00 之后的订单挂到次日。
     timed_execution: bool = False
