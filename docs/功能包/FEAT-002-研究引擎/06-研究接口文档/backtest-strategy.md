@@ -475,3 +475,7 @@ Web 端需要展示调仓或成交过程时，使用 `include_execution_timeline
 - `strategy_dialect="joinquant"` 且 `execution_price_source="unadjusted"` 时，事件引擎按**现金分红**记账：事件日按税前 `interest/10 × 持股数` 预扣 20% 红利税后计入现金、`stockBonus/10` 增加股数，现金不自动再投资，等策略自行下单；`assumptions.corporate_action_adjustment = "cash_dividend_net_20pct_tax"`。
 - 其余组合（native 方言，或复权价格来源）保持原有口径：未复权时按 `hfq/unadj` 比例缩放持仓（等价分红再投资），复权时公司行为已包含在价格中。
 - 分红事件明细包含 `cash_dividend`（税后入账）、`cash_dividend_gross`（税前）和 `dividend_tax`（预扣税额）；送股不足 1 股向下取整；分红事件数据缺失时回退再投资口径并在 `assumptions` 标注。
+
+### 聚宽行情读取（`get_price`）
+
+- 默认 `skip_paused=False`，与聚宽一致：停牌日保留在时间轴上，价格用前收盘价填充（由行情源提供），`volume`/`amount`（`money`）填 0；`skip_paused=True` 时剔除停牌行。否则策略按 `count` 或窗口统计成交额时会把停牌日算丢，导致流动性过滤误杀停牌股。
