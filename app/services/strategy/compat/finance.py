@@ -76,7 +76,7 @@ class FinanceNamespace:
         )
         if "registration_date" in dividends.columns:
             registration = pd.to_datetime(
-                dividends["registration_date"], errors="coerce"
+                dividends["registration_date"], errors="coerce", format="mixed"
             ).astype("datetime64[ns]")
         else:
             # 旧数据集没有登记日列：沿用除权日近似，行为与之前一致。
@@ -84,9 +84,9 @@ class FinanceNamespace:
         capital = load_statement(self.root, "capital", ["total_capital"])
 
         frame = dividends[["Symbol", "time", "interest", "stockBonus"]].copy()
-        frame["time"] = pd.to_datetime(frame["time"], errors="coerce").astype(
-            "datetime64[ns]"
-        )
+        frame["time"] = pd.to_datetime(
+            frame["time"], errors="coerce", format="mixed"
+        ).astype("datetime64[ns]")
         frame = frame.dropna(subset=["time"]).sort_values(["time", "Symbol"])
         # 聚宽 STK_XR_XD.a_registration_date 是股权登记日，不是除权日。
         # 数据侧有 registration_date 时优先使用（匹配不到为 NaT 时回退除权日），

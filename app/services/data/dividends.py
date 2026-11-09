@@ -61,7 +61,9 @@ def load_dividend_panels(
             for field in DIVIDEND_FIELDS
         }
     frame = frame[frame["Symbol"].isin(codes)].copy()
-    frame["time"] = pd.to_datetime(frame["time"])
+    # 新回填的分红可能混用 "YYYY-MM-DD" 和 "YYYY-MM-DD HH:MM:SS"，
+    # 用 format="mixed" 逐值推断，避免 pandas 按首值格式统一解析报错。
+    frame["time"] = pd.to_datetime(frame["time"], errors="coerce", format="mixed")
     if start is not None:
         frame = frame[frame["time"] >= pd.Timestamp(start)]
     if end is not None:
