@@ -760,6 +760,54 @@ def test_get_price_exposes_paused_flag():
     assert strategy.runtime.g.paused == [0, 1, 0]
 
 
+PAUSED_MONEY_PROBE = """
+def initialize(context):
+    g.money = None
+    g.close = None
+    run_daily(probe, time='09:31')
+
+def probe(context):
+    if g.money is not None:
+        return
+    frame = get_price('000001.SZ', start_date='2024-01-02', end_date='2024-01-04',
+                      fields=['close', 'money'], panel=False)
+    g.money = frame['money'].tolist()
+    g.close = frame['close'].tolist()
+"""
+
+
+def test_get_price_fills_paused_money_with_zero():
+    """聚宽默认 fill_paused=True：停牌日成交量/成交额为 0，窗口不被截断。"""
+
+    adjusted, unadjusted = _panels()
+    adjusted["up_and_down_status"] = pd.DataFrame(
+        {SYMBOL: ["非涨跌停", "停牌", "非涨跌停"]}, index=DATES
+    )
+    adjusted["amount"] = pd.DataFrame(
+        {SYMBOL: [1000.0, None, 2000.0]}, index=DATES
+    )
+    engine = EventBacktestEngine(
+        adjusted,
+        EventBacktestConfig(
+            initial_capital=100_000.0,
+            commission_rate=0.0,
+            min_commission=0.0,
+            stamp_tax_rate=0.0,
+            slippage_rate=0.0,
+            execution_price_source="unadjusted",
+            timed_execution=True,
+        ),
+        execution_panels=unadjusted,
+        intraday_price=lambda date, time, symbol: 10.1 if time == "09:31" else None,
+    )
+    strategy = load_joinquant_strategy(PAUSED_MONEY_PROBE)
+    engine.run(strategy)
+
+    assert strategy.runtime.g.money == [1000.0, 0.0, 2000.0]
+    # 停牌日价格保留（源数据用前收填充），不能被当成缺失行。
+    assert strategy.runtime.g.close == pytest.approx([10.5, 10.5, 10.5])
+
+
 def test_query_supports_field_to_field_comparison():
     """聚宽 filter 里允许 valuation.code == balance.code。"""
     from app.services.strategy.compat.query import (

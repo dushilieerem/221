@@ -344,6 +344,26 @@ class JoinQuantRuntime:
             if source in raw:
                 frames[field] = raw[source]
 
+        if not skip_paused:
+            # 聚宽 get_price 默认 skip_paused=False + fill_paused=True：停牌日
+            # 保留在时间轴上，价格用前收（源数据已填），volume/money 填 0。
+            # 不填的话，策略里 count>=N 的流动性/成交额窗口会把停牌日算丢。
+            paused = self.context.market.paused_panel(
+                symbols, count=count, start=start_date, end=end
+            )
+            mask = paused.reindex(columns=pd.Index(symbols)).eq(1) if paused is not None else None
+            if mask is None:
+                close_frame = frames.get("close")
+                if close_frame is not None:
+                    # 没有状态面板时，用「有收盘价但成交额缺失」近似停牌日。
+                    mask = close_frame.reindex(columns=pd.Index(symbols)).notna()
+            if mask is not None:
+                for field in ("volume", "amount", "money", "turnover"):
+                    if field in frames:
+                        frame = frames[field]
+                        aligned = frame.reindex(index=mask.index, columns=mask.columns)
+                        frames[field] = aligned.mask(mask & aligned.isna(), 0.0)
+
         if not panel:
             return _long_frames(
                 frames, symbols, requested, skip_paused=skip_paused
