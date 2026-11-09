@@ -735,6 +735,7 @@ def _run_event_strategy_backtest(
         # 与聚宽 ``use_real_price=True`` 的账户口径一致；数据集缺失时保留
         # 再投资口径并在 assumptions 里标注。
         company_action_model = "reinvest"
+        dividend_tax_rate = 0.0
         if (
             req.strategy_dialect == "joinquant"
             and req.execution_price_source == "unadjusted"
@@ -761,6 +762,8 @@ def _run_event_strategy_backtest(
                 for field, panel in raw_dividends.items():
                     event_panels[field] = _rename_symbols(panel, symbol_mapping)
                 company_action_model = "cash"
+                # 聚宽真实价格模式统一按 20% 预扣红利税（除权日按税前 80% 入账）。
+                dividend_tax_rate = 0.2
 
         execution_panels = None
         if req.execution_price_source == "unadjusted":
@@ -848,6 +851,7 @@ def _run_event_strategy_backtest(
                 filter_st=req.filter_st and listed_status_available,
                 execution_price_source=req.execution_price_source,
                 company_action_model=company_action_model,
+                dividend_tax_rate=dividend_tax_rate,
                 timed_execution=req.timed_execution,
             ),
             execution_panels=execution_panels,

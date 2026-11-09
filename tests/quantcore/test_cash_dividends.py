@@ -57,6 +57,26 @@ def test_cash_dividend_and_stock_bonus_are_credited():
     assert result.assumptions["corporate_action_adjustment"] == "cash_dividend_gross_no_tax"
 
 
+def test_cash_dividend_withholds_joinquant_tax():
+    panels = _panels()
+    panels["cash_dividend"] = pd.DataFrame({"A": [0.0, 0.5, 0.0]}, index=panels["close"].index)
+
+    result = EventBacktestEngine(
+        panels,
+        _config(dividend_tax_rate=0.2),
+        execution_panels={field: panels[field] for field in ("open", "close")},
+    ).run(_BuyDayOne())
+
+    snap = result.position_snapshots[1]
+    # 10000 - 100×10 - 5 佣金 + 100×0.5×(1-20%) 分红
+    assert snap.cash == pytest.approx(9035.0)
+    events = [e for e in result.events if e.get("type") == "CORPORATE_ACTION_ADJUSTMENT"]
+    assert events[0]["cash_dividend"] == pytest.approx(40.0)
+    assert events[0]["cash_dividend_gross"] == pytest.approx(50.0)
+    assert events[0]["dividend_tax"] == pytest.approx(10.0)
+    assert result.assumptions["corporate_action_adjustment"] == "cash_dividend_net_20pct_tax"
+
+
 def test_adjusted_price_source_keeps_embedded_actions():
     panels = _panels()
     panels["cash_dividend"] = pd.DataFrame({"A": [0.0, 0.5, 0.0]}, index=panels["close"].index)
