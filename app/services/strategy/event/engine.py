@@ -1360,11 +1360,17 @@ class _MarketView:
         start: object | None = None,
         end: object | None = None,
     ) -> list[pd.Timestamp]:
-        dates = self._engine.dates
+        # 用带预热区间（_full_dates）的完整日历：聚宽的 get_trade_days 返回
+        # 市场交易日历，不受回测起始日裁剪。若用 dates（从 active_start 起），
+        # 回测首日会被策略误判成“当月第一个交易日”，从而提前调仓。
+        dates = self._engine._full_dates
         if start is not None:
             dates = dates[dates >= pd.Timestamp(start)]
         if end is not None:
             dates = dates[dates <= pd.Timestamp(end)]
+        elif self._engine._current_date is not None:
+            # 未指定 end 时不能返回回测结束后的日历，避免未来函数。
+            dates = dates[dates <= self._engine._current_date]
         return [pd.Timestamp(item) for item in dates]
 
     def listing_dates(

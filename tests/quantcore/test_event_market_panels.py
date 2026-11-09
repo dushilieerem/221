@@ -29,6 +29,24 @@ def _panels(periods: int = 6) -> tuple[list[str], pd.DatetimeIndex, dict]:
     return symbols, dates, panels
 
 
+def test_trade_days_include_warmup_before_active_start():
+    """聚宽 get_trade_days 看完整市场日历，不能被回测起始日裁剪。"""
+
+    _, dates, panels = _panels()
+    engine = EventBacktestEngine(panels, active_start=dates[3])
+    view = _MarketView(engine)
+
+    days = view.trade_days(dates[0], dates[-1])
+
+    assert list(engine.dates) == list(dates[3:])
+    assert list(days) == list(dates)
+    # 回测从月中开始时，月初到起始日之间的日历也要返回，首日才不会被
+    # 策略误判成“当月第一个交易日”。
+    month_to_start = view.trade_days(dates[0].replace(day=1), dates[3])
+    assert list(month_to_start) == list(dates[:4])
+    assert month_to_start[0] != dates[3]
+
+
 def test_paused_panel_respects_count_window():
     symbols, dates, panels = _panels()
     view = _MarketView(EventBacktestEngine(panels))
