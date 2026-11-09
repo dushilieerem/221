@@ -6,6 +6,7 @@ from app.api.routes import (
     catalog,
     data,
     factor,
+    novelty,
     health,
     ml,
     paper_trading,
@@ -18,6 +19,7 @@ router.include_router(health.router)
 router.include_router(data.router)
 router.include_router(catalog.router)
 router.include_router(factor.router)
+router.include_router(novelty.router)
 router.include_router(ml.router)
 router.include_router(strategy.router)
 router.include_router(paper_trading.router)
