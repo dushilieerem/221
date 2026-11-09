@@ -246,16 +246,7 @@ class EventBacktestEngine:
                     else "computed_prev_close_ratio"
                 ),
                 "price_source": self._execution_price_source,
-                "corporate_action_adjustment": (
-                    "cash_dividend_gross_no_tax"
-                    if self._execution_price_source == "unadjusted"
-                    and self.config.company_action_model == "cash"
-                    else (
-                        "share_scaling_by_adjusted_over_unadjusted_ratio"
-                        if self._execution_price_source == "unadjusted"
-                        else "embedded_in_adjusted_prices"
-                    )
-                ),
+                "corporate_action_adjustment": self._corporate_action_adjustment(),
             },
         )
 
@@ -378,16 +369,7 @@ class EventBacktestEngine:
                     if "upper_limit" in self.panels
                     else "computed_prev_close_ratio"
                 ),
-                "corporate_action_adjustment": (
-                    "cash_dividend_gross_no_tax"
-                    if self._execution_price_source == "unadjusted"
-                    and self.config.company_action_model == "cash"
-                    else (
-                        "share_scaling_by_adjusted_over_unadjusted_ratio"
-                        if self._execution_price_source == "unadjusted"
-                        else "embedded_in_adjusted_prices"
-                    )
-                ),
+                "corporate_action_adjustment": self._corporate_action_adjustment(),
                 "price_source": self._execution_price_source,
                 "intraday_price": (
                     "1m"
@@ -422,10 +404,12 @@ class EventBacktestEngine:
         """聚宽现金分红口径：派息入现金、送股增股，不自动再投资。
 
         与再投资口径的区别只在事件日之后的暴露：现金留在账户，等策略自己
-        决定何时买入。分红税未建模（税前金额入账）；送股不足 1 股向下取整。
+        决定何时买入。现金分红按 ``dividend_tax_rate`` 预扣红利税后入账
+        （聚宽真实价格模式统一 20%）；送股不足 1 股向下取整。
         """
 
         events: list[dict[str, object]] = []
+        tax_rate = float(self.config.dividend_tax_rate)
         for symbol in list(ledger.positions):
             shares = int(ledger.positions.get(symbol, 0))
             if shares <= 0:
@@ -434,7 +418,9 @@ class EventBacktestEngine:
             bonus_per_share = self._event_value("stock_bonus", symbol, date)
             if cash_per_share <= 0 and bonus_per_share <= 0:
                 continue
-            cash = shares * cash_per_share
+            gross_cash = shares * cash_per_share
+            tax = gross_cash * tax_rate if cash_per_share > 0 else 0.0
+            cash = gross_cash - tax
             bonus_shares = (
                 int(np.floor(shares * bonus_per_share))
                 if bonus_per_share > 0 else 0
@@ -459,11 +445,26 @@ class EventBacktestEngine:
                 "symbol": symbol,
                 "model": "cash",
                 "cash_dividend": float(cash),
+                "cash_dividend_gross": float(gross_cash),
+                "dividend_tax": float(tax),
                 "stock_bonus_shares": int(bonus_shares),
                 "previous_quantity": shares,
                 "quantity": new_shares,
             })
         return events
+
+    def _corporate_action_adjustment(self) -> str:
+        """assumptions 里的公司行为口径标签。"""
+
+        if self._execution_price_source != "unadjusted":
+            return "embedded_in_adjusted_prices"
+        if self.config.company_action_model != "cash":
+            return "share_scaling_by_adjusted_over_unadjusted_ratio"
+        if self.config.dividend_tax_rate > 0:
+            percent = round(self.config.dividend_tax_rate * 100, 2)
+            text = f"{percent:g}".replace(".", "p")
+            return f"cash_dividend_net_{text}pct_tax"
+        return "cash_dividend_gross_no_tax"
 
     def _apply_corporate_adjustments(
         self, ledger: _Ledger, index: int, date: pd.Timestamp

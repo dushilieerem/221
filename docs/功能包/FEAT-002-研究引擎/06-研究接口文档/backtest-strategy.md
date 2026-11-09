@@ -472,6 +472,6 @@ Web 端需要展示调仓或成交过程时，使用 `include_execution_timeline
 
 ### 公司行为（分红送转）
 
-- `strategy_dialect="joinquant"` 且 `execution_price_source="unadjusted"` 时，事件引擎按**现金分红**记账：事件日把 `interest/10 × 持股数` 计入现金、`stockBonus/10` 增加股数，现金不自动再投资，等策略自行下单；`assumptions.corporate_action_adjustment = "cash_dividend_gross_no_tax"`。
+- `strategy_dialect="joinquant"` 且 `execution_price_source="unadjusted"` 时，事件引擎按**现金分红**记账：事件日按税前 `interest/10 × 持股数` 预扣 20% 红利税后计入现金、`stockBonus/10` 增加股数，现金不自动再投资，等策略自行下单；`assumptions.corporate_action_adjustment = "cash_dividend_net_20pct_tax"`。
 - 其余组合（native 方言，或复权价格来源）保持原有口径：未复权时按 `hfq/unadj` 比例缩放持仓（等价分红再投资），复权时公司行为已包含在价格中。
-- 分红税未建模，现金按税前金额入账；送股不足 1 股向下取整；分红事件数据缺失时回退再投资口径并在 `assumptions` 标注。
+- 分红事件明细包含 `cash_dividend`（税后入账）、`cash_dividend_gross`（税前）和 `dividend_tax`（预扣税额）；送股不足 1 股向下取整；分红事件数据缺失时回退再投资口径并在 `assumptions` 标注。
