@@ -384,14 +384,42 @@ class JoinQuantRuntime:
         fq: str = "pre",
         **kwargs: Any,
     ):
-        return self.get_price(
+        """聚宽 ``attribute_history``：默认 ``skip_paused=True``，剔除停牌日。
+
+        停牌日会占用 count 窗口，因此先多取一段，剔除停牌后再取最后
+        ``count`` 行；否则窗口会被停牌日挤占。
+        """
+
+        symbols = [security] if isinstance(security, str) else list(security)
+        request = int(count) * 3 + 20 if skip_paused else int(count)
+        frame = self.get_price(
             security,
-            count=count,
+            count=request,
             fields=fields,
             fq=fq,
             frequency=unit,
             panel=True,
         )
+        if not skip_paused:
+            return frame
+        paused = self.context.market.paused_panel(
+            symbols, count=request, end=self._current_date()
+        )
+        if paused is None:
+            return frame
+
+        def _drop_paused(value, symbol):
+            if symbol not in paused.columns:
+                return value.tail(count)
+            mask = paused[symbol].reindex(value.index).fillna(False).astype(bool)
+            return value.loc[~mask].tail(count)
+
+        if isinstance(frame, dict):
+            return {
+                symbol: _drop_paused(value, symbol)
+                for symbol, value in frame.items()
+            }
+        return _drop_paused(frame, symbols[0])
 
     def history(
         self,

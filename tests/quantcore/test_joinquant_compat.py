@@ -660,6 +660,54 @@ def test_get_all_securities_excludes_b_shares():
     assert strategy.runtime.g.codes == ["000001.SZ"]
 
 
+ATTRIBUTE_PROBE = """
+def initialize(context):
+    g.dates = None
+    run_daily(probe, time='09:31')
+
+def probe(context):
+    if g.dates is not None:
+        return
+    if context.current_dt.strftime('%Y-%m-%d') != '2024-01-08':
+        return
+    frame = attribute_history('000001.SZ', 2, fields=['close'])
+    g.dates = [str(item)[:10] for item in frame.index]
+"""
+
+
+def test_attribute_history_skips_paused_days_and_extends_window():
+    """聚宽默认 skip_paused=True：停牌日不占 count 窗口。"""
+
+    dates = pd.to_datetime(
+        ["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05", "2024-01-08"]
+    )
+    close = pd.DataFrame(
+        {"000001.SZ": [10.0, 10.1, 10.2, 10.3, 10.4]}, index=dates
+    )
+    panels = {field: close.copy() for field in ("open", "high", "low", "close")}
+    panels["up_and_down_status"] = pd.DataFrame(
+        {"000001.SZ": ["非涨跌停", "非涨跌停", "非涨跌停", "停牌", "非涨跌停"]},
+        index=dates,
+    )
+    engine = EventBacktestEngine(
+        panels,
+        EventBacktestConfig(
+            initial_capital=100_000.0,
+            commission_rate=0.0,
+            min_commission=0.0,
+            stamp_tax_rate=0.0,
+            slippage_rate=0.0,
+            timed_execution=True,
+        ),
+        intraday_price=lambda date, time, symbol: 10.4 if time == "09:31" else None,
+    )
+    strategy = load_joinquant_strategy(ATTRIBUTE_PROBE)
+    engine.run(strategy)
+
+    # 01-05 停牌被剔除，窗口往前补一根，仍返回 2 个交易日。
+    assert strategy.runtime.g.dates == ["2024-01-04", "2024-01-08"]
+
+
 def test_history_fundamentals_returns_single_quarter_cashflow(tmp_path):
     """聚宽 get_history_fundamentals 返回单季度流量；源表是年内累计。"""
     from app.services.strategy.compat.financial_cache import clear_cache
