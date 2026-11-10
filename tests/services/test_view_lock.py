@@ -114,3 +114,12 @@ def test_release_status_omits_lock_without_data_dir(tmp_path):
 
     assert status.view_id is None
     assert status.manifest_sha256 is None
+
+
+def test_view_lock_path_supports_views_root_layout(tmp_path):
+    """生产布局是 views-root + views 软链，两种祖先目录都要识别。"""
+
+    data_dir = tmp_path / "views-root" / "rv-1" / "materialized" / "ifind"
+    data_dir.mkdir(parents=True)
+
+    assert view_lock_path(data_dir) == tmp_path / "views-root" / "current.lock"
