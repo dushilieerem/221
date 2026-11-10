@@ -530,13 +530,22 @@ class FundamentalStore:
                 )
             target = candidates[-1]
         columns = list(dict.fromkeys(["symbol", *VALUATION_MAP.values()]))
-        frame = pd.read_parquet(target, columns=columns)
+        try:
+            frame = pd.read_parquet(target, columns=[*columns, "market_cap"])
+        except (KeyError, ValueError):
+            frame = pd.read_parquet(target, columns=columns)
         rename = {
             column: f"valuation.{name}"
             for name, column in VALUATION_MAP.items()
             if name != "code" and column in frame.columns
         }
         frame = frame.rename(columns=rename)
+        if "market_cap" in frame.columns:
+            # 新数据集提供已按 total_mv→float_mv 回退的 market_cap，优先使用；
+            # 旧数据集没有该列时沿用 total_mv（float 基的行会是 NaN）。
+            frame["valuation.market_cap"] = pd.to_numeric(
+                frame["market_cap"], errors="coerce"
+            )
         # 聚宽的 valuation.market_cap / circulating_market_cap 单位是亿元，
         # 供应商总市值/流通市值是元；统一换算，避免选股阈值失真。
         for name in ("market_cap", "circulating_market_cap"):

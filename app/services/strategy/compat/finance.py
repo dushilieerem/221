@@ -70,15 +70,36 @@ class FinanceNamespace:
         if self._prepared is not None:
             return self._prepared
         dividends = load_statement(
-            self.root, "dividend_factors", ["time", "interest", "stockBonus"]
+            self.root,
+            "dividend_factors",
+            ["time", "registration_date", "interest", "stockBonus"],
         )
+        if "registration_date" in dividends.columns:
+            registration = pd.to_datetime(
+                dividends["registration_date"], errors="coerce", format="mixed"
+            ).astype("datetime64[ns]")
+        else:
+            # 旧数据集没有登记日列：沿用除权日近似，行为与之前一致。
+            registration = None
         capital = load_statement(self.root, "capital", ["total_capital"])
 
         frame = dividends[["Symbol", "time", "interest", "stockBonus"]].copy()
-        frame["time"] = pd.to_datetime(frame["time"], errors="coerce").astype(
-            "datetime64[ns]"
-        )
+        frame["time"] = pd.to_datetime(
+            frame["time"], errors="coerce", format="mixed"
+        ).astype("datetime64[ns]")
         frame = frame.dropna(subset=["time"]).sort_values(["time", "Symbol"])
+        # 聚宽 STK_XR_XD.a_registration_date 是股权登记日，不是除权日。
+        # 数据侧有 registration_date 时优先使用（匹配不到为 NaT 时回退除权日），
+        # 否则保持旧行为。
+        if registration is not None:
+            frame["a_registration_date"] = registration.reindex(
+                frame.index
+            ).to_numpy()
+        else:
+            frame["a_registration_date"] = frame["time"].to_numpy()
+        frame["a_registration_date"] = frame["a_registration_date"].where(
+            frame["a_registration_date"].notna(), frame["time"]
+        )
 
         shares = capital[["Symbol", "m_anntime", "total_capital"]].copy()
         shares["announce"] = pd.to_datetime(
@@ -140,7 +161,7 @@ class FinanceNamespace:
         # 构造 20 万行的输出帧（dividend_query 会按 limit 做日期/代码二分）。
         prepared = pd.DataFrame({
             f"{_TABLE}.code": merged["Symbol"].to_numpy(),
-            f"{_TABLE}.a_registration_date": merged["time"].to_numpy(),
+            f"{_TABLE}.a_registration_date": merged["a_registration_date"].to_numpy(),
             f"{_TABLE}.bonus_amount_rmb": bonus.to_numpy(),
         })
         self._prepared = prepared

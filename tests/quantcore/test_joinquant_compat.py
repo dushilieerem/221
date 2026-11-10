@@ -595,6 +595,33 @@ def test_compat_log_handles_message_without_placeholders(caplog):
     assert "仓位 19.8%" in caplog.text
 
 
+def test_valuation_prefers_rebuilt_market_cap(tmp_path):
+    """新数据集提供 total_mv→float_mv 回退后的 market_cap，应优先使用。"""
+
+    root = tmp_path / "5_technical_derived" / "valuation" / "dt=20240102"
+    root.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "symbol": ["000001.SZ", "000002.SZ"],
+            "total_mv": [1.0e10, None],
+            "float_mv": [8.0e9, 6.0e9],
+            "pe_ttm": [10.0, 20.0],
+            "pb": [1.0, 2.0],
+            "ps_ttm": [1.0, 2.0],
+            "market_cap": [1.0e10, 6.0e9],
+        }
+    ).to_parquet(root / "data.parquet")
+
+    from app.services.strategy.compat.fundamentals import FundamentalStore
+
+    frame = FundamentalStore(root=tmp_path)._valuation_frame("20240102")
+
+    caps = frame.set_index("symbol")["valuation.market_cap"]
+    assert caps["000001.SZ"] == pytest.approx(100.0)
+    # total_mv 缺失时使用 market_cap 的 float 回退值，而不是 NaN。
+    assert caps["000002.SZ"] == pytest.approx(60.0)
+
+
 def test_history_fundamentals_returns_single_quarter_cashflow(tmp_path):
     """聚宽 get_history_fundamentals 返回单季度流量；源表是年内累计。"""
     from app.services.strategy.compat.financial_cache import clear_cache

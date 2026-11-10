@@ -66,3 +66,47 @@ def test_run_query_converts_cash_dividend_to_ten_thousand_yuan(data_root):
     assert len(frame) == 1
     assert frame.iloc[0]["code"] == SYMBOL
     assert frame.iloc[0]["bonus_amount_rmb"] == pytest.approx(1e5)
+
+
+def test_run_query_uses_registration_date_when_available(tmp_path):
+    """聚宽 a_registration_date 是股权登记日，不是除权日。"""
+
+    clear_cache()
+    dividend_dir = tmp_path / "3_financial_data" / "dividend_factors"
+    dividend_dir.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "Symbol": [SYMBOL],
+            "time": ["2021-06-01"],
+            "registration_date": ["2021-05-31"],
+            "type": ["1"],
+            "interest": [10.0],
+            "allotPrice": [0.0],
+            "stockBonus": [0.0],
+            "allotment": [0.0],
+        }
+    ).to_parquet(dividend_dir / f"{SYMBOL}.parquet")
+
+    capital_dir = tmp_path / "3_financial_data" / "capital"
+    capital_dir.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "Symbol": [SYMBOL],
+            "m_timetag": ["20210331"],
+            "m_anntime": ["20210401"],
+            "total_capital": [1_000_000_000.0],
+        }
+    ).to_parquet(capital_dir / f"{SYMBOL}.parquet")
+
+    finance = FinanceNamespace(root=tmp_path)
+    q = query(
+        finance.STK_XR_XD.code,
+        finance.STK_XR_XD.a_registration_date,
+        finance.STK_XR_XD.bonus_amount_rmb,
+    ).filter(finance.STK_XR_XD.code.in_([SYMBOL]))
+
+    frame = finance.run_query(q)
+
+    assert len(frame) == 1
+    assert str(frame.iloc[0]["a_registration_date"])[:10] == "2021-05-31"
+    clear_cache()
