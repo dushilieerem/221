@@ -450,6 +450,10 @@ class JoinQuantRuntime:
             rows = []
             index = []
             for symbol in symbols:
+                # 聚宽 stock 类型不含 B 股（200xxx.SZ / 900xxx.SH）；主数据
+                # 里带这些代码，不剔除会进入选股候选。
+                if symbol.startswith(("200", "900")):
+                    continue
                 start, end = self.context.market.listing_dates(symbol)
                 master_start = self.master.start_date(symbol) if self.master else None
                 start_value = master_start or start
