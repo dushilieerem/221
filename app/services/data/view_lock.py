@@ -26,12 +26,14 @@ class ViewLock:
 def view_lock_path(data_dir: str | Path) -> Path | None:
     """按行情目录推导锁文件：``<views>/<view>/materialized/<layer>`` -> ``<views>/current.lock``。
 
-    只认名为 ``views`` 的祖先目录；旧布局（如 ``../marketdata``）没有锁文件，
-    返回 ``None`` 交给调用方降级。
+    识别 ``views`` / ``views-root`` 祖先目录；旧布局（如 ``../marketdata``）
+    没有锁文件，返回 ``None`` 交给调用方降级。
     """
 
     for candidate in Path(data_dir).resolve().parents:
-        if candidate.name == "views":
+        # 生产布局把物化文件放在 ``views-root`` 下，``views`` 只是软链别名；
+        # 两种目录名都接受，避免状态接口在切换后丢失 view_id。
+        if candidate.name in {"views", "views-root"}:
             return candidate / "current.lock"
     return None
 
