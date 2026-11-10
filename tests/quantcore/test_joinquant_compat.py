@@ -620,6 +620,44 @@ def test_valuation_prefers_rebuilt_market_cap(tmp_path):
     assert caps["000001.SZ"] == pytest.approx(100.0)
     # total_mv 缺失时使用 market_cap 的 float 回退值，而不是 NaN。
     assert caps["000002.SZ"] == pytest.approx(60.0)
+SECURITIES_PROBE = """
+def initialize(context):
+    g.codes = None
+    run_daily(probe, time='09:31')
+
+def probe(context):
+    if g.codes is None:
+        g.codes = sorted(get_all_securities(types=['stock']).index.tolist())
+"""
+
+
+def test_get_all_securities_excludes_b_shares():
+    """聚宽 stock 类型不含 B 股（200xxx / 900xxx），主数据里的 B 股要剔除。"""
+
+    dates = pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"])
+    symbols = ["000001.SZ", "200418.SZ"]
+    panels = {
+        field: pd.DataFrame(
+            {symbol: [10.0, 10.0, 10.0] for symbol in symbols}, index=dates
+        )
+        for field in ("open", "high", "low", "close")
+    }
+    engine = EventBacktestEngine(
+        panels,
+        EventBacktestConfig(
+            initial_capital=100_000.0,
+            commission_rate=0.0,
+            min_commission=0.0,
+            stamp_tax_rate=0.0,
+            slippage_rate=0.0,
+            timed_execution=True,
+        ),
+        intraday_price=lambda date, time, symbol: 10.1 if time == "09:31" else None,
+    )
+    strategy = load_joinquant_strategy(SECURITIES_PROBE)
+    engine.run(strategy)
+
+    assert strategy.runtime.g.codes == ["000001.SZ"]
 
 
 def test_history_fundamentals_returns_single_quarter_cashflow(tmp_path):

@@ -481,6 +481,10 @@ Web 端需要展示调仓或成交过程时，使用 `include_execution_timeline
 - `finance.STK_XR_XD.a_registration_date` 优先映射数据侧的 `registration_date`（股权登记日），缺失时才回退到 `time`（除权日）；依赖 trailing 365 天分红的策略按登记日计算，避免窗口边界多算/少算一笔。
 - `valuation.market_cap` 优先使用数据侧已按 `total_mv → float_mv` 回退的 `market_cap` 字段；旧数据集没有该列时回退到 `total_mv`。
 
+### 股票池口径
+
+- `get_all_securities(types=['stock'])` 已排除 B 股（`200xxx` / `900xxx`），与聚宽 stock 类型一致；主数据的 ALL_A 曾混入 22 只 B 股，不剔除会进入 A/B 池候选。
+
 ### 聚宽行情读取（`get_price`）
 
 - 默认 `skip_paused=False`，与聚宽一致：停牌日保留在时间轴上，价格用前收盘价填充（由行情源提供），`volume`/`amount`（`money`）填 0；`skip_paused=True` 时剔除停牌行。否则策略按 `count` 或窗口统计成交额时会把停牌日算丢，导致流动性过滤误杀停牌股。
