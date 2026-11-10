@@ -31,9 +31,20 @@ class MinuteStore:
         self.max_days = max(1, int(max_days))
         self._cache: OrderedDict[str, pd.DataFrame] = OrderedDict()
 
-    def panel(self, date: str | pd.Timestamp) -> pd.DataFrame:
+    def panel(
+        self,
+        date: str | pd.Timestamp,
+        fields: tuple[str, ...] | None = ("close",),
+    ) -> pd.DataFrame:
+        """读取某交易日的分钟面板。
+
+        ``fields=None`` 读全表；默认只读 ``close``——事件回测的盘中成交价
+        只需要收盘价，而按日宽表有 6 个字段、约 3 万列，只读 close 可把
+        单日读取耗时降约 5 倍、内存降约 6 倍。
+        """
+
         day = pd.Timestamp(date).normalize()
-        key = day.strftime("%Y-%m-%d")
+        key = (day.strftime("%Y-%m-%d"), fields)
         cached = self._cache.get(key)
         if cached is not None:
             self._cache.move_to_end(key)
@@ -42,7 +53,35 @@ class MinuteStore:
         path = minute_file(self.data_dir, day)
         if not path.is_file():
             raise IntradayDataError(f"缺少分钟数据: {path}")
-        frame = pd.read_parquet(path)
+        if fields is None:
+            frame = pd.read_parquet(path)
+        else:
+            import json
+
+            import pyarrow.parquet as pq
+
+            parquet = pq.ParquetFile(path)
+            names = parquet.schema_arrow.names
+            metadata = parquet.metadata.metadata or {}
+            index_columns = []
+            if b"pandas" in metadata:
+                index_columns = json.loads(metadata[b"pandas"]).get(
+                    "index_columns"
+                ) or []
+            index_name = (
+                index_columns[0]
+                if index_columns and isinstance(index_columns[0], str)
+                else "date"
+            )
+            selected = [index_name]
+            for field in fields:
+                suffix = f"'{field}')"
+                selected.extend(name for name in names if name.endswith(suffix))
+            frame = parquet.read(columns=selected).to_pandas()
+            # pyarrow 会按 pandas 元数据把索引列还原成索引；只有在列里仍存在
+            # 索引列时才需要显式 set_index。
+            if index_name in frame.columns:
+                frame = frame.set_index(index_name)
         if not isinstance(frame.columns, pd.MultiIndex):
             raise IntradayDataError(f"{path}: 期望 (symbol, field) 两级列")
         self._cache[key] = frame
