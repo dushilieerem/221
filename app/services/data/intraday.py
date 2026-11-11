@@ -40,13 +40,21 @@ def minute_file(data_dir: str | Path, date: str | pd.Timestamp) -> Path:
 
 @dataclass
 class _MinuteDay:
-    """单日分钟数据：保留 Arrow 表做单值读取，DataFrame 按需生成。"""
+    """单日分钟数据：保留已解析页脚的 ParquetFile，按需读取所需列。
 
-    table: Any
+    单日文件有约 2.7 万列，把整行 close 读进内存约 0.16 秒；策略实际
+    只取少量标的，因此列在第一次用到时才读取（复用已解析的 schema）。
+    """
+
+    parquet: Any
     index_name: str
     columns: frozenset[str]
     row_of: dict[str, int]
+    values: dict[str, list] = dataclass_field(default_factory=dict)
     frame: pd.DataFrame | None = dataclass_field(default=None)
+
+    def close(self) -> None:
+        self.parquet.close()
 
 
 class MinuteStore:
@@ -61,12 +69,10 @@ class MinuteStore:
     def __init__(self, data_dir: str | Path, *, max_days: int = 5) -> None:
         self.data_dir = Path(data_dir)
         self.max_days = max(1, int(max_days))
-        self._days: OrderedDict[tuple[str, tuple[str, ...] | None], _MinuteDay | None] = (
-            OrderedDict()
-        )
+        self._days: OrderedDict[str, _MinuteDay | None] = OrderedDict()
         self._lock = threading.RLock()
         self._executor: ThreadPoolExecutor | None = None
-        self._futures: dict[tuple[str, tuple[str, ...] | None], Future] = {}
+        self._futures: dict[str, Future] = {}
         self._queue: list[pd.Timestamp] = []
         self._queue_pos = 0
         self._queue_fields: tuple[str, ...] | None = ("close",)
@@ -115,7 +121,7 @@ class MinuteStore:
         while len(self._futures) < self._window and self._queue_pos < len(self._queue):
             day = self._queue[self._queue_pos]
             self._queue_pos += 1
-            key = (day.strftime("%Y-%m-%d"), self._queue_fields)
+            key = day.strftime("%Y-%m-%d")
             if key in self._days or key in self._futures:
                 continue
             self._futures[key] = executor.submit(
@@ -137,7 +143,13 @@ class MinuteStore:
         day: pd.Timestamp,
         fields: tuple[str, ...] | None,
     ) -> _MinuteDay | None:
-        key = (day.strftime("%Y-%m-%d"), fields)
+        # 列按需读取，因此一天只需要一份缓存，与 fields 无关。
+        key = day.strftime("%Y-%m-%d")
+        # 命中走无锁快路径：OrderedDict 的读取在 GIL 下是原子的；预读线程
+        # 频繁写入时，加锁会让每次取价多出 0.4 毫秒。
+        cached = self._days.get(key, _ABSENT)
+        if cached is not _ABSENT:
+            return cached
         with self._lock:
             cached = self._days.get(key, _ABSENT)
             if cached is not _ABSENT:
@@ -178,7 +190,17 @@ class MinuteStore:
         if cached is None:
             raise IntradayDataError(f"缺少分钟数据: {minute_file(self.data_dir, day)}")
         if cached.frame is None:
-            frame = cached.table.to_pandas()
+            if fields is None:
+                table = cached.parquet.read()
+            else:
+                selected = [cached.index_name]
+                for field in fields:
+                    suffix = f"'{field}')"
+                    selected.extend(
+                        name for name in cached.columns if name.endswith(suffix)
+                    )
+                table = cached.parquet.read(columns=selected)
+            frame = table.to_pandas()
             if cached.index_name in frame.columns:
                 frame = frame.set_index(cached.index_name)
             if not isinstance(frame.columns, pd.MultiIndex):
@@ -209,7 +231,7 @@ class MinuteStore:
         row = cached.row_of.get(minute)
         if row is None:
             return None
-        value = cached.table.column(column)[row].as_py()
+        value = _column_values(cached, column)[row]
         if value is None or (isinstance(value, float) and math.isnan(value)):
             return None
         return float(value)
@@ -235,12 +257,32 @@ class MinuteStore:
             column = f"('{symbol}', 'close')"
             if column not in cached.columns:
                 continue
-            value = cached.table.column(column)[row].as_py()
+            value = _column_values(cached, column)[row]
             if value is not None and not (
                 isinstance(value, float) and math.isnan(value)
             ):
                 values[symbol] = float(value)
         return pd.Series(values, dtype=float)
+
+
+def _open_day(path: Path):
+    """打开单日文件并解析一次页脚；返回 (ParquetFile, 索引列名)。"""
+
+    import json
+
+    import pyarrow.parquet as pq
+
+    parquet = pq.ParquetFile(path)
+    metadata = parquet.metadata.metadata or {}
+    index_columns: list[object] = []
+    if b"pandas" in metadata:
+        index_columns = json.loads(metadata[b"pandas"]).get("index_columns") or []
+    index_name = (
+        index_columns[0]
+        if index_columns and isinstance(index_columns[0], str)
+        else "date"
+    )
+    return parquet, index_name
 
 
 def _read_day(
@@ -251,43 +293,24 @@ def _read_day(
     path = minute_file(data_dir, day)
     if not path.is_file():
         raise IntradayDataError(f"缺少分钟数据: {path}")
-    table, index_name = _read_table(path, fields)
-    columns = frozenset(table.schema.names)
+    parquet, index_name = _open_day(path)
+    columns = frozenset(parquet.schema_arrow.names)
     row_of: dict[str, int] = {}
     if index_name in columns:
-        for row, value in enumerate(table.column(index_name).to_pylist()):
+        for row, value in enumerate(parquet.read(columns=[index_name]).column(0).to_pylist()):
             row_of.setdefault(str(value), row)
     return _MinuteDay(
-        table=table, index_name=index_name, columns=columns, row_of=row_of
+        parquet=parquet, index_name=index_name, columns=columns, row_of=row_of
     )
 
 
-def _read_table(path: Path, fields: tuple[str, ...] | None):
-    """读取所需列，返回 (Arrow 表, 索引列名)。"""
-
-    import json
-
-    import pyarrow.parquet as pq
-
-    parquet = pq.ParquetFile(path)
-    names = parquet.schema_arrow.names
-    metadata = parquet.metadata.metadata or {}
-    index_columns: list[object] = []
-    if b"pandas" in metadata:
-        index_columns = json.loads(metadata[b"pandas"]).get("index_columns") or []
-    index_name = (
-        index_columns[0]
-        if index_columns and isinstance(index_columns[0], str)
-        else "date"
-    )
-    if fields is None:
-        selected = list(names)
-    else:
-        selected = [index_name]
-        for field in fields:
-            suffix = f"'{field}')"
-            selected.extend(name for name in names if name.endswith(suffix))
-    return parquet.read(columns=selected), index_name
+def _column_values(day: _MinuteDay, column: str) -> list:
+    values = day.values.get(column)
+    if values is None:
+        table = day.parquet.read(columns=[column])
+        values = table.column(0).to_pylist()
+        day.values[column] = values
+    return values
 
 
 def _minute_key(day: pd.Timestamp, time: str) -> str:

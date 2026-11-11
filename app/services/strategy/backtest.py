@@ -881,7 +881,7 @@ def _run_event_strategy_backtest(
         )
         try:
             if intraday_store is not None and prefetch_dates is not None:
-                intraday_store.prefetch(prefetch_dates)
+                intraday_store.prefetch(prefetch_dates, window=8, workers=8)
             result = engine.run(strategy)
         finally:
             if intraday_store is not None:
