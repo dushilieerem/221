@@ -21,6 +21,8 @@ _ASYNC_FIELDS = (
     "finished_at",
     "cancel_requested",
     "error",
+    "error_code",
+    "unsupported_api",
     "result",
 )
 
@@ -58,8 +60,33 @@ def strategy_capabilities() -> dict:
 
 
 def _async_snapshot(handle, *, include_result: bool = True) -> dict:
+    """任务快照；业务错误同样投影到顶层，避免「succeeded + 空结果」误判。"""
+
     snapshot = handle.snapshot(include_result=include_result)
-    return {field: snapshot.get(field) for field in _ASYNC_FIELDS}
+    payload = {field: snapshot.get(field) for field in _ASYNC_FIELDS}
+    result = payload.get("result") if include_result else None
+    if result is None:
+        return payload
+    business_error = (
+        result.get("error") if isinstance(result, dict) else getattr(result, "error", None)
+    )
+    if not business_error:
+        return payload
+    payload["error"] = payload.get("error") or business_error
+    payload["error_code"] = (
+        result.get("error_code")
+        if isinstance(result, dict)
+        else getattr(result, "error_code", None)
+    )
+    payload["unsupported_api"] = (
+        result.get("unsupported_api")
+        if isinstance(result, dict)
+        else getattr(result, "unsupported_api", None)
+    )
+    if payload["status"] == "succeeded":
+        # 计算已完成但业务失败（策略代码/数据/不支持的 API），按失败呈现。
+        payload["status"] = "failed"
+    return payload
 
 
 def _async_handle(manager, run_id: str):

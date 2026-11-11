@@ -206,3 +206,29 @@ def test_capabilities_endpoint_describes_joinquant_dialect():
             assert "get_call_auction" in unsupported
     finally:
         manager.shutdown()
+
+
+def test_business_error_is_exposed_on_task_snapshot(monkeypatch):
+    """策略业务失败不能显示为 succeeded：顶层 error/error_code 与状态一起给出。"""
+
+    def failed_backtest(_request, **_kwargs):
+        return StrategyBacktestResponse(
+            error="NotImplementedError: 兼容层不支持 get_call_auction",
+            error_code="unsupported_api",
+            unsupported_api="兼容层不支持 get_call_auction",
+        )
+
+    monkeypatch.setattr(strategy_experiment, "run_strategy_backtest", failed_backtest)
+    application = create_app(testing=True)
+    manager = _use_app_data_engine(application)
+    try:
+        with TestClient(application) as client:
+            body = client.post("/api/backtest/strategy/async", json=PAYLOAD).json()
+            snapshot = _poll(client, body["poll_url"])
+            assert snapshot["status"] == "failed"
+            assert "get_call_auction" in snapshot["error"]
+            assert snapshot["error_code"] == "unsupported_api"
+            assert "get_call_auction" in snapshot["unsupported_api"]
+            assert snapshot["result"]["error_code"] == "unsupported_api"
+    finally:
+        manager.shutdown()
