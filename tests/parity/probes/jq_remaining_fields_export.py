@@ -23,6 +23,8 @@ from jqdata import *  # noqa: F401,F403
 # (RE 代码, asof)
 CASES = [
     ("000651.SZ", "2016-11-30"),
+    ("000540.SZ", "2016-09-30"),
+    ("002002.SZ", "2016-09-30"),
     ("000338.SZ", "2018-05-31"),
     ("000848.SZ", "2018-05-31"),
     ("600660.SH", "2019-04-30"),
@@ -80,12 +82,15 @@ def fundamentals_rows(code, asof):
     rows = []
 
     q_val = query(
-        valuation.code, valuation.market_cap, valuation.circulating_market_cap
+        valuation.code,
+        valuation.market_cap,
+        valuation.circulating_market_cap,
+        valuation.pb_ratio,
     ).filter(valuation.code.in_([jq]))
     val = get_fundamentals(q_val, date=asof)
     if val is not None and not val.empty:
         row = val.iloc[0]
-        for field in ("market_cap", "circulating_market_cap"):
+        for field in ("market_cap", "circulating_market_cap", "pb_ratio"):
             rows.append((code, asof, field, row.get(field)))
 
     q_ind = query(
