@@ -121,6 +121,9 @@ class IndustryStore:
         self._membership_dir = membership if any(membership.glob("year=*")) else None
         self._membership_dates: list[str] | None = None
         self._membership_cache: dict[str, pd.DataFrame] = {}
+        #: 少量标的（持仓）按 symbol 拉一次全历史，逐日查询变 O(1)；
+        #: 大量标的仍走逐日快照查询，避免把 1.4 万行 × 5000 只全载入内存。
+        self._symbol_rows: dict[str, dict[str, tuple[object, ...]]] = {}
 
     def industries(
         self,
@@ -130,6 +133,8 @@ class IndustryStore:
         if self._history is not None:
             return self._history_industries(symbols, as_of)
         if self._membership_dir is not None:
+            if 0 < len(symbols) <= 64:
+                return self._membership_by_symbol(symbols, as_of)
             return self._membership_industries(symbols, as_of)
         if self._derived_dir.is_dir():
             return self._derived_industries(symbols, as_of)
@@ -207,6 +212,85 @@ class IndustryStore:
             if payload:
                 result[str(symbol)] = payload
         return result
+
+    def _membership_by_symbol(
+        self, symbols: list[str], as_of: str | object
+    ) -> dict[str, dict[str, dict[str, str]]]:
+        """少量标的走 symbol 维度缓存：一次拉全历史，逐日只查快照当日。"""
+
+        self._load_membership_dates()
+        target = pd.Timestamp(as_of).strftime("%Y-%m-%d")
+        position = bisect_right(self._membership_dates, target) - 1
+        if position < 0:
+            return {}
+        snapshot_date = self._membership_dates[position]
+        missing = [symbol for symbol in symbols if symbol not in self._symbol_rows]
+        if missing:
+            self._load_symbol_rows(missing)
+        result: dict[str, dict[str, dict[str, str]]] = {}
+        for symbol in symbols:
+            row = self._symbol_rows.get(symbol, {}).get(snapshot_date)
+            if row is None:
+                continue
+            l1_code, l1_name, l2_code, l2_name = row
+            payload: dict[str, dict[str, str]] = {}
+            for level, code, name in (
+                ("sw_l1", l1_code, l1_name),
+                ("sw_l2", l2_code, l2_name),
+            ):
+                if code is None or pd.isna(code):
+                    continue
+                payload[level] = {
+                    "industry_code": _normalize_industry_code(code),
+                    "industry_name": (
+                        str(name)
+                        if name is not None and not pd.isna(name)
+                        else str(code)
+                    ),
+                }
+            if payload:
+                result[str(symbol)] = payload
+        return result
+
+    def _load_membership_dates(self) -> None:
+        if self._membership_dates is not None:
+            return
+        pattern = str(self._membership_dir / "year=*" / "*.parquet")
+        connection = duckdb.connect()
+        try:
+            rows = connection.execute(
+                f"SELECT DISTINCT date FROM read_parquet('{pattern}')"
+            ).fetchdf()
+        finally:
+            connection.close()
+        self._membership_dates = sorted(str(value) for value in rows["date"])
+
+    def _load_symbol_rows(self, symbols: list[str]) -> None:
+        placeholders = ",".join("?" for _ in symbols)
+        pattern = str(self._membership_dir / "year=*" / "*.parquet")
+        connection = duckdb.connect()
+        try:
+            frame = connection.execute(
+                "SELECT symbol, date, sw_l1_code, sw_l1_name, sw_l2_code, "
+                f"sw_l2_name FROM read_parquet('{pattern}') "
+                f"WHERE symbol IN ({placeholders})",
+                symbols,
+            ).fetchdf()
+        finally:
+            connection.close()
+        loaded: dict[str, dict[str, tuple[object, ...]]] = {
+            symbol: {} for symbol in symbols
+        }
+        for symbol, date, l1_code, l1_name, l2_code, l2_name in frame.itertuples(
+            index=False, name=None
+        ):
+            loaded.setdefault(str(symbol), {})[str(date)] = (
+                l1_code,
+                l1_name,
+                l2_code,
+                l2_name,
+            )
+        self._symbol_rows.update(loaded)
 
     def _membership_frame(self, as_of: str | object) -> pd.DataFrame | None:
         """取 ``derived/industry_membership_history`` 中不晚于 as_of 的快照。"""

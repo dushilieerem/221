@@ -22,6 +22,41 @@ from app.models.event import PortfolioView
 
 
 
+def _row_slice(
+    frame: pd.DataFrame,
+    *,
+    start: object | None = None,
+    end: object | None = None,
+) -> pd.DataFrame:
+    """按日期区间切行；用 searchsorted + iloc，避免布尔 loc 的全表 take。
+
+    面板是「全历史 × 5000 列」，``loc[bool]`` 每次会构造新块并复制整段，
+    实测 2428 行 × 5000 列约 22 毫秒；iloc 位置切片约 0.1 毫秒。
+    """
+
+    index = frame.index
+    if not index.is_monotonic_increasing:
+        subset = frame
+        if start is not None:
+            subset = subset.loc[subset.index >= pd.Timestamp(start)]
+        if end is not None:
+            subset = subset.loc[subset.index <= pd.Timestamp(end)]
+        return subset
+    lower = (
+        int(index.searchsorted(pd.Timestamp(start), side="left"))
+        if start is not None
+        else 0
+    )
+    upper = (
+        int(index.searchsorted(pd.Timestamp(end), side="right"))
+        if end is not None
+        else len(index)
+    )
+    if lower == 0 and upper >= len(index):
+        return frame
+    return frame.iloc[lower:upper]
+
+
 class EventBacktestEngine:
     """策略在盘前基于截至前一收盘的数据决策，当日开盘按卖后买成交。"""
 
@@ -70,7 +105,13 @@ class EventBacktestEngine:
         # 逐日行缓存：宽表 ``frame.at[date, symbol]`` 的标量访问在策略高频
         # 查询（current_data / 涨跌停状态）下会退化成 O(列) 的 pandas 定位，
         # 每个交易日只把当天需要的行转成 dict，后续都是 O(1)。
-        self._row_cache: dict[tuple[int, pd.Timestamp], dict[str, object]] = {}
+        self._row_cache: dict[tuple[int, pd.Timestamp], pd.Series] = {}
+        # 盘中价缓存：同一时点、同一标的会被 portfolio.positions 反复取价，
+        # 分钟面板命中后不再重复走时间点逻辑；逐日清空。
+        self._price_cache: dict[tuple[pd.Timestamp, str, str], float | None] = {}
+        # 当日停牌/ST 标的集合：get_current_data 会逐标的检查，按天缓存成
+        # 集合后是 O(1) 成员判断，避免每次走文本比较。
+        self._day_code_cache: dict[tuple[str, object], frozenset[str]] = {}
         # 状态面板（ST / 停牌）的布尔矩阵缓存：宽表字符串比较按列很慢，
         # 首次使用时整表向量化一次，之后每天只做 numpy 切片。
         self._status_matrix_cache: dict[
@@ -178,6 +219,8 @@ class EventBacktestEngine:
             timestamp = pd.Timestamp(date)
             self._current_date = timestamp
             self._row_cache.clear()
+            self._price_cache.clear()
+            self._day_code_cache.clear()
             previous = self._previous_date(index)
             context.previous_date = previous.date() if previous is not None else None
             ledger.begin_session()
@@ -287,6 +330,8 @@ class EventBacktestEngine:
             timestamp = pd.Timestamp(date)
             self._current_date = timestamp
             self._row_cache.clear()
+            self._price_cache.clear()
+            self._day_code_cache.clear()
             previous = self._previous_date(index)
             context.previous_date = previous.date() if previous is not None else None
             ledger.begin_session()
@@ -891,8 +936,13 @@ class EventBacktestEngine:
 
     def _row_values(
         self, frame: pd.DataFrame | None, date: pd.Timestamp | None
-    ) -> dict[str, object] | None:
-        """把某一日整行转成 dict 并缓存；日期切换时清空。"""
+    ) -> pd.Series | None:
+        """缓存某一日整行；日期切换时清空。
+
+        返回 Series 而不是 dict：宽表有 5000+ 列，``to_dict()`` 会把整行
+        转成 Python 对象，ARROW 字符串列下每次约 60 毫秒；调用方只用
+        ``.get(symbol)``，Series 直接按标签取即可。
+        """
 
         if frame is None or date is None:
             return None
@@ -901,7 +951,7 @@ class EventBacktestEngine:
         if values is None:
             if date not in frame.index:
                 return None
-            values = frame.loc[date].to_dict()
+            values = frame.loc[date]
             if len(self._row_cache) > 64:
                 self._row_cache.clear()
             self._row_cache[key] = values
@@ -964,6 +1014,18 @@ class EventBacktestEngine:
 
         if not ("09:30" <= time < "15:00"):
             return None
+        key = (pd.Timestamp(date), time, symbol)
+        if key in self._price_cache:
+            return self._price_cache[key]
+        value = self._compute_price_at_time(symbol, date, time)
+        if len(self._price_cache) > 8192:
+            self._price_cache.clear()
+        self._price_cache[key] = value
+        return value
+
+    def _compute_price_at_time(
+        self, symbol: str, date: pd.Timestamp, time: str
+    ) -> float | None:
         if time == "09:30":
             # 聚宽 09:30 看到的 last_price 与成交价都是当日开盘价，不是首根
             # 分钟线的收盘价。
@@ -1289,6 +1351,31 @@ class _MarketView:
             block[:, present] = matrix[np.ix_(rows, width[present])]
         return pd.DataFrame(block, index=positions, columns=symbols)
 
+    def paused_codes(self) -> frozenset[str]:
+        return self._day_codes("up_and_down_status", "停牌")
+
+    def st_codes(self) -> frozenset[str]:
+        return self._day_codes("listed_status", ("ST", "*ST"))
+
+    def _day_codes(self, panel: str, values) -> frozenset[str]:
+        engine = self._engine
+        date = engine._current_date
+        key = (panel, values)
+        cached = engine._day_code_cache.get(key)
+        if cached is not None:
+            return cached
+        matrix = self._status_matrix(panel, values)
+        if matrix is None or date is None:
+            result: frozenset[str] = frozenset()
+        else:
+            index, columns, block = matrix
+            if date not in index:
+                result = frozenset()
+            else:
+                result = frozenset(columns[block[index.get_loc(date)]])
+        engine._day_code_cache[key] = result
+        return result
+
     def current_price(self, symbol: str) -> float | None:
         engine = self._engine
         date = engine._current_date
@@ -1409,11 +1496,7 @@ class _MarketView:
                 continue
             # 先按行切片再投影列：面板是「全历史 × 全市场」，双轴同时 reindex
             # 每次都要搬运上千万个单元格；行切片后只剩几十行。
-            subset = frame
-            if start is not None:
-                subset = subset.loc[subset.index >= pd.Timestamp(start)]
-            if end is not None:
-                subset = subset.loc[subset.index <= pd.Timestamp(end)]
+            subset = _row_slice(frame, start=start, end=end)
             if count is not None:
                 subset = subset.iloc[-int(count):]
             result[field] = subset.reindex(columns=pd.Index(symbols))
@@ -1430,11 +1513,7 @@ class _MarketView:
     ) -> pd.DataFrame:
         """按昨收与板块规则生成涨跌停价面板（未复权口径）。"""
 
-        close = self._engine._mark_close
-        if start is not None:
-            close = close.loc[close.index >= pd.Timestamp(start)]
-        if end is not None:
-            close = close.loc[close.index <= pd.Timestamp(end)]
+        close = _row_slice(self._engine._mark_close, start=start, end=end)
         if count is not None:
             # 多取一行用于昨收；count=1 时不必构造整段历史面板。
             close = close.iloc[-(int(count) + 1):]
