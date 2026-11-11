@@ -2175,3 +2175,52 @@ def test_joinquant_strategy_runs_through_api(market_data_dir):
     assert body["error"] is None, body["error"]
     assert body["equity_curve"]
     assert body["fills"], f"聚宽策略应至少产生一笔成交；orders={body.get('orders')}"
+
+
+JOINQUANT_UNSUPPORTED_STRATEGY_CODE = '''
+def initialize(context):
+    run_daily(go, time='09:31')
+
+
+def go(context):
+    get_call_auction('S000', start_date=context.current_dt, end_date=context.current_dt)
+'''
+
+
+def test_joinquant_unsupported_api_returns_structured_error(market_data_dir):
+    """调用不支持的聚宽 API 时，HTTP 仍 200，但带回机器可读的错误分类。"""
+
+    response = client.post(
+        "/api/backtest/strategy",
+        json={
+            "strategy_code": JOINQUANT_UNSUPPORTED_STRATEGY_CODE,
+            "strategy_dialect": "joinquant",
+            "engine_mode": "event",
+            "timed_execution": True,
+            "execution_price_source": "adjusted",
+            "start": "2022-01-04",
+            "end": "2022-03-31",
+            "initial_capital": 100000,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["error_code"] == "unsupported_api"
+    assert "get_call_auction" in body["unsupported_api"]
+    assert body["error"]
+
+
+def test_strategy_capabilities_lists_supported_and_unsupported_apis():
+    """能力清单可独立于数据引擎返回，供 WebApp 做提交前预检。"""
+
+    response = client.get("/api/strategy-capabilities")
+
+    assert response.status_code == 200
+    body = response.json()
+    joinquant = body["dialects"]["joinquant"]
+    assert joinquant["engine_modes"] == ["event"]
+    assert "run_daily" in joinquant["supported_apis"]
+    assert "get_factor_values" in joinquant["supported_apis"]
+    unsupported = {item["api"] for item in joinquant["unsupported_apis"]}
+    assert "get_call_auction" in unsupported

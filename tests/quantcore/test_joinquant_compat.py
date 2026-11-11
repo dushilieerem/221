@@ -1014,3 +1014,34 @@ def test_vectorized_financial_factors_match_formulas(tmp_path):
     # 毛利率恒为 40%，同比为 0。
     assert degm["600000.SH"] == pytest.approx(0.0, abs=1e-12)
     clear_cache()
+
+
+def test_capability_manifest_matches_runtime_namespace():
+    """能力清单是 WebApp 预检的事实源，必须与真实命名空间一致。"""
+
+    from app.services.strategy.compat.capabilities import (
+        SUPPORTED_APIS,
+        capability_manifest,
+    )
+    from app.services.strategy.compat.runtime import JoinQuantRuntime
+
+    names = set(JoinQuantRuntime().globals())
+    missing = [name for name in SUPPORTED_APIS if name not in names]
+    assert missing == [], f"能力清单声明但运行时未实现: {missing}"
+
+    manifest = capability_manifest()
+    joinquant = manifest["dialects"]["joinquant"]
+    assert joinquant["engine_modes"] == ["event"]
+    assert joinquant["price_sources"] == ["unadjusted"]
+    assert joinquant["timed_execution"] is True
+    unsupported = {item["api"] for item in joinquant["unsupported_apis"]}
+    assert "get_call_auction" in unsupported
+
+
+def test_get_call_auction_is_explicit_not_implemented():
+    """不支持的 API 要有显式桩，避免直接抛出 NameError。"""
+
+    from app.services.strategy.compat.runtime import JoinQuantRuntime
+
+    with pytest.raises(NotImplementedError, match="get_call_auction"):
+        JoinQuantRuntime().globals()["get_call_auction"]("000001.SZ")

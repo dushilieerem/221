@@ -687,6 +687,10 @@ class StrategyBacktestResponse(BaseModel):
     assumptions: Optional["dict[str, str]"] = None
     # 错误信息
     error: Optional[str] = None
+    #: 机器可读的错误分类；目前用于区分“调用了不支持的聚宽 API”。
+    error_code: Optional[str] = None
+    #: 当 error_code=unsupported_api 时，给出具体 API/原因，便于调用方预检。
+    unsupported_api: Optional[str] = None
 
 
 class FactorInfo(BaseModel):
