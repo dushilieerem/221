@@ -241,23 +241,26 @@ class MinuteStore:
         date: str | pd.Timestamp,
         time: str,
         symbols: list[str],
+        *,
+        field: str = "close",
     ) -> pd.Series:
-        """一次取多个标的在同一分钟的收盘价。"""
+        """一次取多个标的在同一分钟的收盘价（缺失列合并成一次读取）。"""
 
         day = pd.Timestamp(date).normalize()
         minute = _minute_key(day, time)
-        cached = self._day(day, ("close",))
+        cached = self._day(day, (field,))
         if cached is None:
             return pd.Series(dtype=float)
         row = cached.row_of.get(minute)
         if row is None:
             return pd.Series(dtype=float)
+        columns = [f"('{symbol}', '{field}')" for symbol in symbols]
+        _column_values_many(cached, [name for name in columns if name in cached.columns])
         values: dict[str, float] = {}
-        for symbol in symbols:
-            column = f"('{symbol}', 'close')"
+        for symbol, column in zip(symbols, columns):
             if column not in cached.columns:
                 continue
-            value = _column_values(cached, column)[row]
+            value = cached.values[column][row]
             if value is not None and not (
                 isinstance(value, float) and math.isnan(value)
             ):
@@ -302,6 +305,17 @@ def _read_day(
     return _MinuteDay(
         parquet=parquet, index_name=index_name, columns=columns, row_of=row_of
     )
+
+
+def _column_values_many(day: _MinuteDay, columns: list[str]) -> None:
+    """把缺失的列合并成一次 parquet 读取。"""
+
+    missing = [column for column in columns if column not in day.values]
+    if not missing:
+        return
+    table = day.parquet.read(columns=missing)
+    for position, column in enumerate(missing):
+        day.values[column] = table.column(position).to_pylist()
 
 
 def _column_values(day: _MinuteDay, column: str) -> list:
