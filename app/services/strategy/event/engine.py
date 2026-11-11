@@ -212,110 +212,14 @@ class EventBacktestEngine:
         )
 
     def run(self, strategy) -> EventBacktestResult:
-        if self.config.timed_execution:
-            return self._run_timed(strategy)
-        ledger = _Ledger(cash=self.config.initial_capital)
-        data = DataView(self.panels)
-        orders = OrderService()
-        context = StrategyContext(data, orders, PortfolioView(ledger))
-        context.market = _MarketView(self)
-        context.run_params = self._run_params()
-        strategy.initialize(context)
-        self._reset_order_history()
-        all_orders = self._all_orders
-        fills = self._all_fills
-        events: list[dict[str, object]] = []
-        snapshots: list[PositionSnapshot] = []
-        equity: list[float] = []
+        """唯一的日循环：日频与时点执行只在调度/撮合细节上分支。
 
-        for index, date in enumerate(self.dates):
-            timestamp = pd.Timestamp(date)
-            self._current_date = timestamp
-            self._row_cache.clear()
-            self._price_cache.clear()
-            self._day_code_cache.clear()
-            previous = self._previous_date(index)
-            context.previous_date = previous.date() if previous is not None else None
-            ledger.begin_session()
-            events.extend(self._apply_corporate_adjustments(ledger, index, date))
-            offset = self._visibility_offset()
-            visible = index - offset
-            as_of = (
-                self.dates[visible]
-                if visible >= 0
-                else self._first_previous_date
-            )
-            data.set_as_of(as_of)
-            context.current_dt = timestamp.to_pydatetime()
-            orders.set_current_dt(context.current_dt)
-            events.append({"type": "SESSION_OPEN", "timestamp": context.current_dt})
-
-            for callback in context.schedule.due(timestamp, self.dates):
-                callback(context)
-                events.append({"type": "SCHEDULED_CALLBACK", "timestamp": context.current_dt, "callback": callback.__name__})
-
-            batch = list(orders.pending)
-            orders.pending.clear()
-            all_orders.extend(batch)
-            day_fills, day_events = self._execute_pending(batch, ledger, timestamp)
-            fills.extend(day_fills)
-            events.extend(day_events)
-
-            # 日终强平：放在策略回调与撮合之后，策略当日开盘的卖单先成交，
-            # 这里只处置残余持仓；放在权益计算之前，使当日净值即反映退出。
-            for order, fill in self._liquidate_delisted(ledger, timestamp):
-                all_orders.append(order)
-                fills.append(fill)
-                events.append({
-                    "type": "FORCED_LIQUIDATION",
-                    "timestamp": context.current_dt,
-                    "order_id": order.order_id,
-                    "symbol": order.symbol,
-                    "quantity": fill.quantity,
-                    "price": fill.price,
-                    "reason_code": "DELISTED",
-                })
-
-            total_value = self._portfolio_value(ledger, timestamp)
-            equity.append(total_value)
-            snapshots.append(PositionSnapshot(context.current_dt, ledger.cash, dict(ledger.positions), dict(ledger.sellable), total_value))
-            events.append({"type": "SESSION_CLOSE", "timestamp": context.current_dt})
-
-        return EventBacktestResult(
-            equity_curve=pd.Series(equity, index=self.dates, name="equity"),
-            orders=all_orders,
-            fills=fills,
-            position_snapshots=snapshots,
-            events=events,
-            assumptions={
-                "frequency": "1d",
-                "execution": self.config.execution_timing,
-                "data_visibility": (
-                    "same_close"
-                    if self.config.execution_timing == "same_close"
-                    else "previous_close"
-                ),
-                "delisted_handling": "point_in_time_exclude;force_liquidate_at_transition_close",
-                "limit_price_source": (
-                    "derived_limit_prices"
-                    if "upper_limit" in self.panels
-                    else "computed_prev_close_ratio"
-                ),
-                "price_source": self._execution_price_source,
-                "corporate_action_adjustment": self._corporate_action_adjustment(),
-            },
-        )
-
-    def _run_timed(self, strategy) -> EventBacktestResult:
-        """按时点执行回调与撮合。
-
-        与日频路径的区别：
-        * 09:00 等开盘前的回调只产生订单，统一在 09:30 按开盘价成交；
-        * 09:30–14:59 的每个时点先跑回调、再按该时点价格成交；
-        * 15:00 之后的订单不成交，保留到次日 09:30（复刻聚宽探针观察到的行为）；
-        * 估值仍按当日收盘。
+        * 日频（``timed_execution=False``）：一天一次回调，回调结束后统一撮合；
+        * 时点（``timed_execution=True``）：按注册时点逐点回调与撮合，
+          09:30–14:59 之外产生的订单挂到下一个可成交时点。
         """
 
+        timed = bool(self.config.timed_execution)
         ledger = _Ledger(cash=self.config.initial_capital)
         data = DataView(self.panels)
         orders = OrderService()
@@ -324,13 +228,17 @@ class EventBacktestEngine:
         context.run_params = self._run_params()
         strategy.initialize(context)
 
-        registered = {normalize_time(item) for item in context.schedule.times()}
-        unsupported = sorted(
-            item for item in registered if not re.fullmatch(r"\d{2}:\d{2}", item)
-        )
-        if unsupported:
-            raise ValueError(f"时点引擎不支持的调度时点: {unsupported}")
-        times = sorted({"09:30"} | registered)
+        times: list[str] = []
+        if timed:
+            registered = {
+                normalize_time(item) for item in context.schedule.times()
+            }
+            unsupported = sorted(
+                item for item in registered if not re.fullmatch(r"\d{2}:\d{2}", item)
+            )
+            if unsupported:
+                raise ValueError(f"时点引擎不支持的调度时点: {unsupported}")
+            times = sorted({"09:30"} | registered)
 
         self._reset_order_history()
         all_orders = self._all_orders
@@ -349,37 +257,68 @@ class EventBacktestEngine:
             context.previous_date = previous.date() if previous is not None else None
             ledger.begin_session()
             events.extend(self._apply_corporate_adjustments(ledger, index, date))
-            data.set_as_of(previous)
-            events.append({
-                "type": "SESSION_OPEN",
-                "timestamp": self._at(timestamp, "09:00"),
-            })
 
-            for time in times:
-                self._current_time = time
-                context.current_dt = self._at(timestamp, time)
+            if timed:
+                # 聚宽定时回测的可见数据固定为上一交易日。
+                data.set_as_of(previous)
+                events.append({
+                    "type": "SESSION_OPEN",
+                    "timestamp": self._at(timestamp, "09:00"),
+                })
+                for time in times:
+                    self._current_time = time
+                    context.current_dt = self._at(timestamp, time)
+                    orders.set_current_dt(context.current_dt)
+                    for callback in context.schedule.due_at(timestamp, self.dates, time):
+                        callback(context)
+                        events.append({
+                            "type": "TIMED_CALLBACK",
+                            "timestamp": context.current_dt,
+                            "time": time,
+                            "callback": callback.__name__,
+                        })
+                    if not ("09:30" <= time < "15:00"):
+                        # 开盘前与收盘后的订单都挂起，等下一个可成交时点。
+                        continue
+                    batch = list(orders.pending)
+                    orders.pending.clear()
+                    all_orders.extend(batch)
+                    day_fills, day_events = self._execute_pending(batch, ledger, timestamp)
+                    fills.extend(day_fills)
+                    events.extend(day_events)
+                    self._current_time = None
+                close_dt = self._at(
+                    timestamp, max("15:00", times[-1]) if times else "15:00"
+                )
+            else:
+                offset = self._visibility_offset()
+                visible = index - offset
+                as_of = (
+                    self.dates[visible]
+                    if visible >= 0
+                    else self._first_previous_date
+                )
+                data.set_as_of(as_of)
+                context.current_dt = timestamp.to_pydatetime()
                 orders.set_current_dt(context.current_dt)
-                for callback in context.schedule.due_at(timestamp, self.dates, time):
+                events.append({
+                    "type": "SESSION_OPEN",
+                    "timestamp": context.current_dt,
+                })
+                for callback in context.schedule.due(timestamp, self.dates):
                     callback(context)
                     events.append({
-                        "type": "TIMED_CALLBACK",
+                        "type": "SCHEDULED_CALLBACK",
                         "timestamp": context.current_dt,
-                        "time": time,
                         "callback": callback.__name__,
                     })
-
-                if not ("09:30" <= time < "15:00"):
-                    # 开盘前与收盘后的订单都挂起，等下一个可成交时点。
-                    continue
-
-                self._current_time = time
                 batch = list(orders.pending)
                 orders.pending.clear()
                 all_orders.extend(batch)
                 day_fills, day_events = self._execute_pending(batch, ledger, timestamp)
                 fills.extend(day_fills)
                 events.extend(day_events)
-                self._current_time = None
+                close_dt = timestamp.to_pydatetime()
 
             for order, fill in self._liquidate_delisted(ledger, timestamp):
                 all_orders.append(order)
@@ -394,8 +333,7 @@ class EventBacktestEngine:
                     "reason_code": "DELISTED",
                 })
 
-            close_time = max("15:00", times[-1]) if times else "15:00"
-            context.current_dt = self._at(timestamp, close_time)
+            context.current_dt = close_dt
             total_value = self._portfolio_value(ledger, timestamp)
             equity.append(total_value)
             snapshots.append(PositionSnapshot(
@@ -410,32 +348,46 @@ class EventBacktestEngine:
                 "timestamp": context.current_dt,
             })
 
-        return EventBacktestResult(
-            equity_curve=pd.Series(equity, index=self.dates, name="equity"),
-            orders=all_orders,
-            fills=fills,
-            position_snapshots=snapshots,
-            events=events,
-            assumptions={
-                "frequency": "1d",
+        assumptions = {
+            "frequency": "1d",
+            "delisted_handling": "point_in_time_exclude;force_liquidate_at_transition_close",
+            "limit_price_source": (
+                "derived_limit_prices"
+                if "upper_limit" in self.panels
+                else "computed_prev_close_ratio"
+            ),
+            "price_source": self._execution_price_source,
+            "corporate_action_adjustment": self._corporate_action_adjustment(),
+        }
+        if timed:
+            assumptions.update({
                 "execution": "timed",
                 "time_points": ",".join(times),
                 "data_visibility": "previous_close",
-                "delisted_handling": "point_in_time_exclude;force_liquidate_at_transition_close",
-                "limit_price_source": (
-                    "derived_limit_prices"
-                    if "upper_limit" in self.panels
-                    else "computed_prev_close_ratio"
-                ),
-                "corporate_action_adjustment": self._corporate_action_adjustment(),
-                "price_source": self._execution_price_source,
                 "intraday_price": (
                     "1m"
                     if self._intraday_price is not None
                     and self._execution_price_source == "unadjusted"
                     else "daily_open_close_fallback"
                 ),
-            },
+            })
+        else:
+            assumptions.update({
+                "execution": self.config.execution_timing,
+                "data_visibility": (
+                    "same_close"
+                    if self.config.execution_timing == "same_close"
+                    else "previous_close"
+                ),
+            })
+
+        return EventBacktestResult(
+            equity_curve=pd.Series(equity, index=self.dates, name="equity"),
+            orders=all_orders,
+            fills=fills,
+            position_snapshots=snapshots,
+            events=events,
+            assumptions=assumptions,
         )
 
     @staticmethod
