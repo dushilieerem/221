@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import hashlib
 from pathlib import Path
 import time
 
@@ -1114,7 +1115,8 @@ def test_strategy_backtest_returns_equity_and_positions(market_data_dir):
         "execution_price_source": "adjusted",
         "strategy_id": None,
         "strategy_version": None,
-        "code_hash": None,
+        # 直接提交源码也返回可复现凭证：源码 UTF-8 字节的 SHA-256。
+        "code_hash": hashlib.sha256(STRATEGY_CODE.encode("utf-8")).hexdigest(),
         "filter_suspended": False,
         "filter_st": False,
         "filter_limit_up": False,
@@ -2175,6 +2177,10 @@ def test_joinquant_strategy_runs_through_api(market_data_dir):
     assert body["error"] is None, body["error"]
     assert body["equity_curve"]
     assert body["fills"], f"聚宽策略应至少产生一笔成交；orders={body.get('orders')}"
+    # 直接提交源码也要带可复现凭证：源码 UTF-8 字节的 SHA-256。
+    assert body["meta"]["code_hash"] == hashlib.sha256(
+        JOINQUANT_STRATEGY_CODE.encode("utf-8")
+    ).hexdigest()
 
 
 JOINQUANT_UNSUPPORTED_STRATEGY_CODE = '''

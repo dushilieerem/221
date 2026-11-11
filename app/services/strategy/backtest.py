@@ -218,6 +218,11 @@ def run_strategy_backtest(
                 code_hash = asset.code_hash
                 expected_entrypoint = asset.entrypoint
 
+            # 直接提交源码时也要给出可复现凭证：与策略目录同口径，对源码
+            # UTF-8 字节做 SHA-256；否则聚宽直跑结果的 meta.code_hash 为 null。
+            if code_hash is None and strategy_code is not None:
+                code_hash = hashlib.sha256(strategy_code.encode("utf-8")).hexdigest()
+
             # 聚宽方言：模块级 initialize + 兼容层，不要求策略类。
             if req.strategy_dialect == "joinquant":
                 from app.services.security.code_guard import assert_safe_user_code

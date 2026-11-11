@@ -221,7 +221,7 @@ Web 端需要展示调仓或成交过程时，使用 `include_execution_timeline
     "engine_mode": "vectorized",
     "strategy_id": null,
     "strategy_version": null,
-    "code_hash": null
+    "code_hash": "3f786850e387550fdab836ed7e6dc881de23001bc0c1b6e0b8e1d0a6a5f9c2d7"
   },
   "positions": [
     {
@@ -415,7 +415,7 @@ Web 端需要展示调仓或成交过程时，使用 `include_execution_timeline
 | 回撤段（`drawdowns`） | `start`、`end`、`peak`、`trough`、`recovery`、`depth`、`days` | `start` 是高点日，`end` 是最低点日，`recovery` 为恢复到此前高点的日期；未恢复则为 `null`。`days` 为从高点到恢复日（未恢复时到回测末日）的自然日数。 |
 | 年度收益（`annual_returns`） | `year`、`return_value` | 自然年份及该年首末有效净值点计算的收益率。 |
 | 元信息（`meta`） | `strategy`、`universe`、`benchmark`、`engine_mode` | 实际执行的策略类名、股票池、基准和回测引擎模式。 |
-| 已保存策略元信息（`meta`） | `strategy_id`、`strategy_version`、`code_hash` | 仅通过 `strategy_id` 运行时有值：策略 ID、实际使用版本和源码 SHA-256 哈希；直接提交源码时均为 `null`。 |
+| 策略元信息（`meta`） | `strategy_id`、`strategy_version`、`code_hash` | 通过 `strategy_id` 运行时，三者都有值；直接提交 `strategy_code` 时 `strategy_id`/`strategy_version` 为 `null`，`code_hash` 为源码 UTF-8 字节的 SHA-256，用于复现凭证。 |
 | 运行标识（`meta`） | `data_release_id`、`spec_hash`、`run_id` | `data_release_id` 为本次实际绑定的行情发布（与因子回测同口径）；`spec_hash` 是「请求参数 + 数据发布」的 SHA-256，不含运行期 id，同一输入可复现；`run_id` 为本次任务 id（同步接口同样返回），用于把报告与运行日志对应。三者都由引擎真实返回，调用方不应从页面 `current` 推断。 |
 | 过滤开关回显（`meta`） | `filter_suspended`、`filter_st`、`filter_limit_up`、`filter_limit_down` | 本次请求的四个过滤开关原样回显。 |
 | 过滤诊断（`meta.filter_status`） | `is_suspended`、`is_st`、`is_limit_up`、`is_limit_down` | 四项过滤各自的执行状态：`disabled`（开关关闭或字段缺失且被跳过）、`skipped_missing_field`（字段缺失，放行）、`enabled` / `enabled_partial`（生效，后者表示部分状态值缺失并按放行处理）；事件模式下前三个常为 `matcher_always_on`，表示由撮合层无条件拦截、不受开关影响。 |
@@ -523,7 +523,9 @@ Web 端需要展示调仓或成交过程时，使用 `include_execution_timeline
 }
 ```
 
-同时返回 `Location` 头，值与 `poll_url` 相同。轮询响应的字段固定为 `run_id`、`status`、`created_at`、`started_at`、`finished_at`、`cancel_requested`、`error`、`result`；`status` 取 `queued`/`running`/`succeeded`/`failed`/`cancelled`，`result` 是同步接口的完整响应体（含 `metrics`、`equity_curve`、`orders`、`fills`、`error_code` 等）。
+同时返回 `Location` 头，值与 `poll_url` 相同。轮询响应的字段固定为 `run_id`、`status`、`created_at`、`started_at`、`finished_at`、`cancel_requested`、`error`、`error_code`、`unsupported_api`、`result`；`status` 取 `queued`/`running`/`succeeded`/`failed`/`cancelled`，`result` 是同步接口的完整响应体（含 `metrics`、`equity_curve`、`orders`、`fills`、`error_code` 等）。
+
+业务错误（策略源码/数据/不支持 API 等）会同时投影到任务顶层：`error` 非空、`error_code`/`unsupported_api` 与 `result` 内一致，`status` 从 `succeeded` 改为 `failed`。因此 `status=succeeded` 可以放心当作「有可用结果」；顶层 `error` 只表示任务级失败或业务失败，两者都可直接展示。
 
 约定：
 
