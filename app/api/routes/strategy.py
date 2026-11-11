@@ -63,10 +63,31 @@ def _async_snapshot(handle, *, include_result: bool = True) -> dict:
 
 
 def _async_handle(manager, run_id: str):
+    """取策略任务句柄；区分「已过期」与「不存在/已随重启丢失」。"""
+
     handle = manager.get(run_id)
-    if handle is None or handle.metadata.get("type") != "strategy":
-        raise HTTPException(status_code=404, detail="策略任务不存在或已过期")
-    return handle
+    if handle is not None:
+        try:
+            metadata = handle.metadata
+        except KeyError:  # 并发回收：取到句柄后恰好被保留期清掉
+            metadata = None
+        if metadata is not None and metadata.get("type") == "strategy":
+            return handle
+    if manager.was_pruned(run_id):
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "status": "expired",
+                "message": "策略任务结果已过期（异步结果保留 24 小时）",
+            },
+        )
+    raise HTTPException(
+        status_code=404,
+        detail={
+            "status": "unknown",
+            "message": "策略任务不存在：run_id 无效或服务已重启",
+        },
+    )
 
 
 @router.post("/backtest/strategy/async", status_code=202)

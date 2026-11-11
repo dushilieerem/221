@@ -116,7 +116,36 @@ def test_unknown_run_id_returns_404():
         with TestClient(application) as client:
             response = client.get("/api/backtest/strategy/async/not-a-run")
             assert response.status_code == 404
-            assert "策略任务不存在" in response.json()["detail"]
+            detail = response.json()["detail"]
+            assert detail["status"] == "unknown"
+            assert "服务已重启" in detail["message"]
+    finally:
+        manager.shutdown()
+
+
+def test_expired_run_reports_expired_status(monkeypatch):
+    """保留期回收后返回 status=expired，与从未存在的 run_id 区分。"""
+
+    monkeypatch.setattr(
+        strategy_experiment,
+        "run_strategy_backtest",
+        lambda _request, **_kwargs: StrategyBacktestResponse(),
+    )
+    application = create_app(testing=True)
+    manager = _use_app_data_engine(application)
+    try:
+        with TestClient(application) as client:
+            body = client.post("/api/backtest/strategy/async", json=PAYLOAD).json()
+            assert _poll(client, body["poll_url"])["status"] == "succeeded"
+
+            # 把时钟推到保留期之后，触发一次回收。
+            manager._prune_finished_locked(now=time.time() + 86_401)
+
+            response = client.get(body["poll_url"])
+            assert response.status_code == 404
+            detail = response.json()["detail"]
+            assert detail["status"] == "expired"
+            assert "24 小时" in detail["message"]
     finally:
         manager.shutdown()
 

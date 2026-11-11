@@ -10,6 +10,7 @@ from __future__ import annotations
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from concurrent.futures import Future
 from app.models.experiment import ExperimentStatus, _ExperimentRun, ExecutionLane
 from queue import Queue
@@ -74,6 +75,8 @@ class ExperimentManager:
     """
 
     _FINISHED_RETENTION_SECONDS = 60.0
+    #: 记住多少条已过期任务 id，用于把「已过期」和「从未存在」区分开。
+    _PRUNED_RUNS_KEPT = 4096
     _TERMINAL_STATUSES = frozenset(
         {ExperimentStatus.SUCCEEDED, ExperimentStatus.FAILED, ExperimentStatus.CANCELLED}
     )
@@ -107,6 +110,7 @@ class ExperimentManager:
         )
         self._runs: dict[str, _ExperimentRun[Any]] = {}
         self._inflight: dict[str, str] = {}
+        self._pruned_runs: OrderedDict[str, float] = OrderedDict()
         self._workers: list[threading.Thread] = []
         self._lock = threading.RLock()
         self._accepting = True
@@ -282,6 +286,10 @@ class ExperimentManager:
             run = self._runs.pop(run_id, None)
             if run is not None:
                 run.result = None
+                self._pruned_runs[run_id] = current
+                self._pruned_runs.move_to_end(run_id)
+                while len(self._pruned_runs) > self._PRUNED_RUNS_KEPT:
+                    self._pruned_runs.popitem(last=False)
 
     def _reap_finished_runs(self) -> None:
         while not self._reaper_stop.wait(5.0):
@@ -300,6 +308,16 @@ class ExperimentManager:
         with self._lock:
             self._prune_finished_locked()
             return ExperimentHandle(self, run_id) if run_id in self._runs else None
+
+    def was_pruned(self, run_id: str) -> bool:
+        """任务是否曾存在、但结果已按保留期回收。
+
+        只在同一进程生命周期内有效：服务重启后所有历史 run_id 都只能
+        视为「不存在」。
+        """
+
+        with self._lock:
+            return run_id in self._pruned_runs
 
     def snapshot(self, run_id: str, *, include_result: bool = False) -> dict[str, Any]:
         run = self._get_run(run_id)
