@@ -21,6 +21,10 @@ import pandas as pd
 from app.services.strategy.compat.financial_cache import load_statement, visible
 from app.services.strategy.compat.query import Field, Query, evaluate
 
+#: 分红预处理帧的进程级缓存；同一 root 下的多次策略回测只算一次。
+_PREPARED_CACHE: dict[str, pd.DataFrame] = {}
+
+
 DEFAULT_ROOT = Path(
     os.environ.get(
         "MODELSCOPE_ROOT",
@@ -69,6 +73,11 @@ class FinanceNamespace:
 
         if self._prepared is not None:
             return self._prepared
+        cache_key = str(Path(self.root).resolve())
+        cached = _PREPARED_CACHE.get(cache_key)
+        if cached is not None:
+            self._prepared = cached
+            return cached
         dividends = load_statement(
             self.root,
             "dividend_factors",
@@ -130,13 +139,13 @@ class FinanceNamespace:
         adjusted = total_shares.copy()
         need_fix = stock_bonus > 0
         if need_fix.any():
-            history = {
-                symbol: list(zip(
-                    group.sort_values("announce")["announce"].to_numpy(),
-                    group.sort_values("announce")["total_capital"].to_numpy(dtype=float),
+            history: dict[object, list[tuple[object, float]]] = {}
+            for symbol, group in shares.groupby("Symbol"):
+                ordered = group.sort_values("announce")
+                history[symbol] = list(zip(
+                    ordered["announce"].to_numpy(),
+                    ordered["total_capital"].to_numpy(dtype=float),
                 ))
-                for symbol, group in shares.groupby("Symbol")
-            }
             for position in merged.index[need_fix]:
                 symbol = merged.at[position, "Symbol"]
                 current = float(total_shares.at[position])
@@ -164,6 +173,9 @@ class FinanceNamespace:
             f"{_TABLE}.a_registration_date": merged["a_registration_date"].to_numpy(),
             f"{_TABLE}.bonus_amount_rmb": bonus.to_numpy(),
         })
+        if len(_PREPARED_CACHE) > 4:
+            _PREPARED_CACHE.clear()
+        _PREPARED_CACHE[cache_key] = prepared
         self._prepared = prepared
         return prepared
 

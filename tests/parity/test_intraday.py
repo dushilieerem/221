@@ -51,3 +51,36 @@ def test_cache_reuses_panel(tmp_path: Path):
     _write_day(tmp_path)
     store = MinuteStore(tmp_path, max_days=1)
     assert store.panel("2025-07-01") is store.panel("2025-07-01")
+
+
+def test_prefetch_matches_direct_reads(tmp_path: Path):
+    _write_day(tmp_path, "2025-07-01")
+    _write_day(tmp_path, "2025-07-02")
+    store = MinuteStore(tmp_path)
+    store.prefetch(
+        [pd.Timestamp("2025-07-01"), pd.Timestamp("2025-07-02")],
+        window=1,
+        workers=1,
+    )
+    try:
+        assert store.price_at("2025-07-01", "09:30", "000001.SZ") == pytest.approx(12.05)
+        assert store.price_at("2025-07-02", "14:50", "600000.SH") == pytest.approx(6.85)
+        frame = store.panel("2025-07-02")
+        assert frame.loc["2025-07-02 09:31:00", ("000001.SZ", "close")] == pytest.approx(12.1)
+    finally:
+        store.close()
+
+
+def test_prefetch_tolerates_missing_day(tmp_path: Path):
+    _write_day(tmp_path, "2025-07-01")
+    store = MinuteStore(tmp_path)
+    store.prefetch(
+        [pd.Timestamp("2025-07-01"), pd.Timestamp("2025-07-02")],
+        window=2,
+        workers=1,
+    )
+    try:
+        assert store.price_at("2025-07-02", "09:30", "000001.SZ") is None
+        assert store.price_at("2025-07-01", "09:30", "000001.SZ") == pytest.approx(12.05)
+    finally:
+        store.close()
