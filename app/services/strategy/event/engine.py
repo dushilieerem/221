@@ -57,6 +57,19 @@ def _row_slice(
     return frame.iloc[lower:upper]
 
 
+def _limit_ratios(columns: pd.Index) -> np.ndarray:
+    """按板块生成涨跌停比例向量（主板 10%、创业板/科创板 20%、北交所 30%）。"""
+
+    ratios = np.full(len(columns), 0.10, dtype=float)
+    for position, column in enumerate(columns):
+        code = str(column).split(".")[0]
+        if code.startswith(("300", "301", "688")):
+            ratios[position] = 0.20
+        elif code.startswith(("4", "8", "920")):
+            ratios[position] = 0.30
+    return ratios
+
+
 class EventBacktestEngine:
     """策略在盘前基于截至前一收盘的数据决策，当日开盘按卖后买成交。"""
 
@@ -69,6 +82,7 @@ class EventBacktestEngine:
         *,
         execution_panels: dict[str, pd.DataFrame] | None = None,
         intraday_price=None,
+        limit_reference_close: pd.DataFrame | None = None,
         first_previous_date: object | None = None,
         active_start: object | None = None,
         etf_symbols: set[str] | None = None,
@@ -158,6 +172,9 @@ class EventBacktestEngine:
         # 时点引擎使用的盘中价格回调：``(date, "HH:MM", symbol) -> price``。
         # 仅 unadjusted 模式启用；缺失时回退到日线 open/close。
         self._intraday_price = intraday_price
+        # 复权撮合时，涨跌停价来自未复权数据；用同日的复权/未复权收盘价比例
+        # 把它换算到成交价口径，避免 adjusted price 与 raw limit 直接比较。
+        self._limit_reference_close = limit_reference_close
         self._current_time: str | None = None
         self._current_date: pd.Timestamp | None = None
         # 聚宽兼容层在回测首日也有 previous_date；原生事件策略保持 None。
@@ -199,110 +216,14 @@ class EventBacktestEngine:
         )
 
     def run(self, strategy) -> EventBacktestResult:
-        if self.config.timed_execution:
-            return self._run_timed(strategy)
-        ledger = _Ledger(cash=self.config.initial_capital)
-        data = DataView(self.panels)
-        orders = OrderService()
-        context = StrategyContext(data, orders, PortfolioView(ledger))
-        context.market = _MarketView(self)
-        context.run_params = self._run_params()
-        strategy.initialize(context)
-        self._reset_order_history()
-        all_orders = self._all_orders
-        fills = self._all_fills
-        events: list[dict[str, object]] = []
-        snapshots: list[PositionSnapshot] = []
-        equity: list[float] = []
+        """唯一的日循环：日频与时点执行只在调度/撮合细节上分支。
 
-        for index, date in enumerate(self.dates):
-            timestamp = pd.Timestamp(date)
-            self._current_date = timestamp
-            self._row_cache.clear()
-            self._price_cache.clear()
-            self._day_code_cache.clear()
-            previous = self._previous_date(index)
-            context.previous_date = previous.date() if previous is not None else None
-            ledger.begin_session()
-            events.extend(self._apply_corporate_adjustments(ledger, index, date))
-            offset = self._visibility_offset()
-            visible = index - offset
-            as_of = (
-                self.dates[visible]
-                if visible >= 0
-                else self._first_previous_date
-            )
-            data.set_as_of(as_of)
-            context.current_dt = timestamp.to_pydatetime()
-            orders.set_current_dt(context.current_dt)
-            events.append({"type": "SESSION_OPEN", "timestamp": context.current_dt})
-
-            for callback in context.schedule.due(timestamp, self.dates):
-                callback(context)
-                events.append({"type": "SCHEDULED_CALLBACK", "timestamp": context.current_dt, "callback": callback.__name__})
-
-            batch = list(orders.pending)
-            orders.pending.clear()
-            all_orders.extend(batch)
-            day_fills, day_events = self._execute_pending(batch, ledger, timestamp)
-            fills.extend(day_fills)
-            events.extend(day_events)
-
-            # 日终强平：放在策略回调与撮合之后，策略当日开盘的卖单先成交，
-            # 这里只处置残余持仓；放在权益计算之前，使当日净值即反映退出。
-            for order, fill in self._liquidate_delisted(ledger, timestamp):
-                all_orders.append(order)
-                fills.append(fill)
-                events.append({
-                    "type": "FORCED_LIQUIDATION",
-                    "timestamp": context.current_dt,
-                    "order_id": order.order_id,
-                    "symbol": order.symbol,
-                    "quantity": fill.quantity,
-                    "price": fill.price,
-                    "reason_code": "DELISTED",
-                })
-
-            total_value = self._portfolio_value(ledger, timestamp)
-            equity.append(total_value)
-            snapshots.append(PositionSnapshot(context.current_dt, ledger.cash, dict(ledger.positions), dict(ledger.sellable), total_value))
-            events.append({"type": "SESSION_CLOSE", "timestamp": context.current_dt})
-
-        return EventBacktestResult(
-            equity_curve=pd.Series(equity, index=self.dates, name="equity"),
-            orders=all_orders,
-            fills=fills,
-            position_snapshots=snapshots,
-            events=events,
-            assumptions={
-                "frequency": "1d",
-                "execution": self.config.execution_timing,
-                "data_visibility": (
-                    "same_close"
-                    if self.config.execution_timing == "same_close"
-                    else "previous_close"
-                ),
-                "delisted_handling": "point_in_time_exclude;force_liquidate_at_transition_close",
-                "limit_price_source": (
-                    "derived_limit_prices"
-                    if "upper_limit" in self.panels
-                    else "computed_prev_close_ratio"
-                ),
-                "price_source": self._execution_price_source,
-                "corporate_action_adjustment": self._corporate_action_adjustment(),
-            },
-        )
-
-    def _run_timed(self, strategy) -> EventBacktestResult:
-        """按时点执行回调与撮合。
-
-        与日频路径的区别：
-        * 09:00 等开盘前的回调只产生订单，统一在 09:30 按开盘价成交；
-        * 09:30–14:59 的每个时点先跑回调、再按该时点价格成交；
-        * 15:00 之后的订单不成交，保留到次日 09:30（复刻聚宽探针观察到的行为）；
-        * 估值仍按当日收盘。
+        * 日频（``timed_execution=False``）：一天一次回调，回调结束后统一撮合；
+        * 时点（``timed_execution=True``）：按注册时点逐点回调与撮合，
+          09:30–14:59 之外产生的订单挂到下一个可成交时点。
         """
 
+        timed = bool(self.config.timed_execution)
         ledger = _Ledger(cash=self.config.initial_capital)
         data = DataView(self.panels)
         orders = OrderService()
@@ -311,13 +232,17 @@ class EventBacktestEngine:
         context.run_params = self._run_params()
         strategy.initialize(context)
 
-        registered = {normalize_time(item) for item in context.schedule.times()}
-        unsupported = sorted(
-            item for item in registered if not re.fullmatch(r"\d{2}:\d{2}", item)
-        )
-        if unsupported:
-            raise ValueError(f"时点引擎不支持的调度时点: {unsupported}")
-        times = sorted({"09:30"} | registered)
+        times: list[str] = []
+        if timed:
+            registered = {
+                normalize_time(item) for item in context.schedule.times()
+            }
+            unsupported = sorted(
+                item for item in registered if not re.fullmatch(r"\d{2}:\d{2}", item)
+            )
+            if unsupported:
+                raise ValueError(f"时点引擎不支持的调度时点: {unsupported}")
+            times = sorted({"09:30"} | registered)
 
         self._reset_order_history()
         all_orders = self._all_orders
@@ -336,37 +261,68 @@ class EventBacktestEngine:
             context.previous_date = previous.date() if previous is not None else None
             ledger.begin_session()
             events.extend(self._apply_corporate_adjustments(ledger, index, date))
-            data.set_as_of(previous)
-            events.append({
-                "type": "SESSION_OPEN",
-                "timestamp": self._at(timestamp, "09:00"),
-            })
 
-            for time in times:
-                self._current_time = time
-                context.current_dt = self._at(timestamp, time)
+            if timed:
+                # 聚宽定时回测的可见数据固定为上一交易日。
+                data.set_as_of(previous)
+                events.append({
+                    "type": "SESSION_OPEN",
+                    "timestamp": self._at(timestamp, "09:00"),
+                })
+                for time in times:
+                    self._current_time = time
+                    context.current_dt = self._at(timestamp, time)
+                    orders.set_current_dt(context.current_dt)
+                    for callback in context.schedule.due_at(timestamp, self.dates, time):
+                        callback(context)
+                        events.append({
+                            "type": "TIMED_CALLBACK",
+                            "timestamp": context.current_dt,
+                            "time": time,
+                            "callback": callback.__name__,
+                        })
+                    if not ("09:30" <= time < "15:00"):
+                        # 开盘前与收盘后的订单都挂起，等下一个可成交时点。
+                        continue
+                    batch = list(orders.pending)
+                    orders.pending.clear()
+                    all_orders.extend(batch)
+                    day_fills, day_events = self._execute_pending(batch, ledger, timestamp)
+                    fills.extend(day_fills)
+                    events.extend(day_events)
+                    self._current_time = None
+                close_dt = self._at(
+                    timestamp, max("15:00", times[-1]) if times else "15:00"
+                )
+            else:
+                offset = self._visibility_offset()
+                visible = index - offset
+                as_of = (
+                    self.dates[visible]
+                    if visible >= 0
+                    else self._first_previous_date
+                )
+                data.set_as_of(as_of)
+                context.current_dt = timestamp.to_pydatetime()
                 orders.set_current_dt(context.current_dt)
-                for callback in context.schedule.due_at(timestamp, self.dates, time):
+                events.append({
+                    "type": "SESSION_OPEN",
+                    "timestamp": context.current_dt,
+                })
+                for callback in context.schedule.due(timestamp, self.dates):
                     callback(context)
                     events.append({
-                        "type": "TIMED_CALLBACK",
+                        "type": "SCHEDULED_CALLBACK",
                         "timestamp": context.current_dt,
-                        "time": time,
                         "callback": callback.__name__,
                     })
-
-                if not ("09:30" <= time < "15:00"):
-                    # 开盘前与收盘后的订单都挂起，等下一个可成交时点。
-                    continue
-
-                self._current_time = time
                 batch = list(orders.pending)
                 orders.pending.clear()
                 all_orders.extend(batch)
                 day_fills, day_events = self._execute_pending(batch, ledger, timestamp)
                 fills.extend(day_fills)
                 events.extend(day_events)
-                self._current_time = None
+                close_dt = timestamp.to_pydatetime()
 
             for order, fill in self._liquidate_delisted(ledger, timestamp):
                 all_orders.append(order)
@@ -381,8 +337,7 @@ class EventBacktestEngine:
                     "reason_code": "DELISTED",
                 })
 
-            close_time = max("15:00", times[-1]) if times else "15:00"
-            context.current_dt = self._at(timestamp, close_time)
+            context.current_dt = close_dt
             total_value = self._portfolio_value(ledger, timestamp)
             equity.append(total_value)
             snapshots.append(PositionSnapshot(
@@ -397,32 +352,46 @@ class EventBacktestEngine:
                 "timestamp": context.current_dt,
             })
 
-        return EventBacktestResult(
-            equity_curve=pd.Series(equity, index=self.dates, name="equity"),
-            orders=all_orders,
-            fills=fills,
-            position_snapshots=snapshots,
-            events=events,
-            assumptions={
-                "frequency": "1d",
+        assumptions = {
+            "frequency": "1d",
+            "delisted_handling": "point_in_time_exclude;force_liquidate_at_transition_close",
+            "limit_price_source": (
+                "derived_limit_prices"
+                if "upper_limit" in self.panels
+                else "computed_prev_close_ratio"
+            ),
+            "price_source": self._execution_price_source,
+            "corporate_action_adjustment": self._corporate_action_adjustment(),
+        }
+        if timed:
+            assumptions.update({
                 "execution": "timed",
                 "time_points": ",".join(times),
                 "data_visibility": "previous_close",
-                "delisted_handling": "point_in_time_exclude;force_liquidate_at_transition_close",
-                "limit_price_source": (
-                    "derived_limit_prices"
-                    if "upper_limit" in self.panels
-                    else "computed_prev_close_ratio"
-                ),
-                "corporate_action_adjustment": self._corporate_action_adjustment(),
-                "price_source": self._execution_price_source,
                 "intraday_price": (
                     "1m"
                     if self._intraday_price is not None
                     and self._execution_price_source == "unadjusted"
                     else "daily_open_close_fallback"
                 ),
-            },
+            })
+        else:
+            assumptions.update({
+                "execution": self.config.execution_timing,
+                "data_visibility": (
+                    "same_close"
+                    if self.config.execution_timing == "same_close"
+                    else "previous_close"
+                ),
+            })
+
+        return EventBacktestResult(
+            equity_curve=pd.Series(equity, index=self.dates, name="equity"),
+            orders=all_orders,
+            fills=fills,
+            position_snapshots=snapshots,
+            events=events,
+            assumptions=assumptions,
         )
 
     @staticmethod
@@ -1059,7 +1028,36 @@ class EventBacktestEngine:
                     high = float(value)
                 else:
                     low = float(value)
+        if self._limit_reference_close is not None and (high is not None or low is not None):
+            scale = self._limit_scale(symbol, date)
+            if scale is not None:
+                if high is not None:
+                    high *= scale
+                if low is not None:
+                    low *= scale
         return high, low
+
+    def _limit_scale(self, symbol: str, date: pd.Timestamp) -> float | None:
+        """复权/未复权收盘价比例；任一缺失时返回 None（保持原值）。"""
+
+        adjusted = self._row_values(self._mark_close, date)
+        reference = self._row_values(self._limit_reference_close, date)
+        if adjusted is None or reference is None:
+            return None
+        adjusted_value = adjusted.get(symbol)
+        reference_value = reference.get(symbol)
+        if (
+            adjusted_value is None
+            or reference_value is None
+            or pd.isna(adjusted_value)
+            or pd.isna(reference_value)
+        ):
+            return None
+        adjusted_value = float(adjusted_value)
+        reference_value = float(reference_value)
+        if adjusted_value <= 0 or reference_value <= 0:
+            return None
+        return adjusted_value / reference_value
 
     def _reject_reason(self, symbol: str, side: str, quantity: int, price: float, ledger: _Ledger, date: pd.Timestamp) -> str | None:
         # 停牌/ST/退市优先按状态字段判断；涨跌停优先按数据侧的
@@ -1517,36 +1515,50 @@ class _MarketView:
         if count is not None:
             # 多取一行用于昨收；count=1 时不必构造整段历史面板。
             close = close.iloc[-(int(count) + 1):]
-        # 行切片之后再投影列，避免每次都对「全历史 × 全市场」做双轴 reindex。
-        previous = close.reindex(columns=pd.Index(symbols)).shift(1)
-        codes = pd.Series(
-            [str(symbol).split(".")[0] for symbol in previous.columns],
-            index=previous.columns,
-        )
-        ratio = pd.Series(0.10, index=previous.columns)
-        ratio[codes.str.startswith(("300", "301", "688"))] = 0.20
-        ratio[codes.str.startswith(("4", "8", "920"))] = 0.30
-        ratio_values = np.broadcast_to(ratio.to_numpy(dtype=float), previous.shape)
-        cached = self._status_matrix("listed_status", ("ST", "*ST"))
-        if cached is not None:
-            block = self._status_frame(
-                cached,
-                symbols,
-                start=start,
-                end=end,
-                count=None if count is None else int(count) + 1,
-            ).reindex(index=previous.index, columns=previous.columns)
-            ratio_values = np.where(
-                block.fillna(False).to_numpy(dtype=bool), 0.05, ratio_values
+        block = close.reindex(columns=pd.Index(symbols))
+        prices = block.to_numpy(dtype=float)
+        previous = np.empty_like(prices)
+        if len(previous):
+            previous[0] = np.nan
+            previous[1:] = prices[:-1]
+        ratios = _limit_ratios(block.columns)
+        st_mask = self._st_mask(block.index, block.columns)
+        upper = field == "high_limit"
+        from app.services.strategy.event import kernels
+
+        if kernels.kernels_enabled():
+            values = kernels.limit_price_values(previous, ratios, st_mask, upper)
+        else:
+            factor = np.where(st_mask, 0.05, ratios)
+            values = np.round(
+                previous * (1.0 + factor if upper else 1.0 - factor), 2
             )
-        prices = previous.to_numpy(dtype=float)
-        factor = 1.0 + ratio_values if field == "high_limit" else 1.0 - ratio_values
-        values = pd.DataFrame(
-            prices * factor, index=previous.index, columns=previous.columns
+        values_frame = pd.DataFrame(
+            values, index=block.index, columns=block.columns
         )
         if count is not None:
-            values = values.iloc[-int(count):]
-        return values.round(2)
+            values_frame = values_frame.iloc[-int(count):]
+        return values_frame
+
+    def _st_mask(
+        self, index: pd.Index, columns: pd.Index
+    ) -> np.ndarray:
+        """对齐 ``listed_status`` 布尔矩阵到给定日期/标的窗口。"""
+
+        mask = np.zeros((len(index), len(columns)), dtype=bool)
+        cached = self._status_matrix("listed_status", ("ST", "*ST"))
+        if cached is None:
+            return mask
+        dates, symbols, matrix = cached
+        rows = dates.get_indexer(index)
+        cols = symbols.get_indexer(columns)
+        rows_ok = rows >= 0
+        cols_ok = cols >= 0
+        if rows_ok.any() and cols_ok.any():
+            mask[np.ix_(rows_ok, cols_ok)] = matrix[
+                np.ix_(rows[rows_ok], cols[cols_ok])
+            ]
+        return mask
 
     def limit_prices(self, symbol: str) -> tuple[float | None, float | None]:
         """当前交易日的涨跌停价。

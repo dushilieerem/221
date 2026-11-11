@@ -207,3 +207,32 @@ def test_etf_sell_is_exempt_from_stamp_tax():
     sells = {fill.symbol: fill for fill in result.fills if fill.side == "sell"}
     assert sells["000001.SZ"].stamp_tax > 0
     assert sells["511880.SH"].stamp_tax == 0.0
+
+
+def test_limit_from_panels_scales_adjusted_price_to_unadjusted_limit():
+    """复权撮合时，未复权涨跌停价要按当日复权/未复权收盘比例换算。"""
+
+    symbols, dates, _ = _panels()
+    adjusted = pd.DataFrame(
+        {symbol: [20.0] * len(dates) for symbol in symbols}, index=dates
+    )
+    panels = {field: adjusted.copy() for field in ("open", "high", "low", "close")}
+    panels["upper_limit"] = pd.DataFrame(
+        {symbol: [11.0] * len(dates) for symbol in symbols}, index=dates
+    )
+    panels["lower_limit"] = pd.DataFrame(
+        {symbol: [9.0] * len(dates) for symbol in symbols}, index=dates
+    )
+    reference = pd.DataFrame(
+        {symbol: [10.0] * len(dates) for symbol in symbols}, index=dates
+    )
+    config = EventBacktestConfig(execution_price_source="adjusted")
+
+    scaled = EventBacktestEngine(
+        panels, config, limit_reference_close=reference
+    )
+    # 20 / 10 = 2：未复权 11 / 9 换算成复权口径 22 / 18。
+    assert scaled._limit_from_panels("000001.SZ", dates[0]) == (22.0, 18.0)
+
+    raw = EventBacktestEngine(panels, config)
+    assert raw._limit_from_panels("000001.SZ", dates[0]) == (11.0, 9.0)
