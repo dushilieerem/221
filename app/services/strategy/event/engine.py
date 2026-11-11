@@ -82,6 +82,7 @@ class EventBacktestEngine:
         *,
         execution_panels: dict[str, pd.DataFrame] | None = None,
         intraday_price=None,
+        limit_reference_close: pd.DataFrame | None = None,
         first_previous_date: object | None = None,
         active_start: object | None = None,
         etf_symbols: set[str] | None = None,
@@ -171,6 +172,9 @@ class EventBacktestEngine:
         # 时点引擎使用的盘中价格回调：``(date, "HH:MM", symbol) -> price``。
         # 仅 unadjusted 模式启用；缺失时回退到日线 open/close。
         self._intraday_price = intraday_price
+        # 复权撮合时，涨跌停价来自未复权数据；用同日的复权/未复权收盘价比例
+        # 把它换算到成交价口径，避免 adjusted price 与 raw limit 直接比较。
+        self._limit_reference_close = limit_reference_close
         self._current_time: str | None = None
         self._current_date: pd.Timestamp | None = None
         # 聚宽兼容层在回测首日也有 previous_date；原生事件策略保持 None。
@@ -1024,7 +1028,36 @@ class EventBacktestEngine:
                     high = float(value)
                 else:
                     low = float(value)
+        if self._limit_reference_close is not None and (high is not None or low is not None):
+            scale = self._limit_scale(symbol, date)
+            if scale is not None:
+                if high is not None:
+                    high *= scale
+                if low is not None:
+                    low *= scale
         return high, low
+
+    def _limit_scale(self, symbol: str, date: pd.Timestamp) -> float | None:
+        """复权/未复权收盘价比例；任一缺失时返回 None（保持原值）。"""
+
+        adjusted = self._row_values(self._mark_close, date)
+        reference = self._row_values(self._limit_reference_close, date)
+        if adjusted is None or reference is None:
+            return None
+        adjusted_value = adjusted.get(symbol)
+        reference_value = reference.get(symbol)
+        if (
+            adjusted_value is None
+            or reference_value is None
+            or pd.isna(adjusted_value)
+            or pd.isna(reference_value)
+        ):
+            return None
+        adjusted_value = float(adjusted_value)
+        reference_value = float(reference_value)
+        if adjusted_value <= 0 or reference_value <= 0:
+            return None
+        return adjusted_value / reference_value
 
     def _reject_reason(self, symbol: str, side: str, quantity: int, price: float, ledger: _Ledger, date: pd.Timestamp) -> str | None:
         # 停牌/ST/退市优先按状态字段判断；涨跌停优先按数据侧的

@@ -84,6 +84,8 @@ Web 端需要展示调仓或成交过程时，使用 `include_execution_timeline
 | `adjusted`（默认） | 复权面板 | 复权面板 |
 | `unadjusted` | 复权面板 | `unadjusted_price` 未复权面板 |
 
+`adjusted` 下涨跌停价仍来自未复权数据，引擎按当日 `复权收盘 / 未复权收盘` 的比例把涨跌停价换算到成交价口径后再判断（否则复权价会被误判为涨停）；缺少未复权收盘数据时保持原值比较。
+
 `unadjusted` 适用于需要真实股数、真实现金和真实整手取整的回测。由于未复权价格在除权日会跳空，引擎在除权日开盘前按 `hfq_close / unadjusted_close` 的每日比例缩放持仓股数，取整余数折算现金；这等价于“分红送转全部再投资”，不需要额外的公司行为数据。该模式仅支持 `engine_mode="event"`，响应 `meta.execution_price_source` 与 `assumptions.price_source` 会回显实际口径。
 
 ## 时点调度

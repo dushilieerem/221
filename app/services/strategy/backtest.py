@@ -789,6 +789,33 @@ def _run_event_strategy_backtest(
                 for field in ("open", "close")
             }
 
+        # 复权撮合时，涨跌停价是未复权口径；读取同日未复权收盘价做比例换算，
+        # 否则 adjusted price 会被误判成 LIMIT_UP/LIMIT_DOWN。
+        limit_reference_close = None
+        if (
+            req.execution_price_source == "adjusted"
+            and data_engine is not None
+            and ("upper_limit" in event_panels or "lower_limit" in event_panels)
+        ):
+            from app.services.paper_trading.price_view import load_unadjusted_panels
+
+            try:
+                raw_close = load_unadjusted_panels(
+                    data_engine,
+                    start=panel_start,
+                    end=req.end,
+                    symbols=raw_symbols,
+                    fields=("close",),
+                )["close"]
+                close_panel = event_panels["close"]
+                limit_reference_close = _rename_symbols(
+                    raw_close, symbol_mapping
+                ).reindex(
+                    index=close_panel.index, columns=close_panel.columns
+                ).ffill()
+            except FileNotFoundError:
+                limit_reference_close = None
+
         # 策略显式声明的 ETF（如货币基金 511880）单独并入面板：ETF 不在
         # 股票池数据里，来自视图的 free/etf_daily，按 symbol + time join。
         etf_symbols: set[str] = set()
@@ -874,6 +901,7 @@ def _run_event_strategy_backtest(
             ),
             execution_panels=execution_panels,
             intraday_price=intraday_price,
+            limit_reference_close=limit_reference_close,
             first_previous_date=first_previous_date,
             active_start=active_start,
             etf_symbols=etf_symbols,
