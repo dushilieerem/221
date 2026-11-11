@@ -97,8 +97,8 @@ python -m app.cli.joinquant_parity compare --case fixed_basket_hold
 
 | 用例 | 资金 | 持仓重合（按金标 / 按我方） | 累计收益（聚宽 / SVQuant） | 报告 |
 |---|---|---|---|---|
-| `dividend_v3_10w` | 10 万 | 90.6% / 90.1%（2026-11-09 重跑；单季口径与送股换算修复前 59.5% / 56.9%） | 397.5% / **356.5%**（20% 红利税后；登记日/B 股等修复与分钟数据待重跑） | `output/joinquant-parity/dividend_v3_10w/20261109T054438Z/report.md` |
-| `dividend_v3_100w` | 100 万 | 79.1% / 90.0%（修复前 59.2% / 56.9%） | 568.6% / 447.2% | `output/joinquant-parity/dividend_v3_100w/20261105T035535Z/report.md` |
+| `dividend_v3_10w` | 10 万 | 90.3% / 88.5%（2026-11-10 含 QuantDB 1m 重跑；修复前 59.5% / 56.9%） | 397.5% / **332.9%**（20% 红利税 + 1m 成交） | `output/joinquant-parity/dividend_v3_10w/20261110T152355Z/report.md` |
+| `dividend_v3_100w` | 100 万 | 89.8% / 88.4%（2026-11-10 含 QuantDB 1m 重跑；修复前 59.2% / 56.9%） | 568.6% / **381.8%**（20% 红利税 + 1m 成交） | `output/joinquant-parity/dividend_v3_100w/20261110T152355Z/report.md` |
 | `pb_v3` | 10 万 | 70.5% / 73.4%（ROA 修正前 56.3% / 60.1%） | 518.4% / 402.5% | `output/joinquant-parity/pb_v3/20261105T041609Z/report.md` |
 | `fcf_v3` | 10 万 | 76.8% / 84.1%（行业剔除修复前 57.7% / 65.8%） | 573.0% / 343.9% | `output/joinquant-parity/fcf_v3/20261104T075737Z/report.md` |
 
