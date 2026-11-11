@@ -99,7 +99,7 @@ http://<host>:<server.port>/api
 
 单次策略端点虽然由后台 Manager Worker 执行，但 HTTP 请求会等待并同步返回最终响应。
 
-长任务使用 `POST /api/backtest/strategy/async`：请求体与同步端点一致，返回 `202` + `run_id` + `poll_url`，结果保留 24 小时；`DELETE` 同一路径请求取消。聚宽策略调用了不支持的 API 时，同步/异步结果都以 `error_code=unsupported_api` 结构化返回，提交前可用 `GET /api/strategy-capabilities` 预检。
+长任务使用 `POST /api/backtest/strategy/async`：请求体与同步端点一致，返回 `202` + `run_id` + `poll_url`，结果保留 24 小时；`DELETE` 同一路径请求取消。查询已回收的 `run_id` 返回 `404` 且 `detail.status="expired"`，无效或重启前丢失的 `run_id` 返回 `404` 且 `detail.status="unknown"`；排队/运行中重复提交同一请求体复用原 `run_id`。聚宽策略调用了不支持的 API 时，同步/异步结果都以 `error_code=unsupported_api` 结构化返回，提交前可用 `GET /api/strategy-capabilities` 预检。
 
 ---
 
