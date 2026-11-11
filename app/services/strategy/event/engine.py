@@ -109,6 +109,9 @@ class EventBacktestEngine:
         # 盘中价缓存：同一时点、同一标的会被 portfolio.positions 反复取价，
         # 分钟面板命中后不再重复走时间点逻辑；逐日清空。
         self._price_cache: dict[tuple[pd.Timestamp, str, str], float | None] = {}
+        # 当日停牌/ST 标的集合：get_current_data 会逐标的检查，按天缓存成
+        # 集合后是 O(1) 成员判断，避免每次走文本比较。
+        self._day_code_cache: dict[tuple[str, object], frozenset[str]] = {}
         # 状态面板（ST / 停牌）的布尔矩阵缓存：宽表字符串比较按列很慢，
         # 首次使用时整表向量化一次，之后每天只做 numpy 切片。
         self._status_matrix_cache: dict[
@@ -217,6 +220,7 @@ class EventBacktestEngine:
             self._current_date = timestamp
             self._row_cache.clear()
             self._price_cache.clear()
+            self._day_code_cache.clear()
             previous = self._previous_date(index)
             context.previous_date = previous.date() if previous is not None else None
             ledger.begin_session()
@@ -327,6 +331,7 @@ class EventBacktestEngine:
             self._current_date = timestamp
             self._row_cache.clear()
             self._price_cache.clear()
+            self._day_code_cache.clear()
             previous = self._previous_date(index)
             context.previous_date = previous.date() if previous is not None else None
             ledger.begin_session()
@@ -1345,6 +1350,31 @@ class _MarketView:
         if rows.size and present.any():
             block[:, present] = matrix[np.ix_(rows, width[present])]
         return pd.DataFrame(block, index=positions, columns=symbols)
+
+    def paused_codes(self) -> frozenset[str]:
+        return self._day_codes("up_and_down_status", "停牌")
+
+    def st_codes(self) -> frozenset[str]:
+        return self._day_codes("listed_status", ("ST", "*ST"))
+
+    def _day_codes(self, panel: str, values) -> frozenset[str]:
+        engine = self._engine
+        date = engine._current_date
+        key = (panel, values)
+        cached = engine._day_code_cache.get(key)
+        if cached is not None:
+            return cached
+        matrix = self._status_matrix(panel, values)
+        if matrix is None or date is None:
+            result: frozenset[str] = frozenset()
+        else:
+            index, columns, block = matrix
+            if date not in index:
+                result = frozenset()
+            else:
+                result = frozenset(columns[block[index.get_loc(date)]])
+        engine._day_code_cache[key] = result
+        return result
 
     def current_price(self, symbol: str) -> float | None:
         engine = self._engine

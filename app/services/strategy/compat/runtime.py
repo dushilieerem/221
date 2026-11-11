@@ -963,11 +963,17 @@ class _SecurityData:
 
     @property
     def paused(self) -> bool:
+        codes = getattr(self._market, "paused_codes", None)
+        if callable(codes):
+            return self._symbol in codes()
         status = self._market.status_text(self._symbol) or ""
         return "停牌" in status
 
     @property
     def is_st(self) -> bool:
+        codes = getattr(self._market, "st_codes", None)
+        if callable(codes):
+            return self._symbol in codes()
         return (self._market.listed_status(self._symbol) or "") in {"ST", "*ST"}
 
     @property
