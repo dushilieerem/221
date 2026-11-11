@@ -265,13 +265,19 @@ class ExperimentManager:
             self._inflight.pop(run.key, None)
 
     def _prune_finished_locked(self, now: float | None = None) -> None:
-        cutoff = (time.time() if now is None else now) - self._FINISHED_RETENTION_SECONDS
+        current = time.time() if now is None else now
         for run_id in [
             run_id
             for run_id, run in self._runs.items()
             if run.status in self._TERMINAL_STATUSES
             and run.finished_at is not None
-            and run.finished_at <= cutoff
+            and run.finished_at
+            <= current
+            - float(
+                run.metadata.get(
+                    "retention_seconds", self._FINISHED_RETENTION_SECONDS
+                )
+            )
         ]:
             run = self._runs.pop(run_id, None)
             if run is not None:

@@ -956,7 +956,17 @@ def _run_event_strategy_backtest(
             import traceback
 
             traceback.print_exc()
-        return StrategyBacktestResponse(error=f"{type(exc).__name__}: {exc}")
+        error_code = None
+        unsupported_api = None
+        # 只有聚宽方言下的 NotImplementedError 才表示「调用了不支持的 API」。
+        if isinstance(exc, NotImplementedError) and req.strategy_dialect == "joinquant":
+            error_code = "unsupported_api"
+            unsupported_api = str(exc)
+        return StrategyBacktestResponse(
+            error=f"{type(exc).__name__}: {exc}",
+            error_code=error_code,
+            unsupported_api=unsupported_api,
+        )
 
 
 __all__ = ["run_strategy_backtest", "_run_event_strategy_backtest"]

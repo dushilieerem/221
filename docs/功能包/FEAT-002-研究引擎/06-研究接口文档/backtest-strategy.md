@@ -388,6 +388,8 @@ Web 端需要展示调仓或成交过程时，使用 `include_execution_timeline
 | `execution_timeline` | object[]/`null` | 仅当请求 `include_execution_timeline=true` 时返回，条目为 `{timestamp, type, payload}`，按执行顺序排列；Web 应优先消费此字段。没有可序列化的调仓/执行记录时为 `null`。 |
 | `orders` / `fills` / `event_positions` / `events` / `assumptions` | object[]/object/`null` | 仅事件模式返回：订单、成交、账户快照、调度审计轨迹和执行假设。 |
 | `error` | string/`null` | 业务执行错误信息；成功时为 `null`。 |
+| `error_code` | string/`null` | 机器可读的错误分类。目前只有 `unsupported_api`：聚宽策略调用了兼容层未实现的 API。其他错误为 `null`。 |
+| `unsupported_api` | string/`null` | 仅 `error_code=unsupported_api` 时有值，给出具体 API 与原因，便于调用方在提交前做预检。 |
 
 当使用资产快照时，`meta.universe` 为资产 ID，`meta.universe_asset`、`meta.benchmark_asset` 返回解析版本、内容哈希和成分数量。事件驱动模式当前拒绝 `universe_snapshot`、`benchmark_snapshot`，以避免错误宣称已经支持同一资产接入。
 
@@ -444,7 +446,19 @@ Web 端需要展示调仓或成交过程时，使用 `include_execution_timeline
   "event_positions": null,
   "events": null,
   "assumptions": null,
-  "error": "ValueError: 策略代码必须且只能定义一个包含 generate_signals 方法的类"
+  "error": "ValueError: 策略代码必须且只能定义一个包含 generate_signals 方法的类",
+  "error_code": null,
+  "unsupported_api": null
+}
+```
+
+聚宽策略调用了不支持的 API 时，`error_code` 为 `unsupported_api`，`unsupported_api` 给出具体原因（如 `兼容层不支持 get_call_auction：集合竞价数据未发布`）；调用方据此提示用户改写代码，而不是把所有失败都当成数据或代码语法错误。
+
+```json
+{
+  "error": "NotImplementedError: 兼容层不支持 get_call_auction：集合竞价数据未发布",
+  "error_code": "unsupported_api",
+  "unsupported_api": "兼容层不支持 get_call_auction：集合竞价数据未发布"
 }
 ```
 
@@ -488,3 +502,59 @@ Web 端需要展示调仓或成交过程时，使用 `include_execution_timeline
 ### 聚宽行情读取（`get_price`）
 
 - 默认 `skip_paused=False`，与聚宽一致：停牌日保留在时间轴上，价格用前收盘价填充（由行情源提供），`volume`/`amount`（`money`）填 0；`skip_paused=True` 时剔除停牌行。否则策略按 `count` 或窗口统计成交额时会把停牌日算丢，导致流动性过滤误杀停牌股。
+
+## 异步提交（202 + 轮询）
+
+聚宽策略回测通常要跑几十分钟到数小时，超过 Web 网关的同步超时。需要等待长任务时改用异步接口；请求体与 `POST /api/backtest/strategy` 完全一致。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/backtest/strategy/async` | 提交任务，立即返回 `202` |
+| GET | `/api/backtest/strategy/async/{run_id}` | 查询状态，终态时带上完整结果 |
+| DELETE | `/api/backtest/strategy/async/{run_id}` | 请求取消；排队中的任务直接取消，运行中的只记录取消意图 |
+
+提交响应：
+
+```json
+{
+  "run_id": "6f0f2a0b6b4f0f8f2f5a1f2c3d4e5f",
+  "status": "queued",
+  "poll_url": "/api/backtest/strategy/async/6f0f2a0b6b4f0f8f2f5a1f2c3d4e5f"
+}
+```
+
+同时返回 `Location` 头，值与 `poll_url` 相同。轮询响应的字段固定为 `run_id`、`status`、`created_at`、`started_at`、`finished_at`、`cancel_requested`、`error`、`result`；`status` 取 `queued`/`running`/`succeeded`/`failed`/`cancelled`，`result` 是同步接口的完整响应体（含 `metrics`、`equity_curve`、`orders`、`fills`、`error_code` 等）。
+
+约定：
+
+- 策略任务的结果保留 **24 小时**，与同步接口的 60 秒不同；过期后轮询返回 `404`。
+- `run_id` 是进程内任务 ID，服务重启即失效；跨重启的历史归档由调用方自行保存结果。
+- 队列满返回 `429`（带 `Retry-After`），Manager 关闭返回 `503`。
+- 上游网关不要为 `POST .../async` 设置长超时；按 `poll_url` 轮询，建议 1–5 秒间隔。
+
+## 能力清单（提交前预检）
+
+`GET /api/strategy-capabilities` 返回兼容层支持的方言、引擎模式、频率、价格来源以及 API 支持/不支持清单。响应不依赖数据引擎，服务刚启动时也可用；能读到数据引擎时附带 `release_id`、`data_version`、`data_dir`。
+
+```json
+{
+  "version": "2026-11-11",
+  "dialects": {
+    "native": {"engine_modes": ["vectorized", "event"]},
+    "joinquant": {
+      "engine_modes": ["event"],
+      "frequency": ["1d"],
+      "timed_execution": true,
+      "price_sources": ["unadjusted"],
+      "supported_apis": ["g", "log", "run_daily", "get_price", "..."],
+      "unsupported_apis": [
+        {"api": "get_call_auction", "reason": "集合竞价数据未发布"},
+        {"api": "get_price(frequency='1m')", "reason": "分钟数据仅供 timed_execution 内部使用"}
+      ]
+    }
+  },
+  "data": {"release_id": "39e86da5...", "data_version": "...", "data_dir": "/data/marketdata"}
+}
+```
+
+WebApp 应在策略创建页保存或缓存该清单，提交前对源码做粗检；`unsupported_apis` 中的 API 即使漏检也会在回测响应里以 `error_code=unsupported_api` 结构化返回。

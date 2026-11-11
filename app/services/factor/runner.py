@@ -781,13 +781,22 @@ def _strategy_task_key(req: StrategyBacktestRequest) -> str:
 def submit_strategy_backtest(
     req: StrategyBacktestRequest,
     manager: ExperimentManager,
+    *,
+    retention_seconds: float | None = None,
 ) -> ExperimentHandle[StrategyBacktestResponse]:
-    """把策略回测提交给指定的应用级 ``ExperimentManager``。"""
+    """把策略回测提交给指定的应用级 ``ExperimentManager``。
+
+    ``retention_seconds`` 只影响任务结束后结果的保留时间；异步接口传更长的
+    值，避免调用方还没轮询到结果就被回收。
+    """
+    metadata = {"type": "strategy", "engine_mode": req.engine_mode}
+    if retention_seconds is not None:
+        metadata["retention_seconds"] = float(retention_seconds)
     return manager.submit(
         StrategyExperiment(req),
         key=_strategy_task_key(req),
         lane="interactive",
-        metadata={"type": "strategy", "engine_mode": req.engine_mode},
+        metadata=metadata,
     )
 
 

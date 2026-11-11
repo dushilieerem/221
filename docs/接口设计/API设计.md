@@ -61,6 +61,10 @@ http://<host>:<server.port>/api
 | GET | `/api/backtest/factor/{run_id}` | 查询因子任务状态和结果 | [因子回测 API](../功能包/FEAT-002-研究引擎/06-研究接口文档/backtest-factor.md) |
 | DELETE | `/api/backtest/factor/{run_id}` | 请求取消因子任务 | [因子回测 API](../功能包/FEAT-002-研究引擎/06-研究接口文档/backtest-factor.md) |
 | POST | `/api/backtest/strategy` | 执行策略回测并同步返回结果 | [策略回测 API](../功能包/FEAT-002-研究引擎/06-研究接口文档/backtest-strategy.md) |
+| POST | `/api/backtest/strategy/async` | 异步提交策略回测，返回 `202` 和任务 ID | [策略回测 API](../功能包/FEAT-002-研究引擎/06-研究接口文档/backtest-strategy.md#异步提交202--轮询) |
+| GET | `/api/backtest/strategy/async/{run_id}` | 查询策略任务状态和结果 | 同上 |
+| DELETE | `/api/backtest/strategy/async/{run_id}` | 请求取消策略任务 | 同上 |
+| GET | `/api/strategy-capabilities` | 聚宽兼容层能力清单（方言/引擎模式/支持与不支持的 API） | [策略回测 API](../功能包/FEAT-002-研究引擎/06-研究接口文档/backtest-strategy.md#能力清单提交前预检) |
 
 ### 模拟盘结算（内部）
 
@@ -94,6 +98,8 @@ http://<host>:<server.port>/api
 4. 不将进程内单次任务 ID 当作跨服务重启的持久历史 ID。
 
 单次策略端点虽然由后台 Manager Worker 执行，但 HTTP 请求会等待并同步返回最终响应。
+
+长任务使用 `POST /api/backtest/strategy/async`：请求体与同步端点一致，返回 `202` + `run_id` + `poll_url`，结果保留 24 小时；`DELETE` 同一路径请求取消。聚宽策略调用了不支持的 API 时，同步/异步结果都以 `error_code=unsupported_api` 结构化返回，提交前可用 `GET /api/strategy-capabilities` 预检。
 
 ---
 

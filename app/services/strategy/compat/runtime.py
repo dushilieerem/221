@@ -823,6 +823,10 @@ class JoinQuantRuntime:
     def inout_cash(self, *args: Any, **kwargs: Any):
         raise NotImplementedError("兼容层不支持资金划转")
 
+    def get_call_auction(self, *args: Any, **kwargs: Any):
+        # 显式桩：让调用方拿到「不支持」的结构化错误，而不是 NameError。
+        raise NotImplementedError("兼容层不支持 get_call_auction：集合竞价数据未发布")
+
     def get_trades(self, *args: Any, **kwargs: Any):
         """聚宽成交查询；当前仅用于日志打印，返回空映射。"""
 
@@ -878,6 +882,7 @@ class JoinQuantRuntime:
             "get_open_orders": self.get_open_orders,
             "get_trades": self.get_trades,
             "inout_cash": self.inout_cash,
+            "get_call_auction": self.get_call_auction,
             "finance": self.finance,
             "query": query,
             "valuation": valuation,
