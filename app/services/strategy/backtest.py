@@ -820,11 +820,14 @@ def _run_event_strategy_backtest(
                     )
 
         intraday_price = None
+        intraday_store = None
+        prefetch_dates = None
         data_dir = getattr(data_engine, "data_dir", None)
         if req.timed_execution and data_dir is not None:
             from app.services.data.intraday import MinuteStore
 
             store = MinuteStore(data_dir)
+            intraday_store = store
 
             def _intraday_price(date, time, symbol):
                 # 分钟数据缺失（例如 2025-01-15 之前）时回退到日线近似。
@@ -835,11 +838,21 @@ def _run_event_strategy_backtest(
 
             intraday_price = _intraday_price
 
+            # 单日分钟文件的 parquet 页脚解析约 0.4 秒，逐日串行会占到
+            # 事件回测总耗时的三成以上；后台按交易日顺序预读，与策略计算重叠。
+            close_panel = event_panels.get("close")
+            if close_panel is not None:
+                trading_dates = close_panel.loc[
+                    pd.Timestamp(req.start) : pd.Timestamp(req.end)
+                ].index
+                if len(trading_dates) > 1:
+                    prefetch_dates = trading_dates
+
         # 聚宽首日也有 previous_date；引擎从预热面板取真实上一交易日。
         first_previous_date = None
         active_start = req.start if warmup else None
 
-        result = EventBacktestEngine(
+        engine = EventBacktestEngine(
             event_panels,
             EventBacktestConfig(
                 initial_capital=req.initial_capital,
@@ -860,7 +873,14 @@ def _run_event_strategy_backtest(
             active_start=active_start,
             etf_symbols=etf_symbols,
             symbol_aliases=etf_aliases,
-        ).run(strategy)
+        )
+        try:
+            if intraday_store is not None and prefetch_dates is not None:
+                intraday_store.prefetch(prefetch_dates)
+            result = engine.run(strategy)
+        finally:
+            if intraday_store is not None:
+                intraday_store.close()
         equity = result.equity_curve
         metrics = metrics_to_dict(MetricEngine().calculate_all(MetricContext(
             equity_curve=equity, returns=result.returns, periods_per_year=252,
